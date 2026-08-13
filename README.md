@@ -273,9 +273,9 @@ applications, a modern SaaS stack, and an AI retrieval pipeline. Browse them at
 | Edition | For |
 |---|---|
 | **Community** | Free on the web app, every feature, up to 3 projects, no credit card. Your AI does the building over MCP. |
-| **Team** | Self-hosted in your own environment: unlimited projects, multiple users, your data residency. |
-| **Enterprise** | Custom user counts, deployment model, model connectivity, and support. |
-| **Government** | Compliant cloud enclaves, government-specific catalog additions, a compliance package builder, and open-weight model support. |
+| **Team** | Managed and unlimited projects, up to 5 users in a team |
+| **Enterprise** | Custom user counts, deployment model for hosting in customer environment, data sovereignty, model connectivity, and support. |
+| **Government** | Compliant cloud enclaves, government-specific node catalog additions with interfaces controlled at CUI or higher, a compliance package builder, and open-weight model support. |
 
 See [nodespec.io/pricing](https://nodespec.io/pricing) for current details.
 
