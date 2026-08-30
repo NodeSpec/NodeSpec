@@ -118,6 +118,9 @@ services:
       DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
       DB_ENC_KEY: supabaserealtime
       API_JWT_SECRET: ${JWT_SECRET}
+      # Hard-required by realtime v2.102+ (fetch_env! — cold-boot find
+      # 2026-09-02); the metrics endpoint is unused here but must be keyed.
+      METRICS_JWT_SECRET: ${JWT_SECRET}
       SECRET_KEY_BASE: ${SECRET_KEY_BASE}
       ERL_AFLAGS: -proto_dist inet_tcp
       DNS_NODES: "''"
@@ -156,7 +159,10 @@ services:
     depends_on:
       db-init:
         condition: service_completed_successfully
-    command: ["start", "--main-service", "/home/deno/functions/main"]
+    # The router lives BESIDE the read-only functions mount, not inside it —
+    # Docker cannot create a mountpoint within an :ro filesystem
+    # (live-caught 2026-09-02, first clean cold boot).
+    command: ["start", "--main-service", "/home/deno/main"]
     environment:
       # Runtime-internal URL (server-to-server); the PUBLIC origin the
       # user's browser needs rides PUBLIC_SUPABASE_URL below.
@@ -175,7 +181,7 @@ services:
       STRIPE_SECRET_KEY: sk_test_dummy_never_called_selfhost
     volumes:
       - ../../supabase/functions:/home/deno/functions:ro
-      - ./functions-main:/home/deno/functions/main:ro
+      - ./functions-main:/home/deno/main:ro
       - deno-cache:/root/.cache/deno
 
   frontend:

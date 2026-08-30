@@ -29,7 +29,11 @@ SQL
 # baseline may lack (live-caught 2026-09-02: the image ships auth.uid() but
 # not auth.jwt(), so the squashed schema died at its first auth.jwt()
 # reference). Create only what is MISSING — never replace what the image or
-# a newer GoTrue owns — using the canonical Supabase definitions.
+# a newer GoTrue owns — using the canonical Supabase definitions. Ownership
+# MUST land on supabase_auth_admin: GoTrue's own migration history
+# CREATE-OR-REPLACEs these functions as that role, and a function owned by
+# anyone else fatals its boot with "must be owner" (second cold-boot find
+# 2026-09-02).
 echo "[nodespec-init] ensuring auth helper functions"
 "${PSQL_ADMIN[@]}" <<'SQL'
 DO $do$
@@ -43,6 +47,7 @@ BEGIN
           nullif(current_setting('request.jwt.claims', true), '')
         )::jsonb
       $f$;
+    ALTER FUNCTION auth.jwt() OWNER TO supabase_auth_admin;
   END IF;
   IF to_regprocedure('auth.uid()') IS NULL THEN
     CREATE FUNCTION auth.uid() RETURNS uuid
@@ -53,6 +58,7 @@ BEGIN
           (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
         )::uuid
       $f$;
+    ALTER FUNCTION auth.uid() OWNER TO supabase_auth_admin;
   END IF;
   IF to_regprocedure('auth.role()') IS NULL THEN
     CREATE FUNCTION auth.role() RETURNS text
@@ -63,6 +69,7 @@ BEGIN
           (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role')
         )::text
       $f$;
+    ALTER FUNCTION auth.role() OWNER TO supabase_auth_admin;
   END IF;
   IF to_regprocedure('auth.email()') IS NULL THEN
     CREATE FUNCTION auth.email() RETURNS text
@@ -73,6 +80,7 @@ BEGIN
           (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'email')
         )::text
       $f$;
+    ALTER FUNCTION auth.email() OWNER TO supabase_auth_admin;
   END IF;
 END
 $do$;

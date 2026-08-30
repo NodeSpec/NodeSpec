@@ -39,7 +39,11 @@ describe('community compose — stack coherence', () => {
     ]) {
       expect(compose, `missing functions env: ${line}`).toContain(line);
     }
-    expect(compose).toContain('"start", "--main-service", "/home/deno/functions/main"');
+    // Router mounts BESIDE the :ro functions tree — a mountpoint inside a
+    // read-only mount is uncreatable (cold-boot find 2026-09-02).
+    expect(compose).toContain('"start", "--main-service", "/home/deno/main"');
+    expect(compose).toContain('./functions-main:/home/deno/main:ro');
+    expect(compose).not.toContain(':/home/deno/functions/main');
   });
 
   it('db-init applies supabase/migrations exactly once and never resets data', () => {
@@ -52,6 +56,12 @@ describe('community compose — stack coherence', () => {
     expect(initScript).toContain("to_regprocedure('auth.jwt()')");
     expect(initScript).toContain("to_regprocedure('auth.uid()')");
     expect(initScript).toContain('-1 -f');
+    // Helpers must be OWNED by supabase_auth_admin — GoTrue's migrations
+    // CREATE-OR-REPLACE them as that role and fatal on any other owner
+    // (second cold-boot find 2026-09-02).
+    expect(initScript.match(/OWNER TO supabase_auth_admin/g)?.length).toBe(4);
+    // Realtime v2.102+ hard-requires the metrics key.
+    expect(compose).toContain('METRICS_JWT_SECRET: ${JWT_SECRET}');
     // Role passwords must align with .env or every sibling service 401s.
     for (const role of ['authenticator', 'supabase_auth_admin', 'supabase_storage_admin']) {
       expect(initScript).toContain(`ALTER USER ${role} WITH PASSWORD`);
@@ -70,6 +80,11 @@ describe('community compose — stack coherence', () => {
     // answer these paths.
     expect(nginx).toContain('oauth-authorization-server|oauth-protected-resource');
     expect(nginx).toContain('/mcp-server/.well-known/$1');
+    // Upstreams resolve at REQUEST time (Docker DNS + variable proxy_pass):
+    // a literal hostname resolves at startup, and nginx refuses to boot
+    // while any sibling is still coming up (cold-boot find 2026-09-02).
+    expect(nginx).toContain('resolver 127.0.0.11');
+    expect(nginx).not.toMatch(/proxy_pass http:\/\//);
   });
 
   it('the main router spawns per-function workers with full env passthrough', () => {
