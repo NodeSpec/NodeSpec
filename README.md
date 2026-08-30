@@ -1,74 +1,111 @@
 # NodeSpec Community Edition
 
-**Spec-driven development with an evidence loop — architecture your AI agents
-can read, write, and prove things against.**
+NodeSpec is a visual specification and architecture tool for software built
+with AI assistants. You design the system on a canvas, attach requirements and
+acceptance criteria, and connect the AI you already use. Your assistant reads
+the spec over [MCP](https://modelcontextprotocol.io), proposes architecture
+changes as patches you review in the app, and reports test results back as
+evidence. Acceptance criteria only count as met when evidence says so.
 
-NodeSpec turns a product spec into a living architecture: requirements map to
-nodes on a canvas, contracts define every interaction, tests bind to
-acceptance criteria, and the whole model is served to AI agents over
-[MCP](https://modelcontextprotocol.io) — 30 tools that let your assistant
-read the spec, propose architecture as reviewable patches, and report test
-evidence back into the model. You review and approve in the app; the agent
-does the legwork; the evidence trail shows what's actually proven.
+NodeSpec runs no model of its own. It stores the plan, serves each task's
+context to your AI, and keeps the evidence trail.
 
-This repository is the **complete self-host container** under Apache-2.0:
-frontend, single-origin gateway, Postgres schema, auth, realtime, storage,
-edge functions, the full MCP server, the evidence pipeline, gitops, and a
-curated starter technology catalog. One VM, one bootstrap script, unlimited
-projects.
+This repository is the complete self-host package under Apache-2.0: frontend,
+Postgres schema, auth, edge functions, the MCP server, git integration, and a
+starter technology catalog. It runs on one machine with Docker, works fully
+offline, and has no project limit.
 
-## Quick start
+## Prerequisites
 
-Prerequisites: Docker + the Supabase CLI (pinned install steps, checksums
-included, in [`deploy/selfhost/README.md`](deploy/selfhost/README.md)).
+- Docker Engine or Docker Desktop, running
+- The [Supabase CLI](https://supabase.com/docs/guides/local-development/cli/getting-started)
+- Git
+- Roughly 10 GB of free disk for container images, and 8 GB of RAM
+
+The bootstrap script is a bash script. On Linux and macOS, run it in your
+normal shell. On Windows, run everything inside WSL2 or a Linux container
+under Docker Desktop.
+
+## Install
+
+Clone the repository and create your configuration file:
 
 ```bash
+git clone https://github.com/NodeSpec/NodeSpec.git
+cd NodeSpec
 cp deploy/selfhost/selfhost.env.example deploy/selfhost/selfhost.env
-# edit selfhost.env — the file documents every value; three are required
+```
+
+Open `deploy/selfhost/selfhost.env` in an editor. The file documents every
+value, and the defaults are set up for a local install. One value is required:
+set `ENCRYPTION_SECRET` to a long random string, for example the output of
+
+```bash
+openssl rand -base64 32
+```
+
+Set it once and back it up. It encrypts the credentials you store in the app
+(git tokens, AI keys), and changing it later makes those unreadable.
+
+Then boot the stack:
+
+```bash
 bash deploy/selfhost/bootstrap.sh
 ```
 
-Then open the address you configured, create an account, and point your AI
-tool at `http(s)://<your-host>/functions/v1/mcp-server`. The deploy guide
-covers TLS, backups, user administration, and running behind CloudFront or a
-reverse proxy.
+The first run downloads the Supabase images, which takes several minutes.
+When the script prints `done`, open http://localhost (or the
+`PUBLIC_APP_URL` you configured) and create your account. To grant that
+account the admin role, follow the "First admin" section of
+[`deploy/selfhost/README.md`](deploy/selfhost/README.md). The same guide
+covers TLS, backups, user administration, and running behind a reverse proxy
+or CloudFront.
 
-## What's in the box
+## Connect your AI
 
-- **Architecture Canvas** — containers, nodes, edges, contracts; every edge
-  carries a contract, every contract can carry a schema.
-- **Specification engine** — requirements with acceptance criteria, mapped to
-  the nodes that implement them; a Work Board that derives status from
-  evidence, never from vibes.
-- **MCP server (30 tools)** — projects, requirements, architecture proposals,
-  task-doc and test-plan generation, build-readiness preflight, test-result
-  reporting with binding evidence.
-- **Gitops** — connect a repo, push/pull, webhook change cards, assign files
-  to nodes, git-provenance on completed work.
-- **Starter technology catalog** — curated, full-depth entries for the
-  technologies most projects touch; add your own freely.
+Click the "MCP disconnected" button in the app header. It shows tested
+instructions for Claude Desktop, Claude Code, Cursor, OpenAI Codex, VS Code,
+and other MCP clients. The server URL is always
+`http(s)://<your-host>/functions/v1/mcp-server`.
+
+Two behaviors are specific to a local install:
+
+- With `MCP_LOCAL_TRUST=true` (the default in the example configuration), a
+  single-user install skips the browser sign-in when an AI connects. This
+  stands down automatically once a second account exists or the account
+  enrolls two-factor auth. Set it to `false` before exposing the deployment
+  beyond your own machine.
+- Some clients refuse plain-HTTP server URLs. For those, the in-app guide
+  shows a small bridge configuration (`mcp-remote`) that works without TLS.
+  Putting HTTPS in front of the container removes the need for the bridge.
+
+## Update
+
+```bash
+git pull
+bash deploy/selfhost/bootstrap.sh
+```
+
+The bootstrap script is idempotent. It never resets an existing database, and
+new schema migrations are applied by the Supabase CLI. Back up before major
+updates; the deploy guide shows how.
 
 ## Editions
 
-| | Community (this repo) | Hosted (nodespec.io) | Enterprise |
-|---|---|---|---|
-| Where it runs | Your infrastructure | Managed | Your infrastructure |
-| Projects | Unlimited | 1 free · unlimited on Indie ($15/mo) | Unlimited |
-| Repo-import reverse visualization | — | Indie and above | Included |
-| Full enriched catalog (800+) | Starter set | Continuously updated | Included |
-| Team integrations (Slack/Jira, as they land) | — | Team ($60/user/mo) | Custom |
-| Support | Community | Included | Contract |
-
 The community edition is a build product of the same monorepo as the hosted
-service — not a fork, and not a crippled demo. It runs the same schema, the
-same MCP server, and the same evidence loop.
+service. It runs the same schema, the same MCP server, and the same evidence
+loop. The hosted and enterprise editions add repository import (reverse
+visualization of an existing codebase), the continuously updated full
+technology catalog, team features, and support. Current plans and pricing:
+[nodespec.io/pricing](https://nodespec.io/pricing).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) (DCO sign-off; PRs are applied to the
-monorepo and land in the next export). Security reports: [SECURITY.md](SECURITY.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Contributions use DCO sign-off, are
+applied to the monorepo, and land here in the next export. Security reports:
+[SECURITY.md](SECURITY.md).
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE). "NodeSpec" and the NodeSpec logo are
+Apache-2.0, see [LICENSE](LICENSE). "NodeSpec" and the NodeSpec logo are
 trademarks; see [NOTICE](NOTICE).
