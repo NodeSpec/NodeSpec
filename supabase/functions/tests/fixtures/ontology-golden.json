@@ -1,0 +1,223 @@
+{
+  "description": "Cross-runtime golden for the ontology derivation rules. Asserted by BOTH the Deno suite (_shared/ontology.ts) and vitest (core/src/ontology.ts) - the two mirrors cannot drift silently. M1b: rewritten onto `nature` (build|integrate|host|engine|call), which replaced kind(13)+treatment_mode(3); the `altitude` section is DELETED because the axis is gone (its only reader tested a band that was never populated). Ownership value `rent` is renamed `integrate`. Also documents the canonical filings: Airflow self-hosted vs hosted, Supabase capability, Stripe.",
+  "treatment": [
+    {
+      "in": {
+        "nature": "build",
+        "is_container": false
+      },
+      "out": "leaf"
+    },
+    {
+      "in": {
+        "nature": "host",
+        "is_container": true
+      },
+      "out": "container"
+    },
+    {
+      "in": {
+        "nature": "engine",
+        "is_container": false
+      },
+      "out": "boundary"
+    },
+    {
+      "in": {
+        "nature": "call",
+        "is_container": false
+      },
+      "out": "boundary"
+    },
+    {
+      "in": {
+        "nature": "integrate",
+        "is_container": false
+      },
+      "out": "boundary"
+    },
+    {
+      "in": {
+        "nature": "build",
+        "is_container": true
+      },
+      "out": "container"
+    },
+    {
+      "in": {
+        "nature": "build",
+        "is_container": false
+      },
+      "out": "leaf"
+    },
+    {
+      "in": {
+        "nature": "engine",
+        "is_container": false
+      },
+      "out": "boundary"
+    },
+    {
+      "in": {
+        "is_container": false
+      },
+      "out": "leaf"
+    }
+  ],
+  "paletteOwnership": [
+    {
+      "in": "host",
+      "out": "host"
+    },
+    {
+      "in": "integrate",
+      "out": "integrate"
+    },
+    {
+      "in": "call",
+      "out": "call"
+    },
+    {
+      "in": "build",
+      "out": "build"
+    },
+    {
+      "in": "engine",
+      "out": "build"
+    },
+    {
+      "in": null,
+      "out": "build"
+    }
+  ],
+  "ownership": [
+    {
+      "name": "Stripe: external role is call regardless of placement",
+      "node": {
+        "parentId": "p1",
+        "placementKind": "hosts"
+      },
+      "ctx": {
+        "nature": "call",
+        "parentNature": "host"
+      },
+      "out": "call"
+    },
+    {
+      "name": "AWS platform node is host",
+      "node": {},
+      "ctx": {
+        "nature": "host"
+      },
+      "out": "host"
+    },
+    {
+      "name": "Supabase capability (supabase-postgres) is integrate",
+      "node": {
+        "parentId": "p1",
+        "placementKind": "contains"
+      },
+      "ctx": {
+        "nature": "integrate",
+        "parentNature": "host"
+      },
+      "out": "integrate"
+    },
+    {
+      "name": "Airflow HOSTED on a platform (Cloud Composer shape) is integrate",
+      "node": {
+        "parentId": "p1",
+        "placementKind": "deployed_to"
+      },
+      "ctx": {
+        "nature": "engine",
+        "parentNature": "host"
+      },
+      "out": "integrate"
+    },
+    {
+      "name": "Airflow under a platform parent even with contains placement is integrate",
+      "node": {
+        "parentId": "p1",
+        "placementKind": "contains"
+      },
+      "ctx": {
+        "nature": "engine",
+        "parentNature": "host"
+      },
+      "out": "integrate"
+    },
+    {
+      "name": "Airflow SELF-HOSTED (standalone or logical parent) is build",
+      "node": {
+        "parentId": "p1",
+        "placementKind": "contains"
+      },
+      "ctx": {
+        "nature": "engine",
+        "parentNature": "build"
+      },
+      "out": "build"
+    },
+    {
+      "name": "plain backend service is build",
+      "node": {},
+      "ctx": {
+        "nature": "build"
+      },
+      "out": "build"
+    },
+    {
+      "name": "backend service deployed to a platform is integrate (managed runtime)",
+      "node": {
+        "parentId": "p1",
+        "placementKind": "deployed_to"
+      },
+      "ctx": {
+        "nature": "build",
+        "parentNature": "host"
+      },
+      "out": "integrate"
+    },
+    {
+      "name": "engine role owns as build - engine-ness lives in treatment, not ownership",
+      "node": {},
+      "ctx": {
+        "nature": "engine"
+      },
+      "out": "build"
+    }
+  ],
+  "effectiveTreatment": [
+    {
+      "name": "leaf role, no tech override -> leaf (data-prep-pipeline written as code)",
+      "role": "leaf",
+      "tech": null,
+      "out": "leaf"
+    },
+    {
+      "name": "leaf role + boundary-engine tech override -> boundary (data-prep-pipeline via n8n)",
+      "role": "leaf",
+      "tech": "boundary",
+      "out": "boundary"
+    },
+    {
+      "name": "boundary role, no tech -> boundary (external-service, intrinsic)",
+      "role": "boundary",
+      "tech": null,
+      "out": "boundary"
+    },
+    {
+      "name": "container role is structural, never overridden",
+      "role": "container",
+      "tech": "boundary",
+      "out": "container"
+    },
+    {
+      "name": "missing role treatment defaults to leaf",
+      "role": null,
+      "tech": null,
+      "out": "leaf"
+    }
+  ]
+}

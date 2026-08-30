@@ -1,0 +1,2 @@
+-- NodeSpec community edition: no seed data. The schema migration creates
+-- everything; the starter catalog ships as its own migration.

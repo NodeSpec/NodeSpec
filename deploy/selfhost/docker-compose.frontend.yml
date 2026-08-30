@@ -1,0 +1,26 @@
+# NodeSpec self-host frontend container (SHIP-1(e)).
+# The Supabase stack itself runs via the Supabase CLI (`supabase start`) — the
+# bench-proven shape; this compose adds only what the CLI doesn't provide.
+# Run from the repo/bundle ROOT (bootstrap.sh does):
+#   docker compose --env-file deploy/selfhost/selfhost.env \
+#     -f deploy/selfhost/docker-compose.frontend.yml up -d --build
+services:
+  frontend:
+    container_name: nodespec-frontend
+    build:
+      context: ../..
+      dockerfile: deploy/selfhost/Dockerfile.frontend
+      args:
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+        VITE_MCP_PUBLIC_URL: ${VITE_MCP_PUBLIC_URL}
+        VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY}
+        VITE_NODESPEC_EDITION: ${VITE_NODESPEC_EDITION:-}
+    ports:
+      # Default 80: single-origin mode — the SPA and the proxied Supabase
+      # surface share this one externally-exposed port (nginx.conf).
+      - "${FRONTEND_PORT:-80}:80"
+    extra_hosts:
+      # Lets nginx reach Kong (host port 54321) across compose projects.
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

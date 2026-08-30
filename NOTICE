@@ -1,0 +1,19 @@
+NodeSpec Community Edition
+Copyright 2026 NodeSpec
+
+This product includes software developed by NodeSpec (https://nodespec.io).
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this software except in compliance with the License. You may obtain a
+copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+TRADEMARKS: "NodeSpec" and the NodeSpec logo are trademarks of NodeSpec.
+The Apache-2.0 license does NOT grant permission to use the NodeSpec name or
+logo for a hosted service, a derived product, or in any way that suggests
+endorsement. Forks must use their own name and branding.
+
+The hosted service at nodespec.io, the repo-import reverse-visualization
+pipeline, the full enriched technology catalog, and the team/enterprise
+integration features are proprietary and are not part of this distribution.

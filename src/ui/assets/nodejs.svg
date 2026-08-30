@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <path d="M16 2L28.12 9v14L16 30 3.88 23V9L16 2z" fill="#68a063"/>
+  <path d="M16 4.5L26.12 10.35v11.3L16 27.5 5.88 21.65v-11.3L16 4.5z" fill="#3c873a"/>
+  <text x="16" y="19.5" font-family="Arial,Helvetica,sans-serif" font-size="11" font-weight="bold" fill="white" text-anchor="middle">JS</text>
+</svg>

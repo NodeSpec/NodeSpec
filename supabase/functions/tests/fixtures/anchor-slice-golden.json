@@ -1,0 +1,102 @@
+{
+  "description": "Cross-runtime golden: serializeModel (Deno) output over this graph. The vitest anchor-slice suite asserts buildNodeAnchorSlice (core) produces byte-identical elements.",
+  "graph": {
+    "nodes": {
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb": {
+        "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "type": "backend-service",
+        "label": "API",
+        "technology": "express",
+        "ports": [
+          {
+            "id": "66666666-6666-4666-8666-666666666666",
+            "name": "in",
+            "direction": "in"
+          }
+        ]
+      },
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": {
+        "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "type": "frontend-app",
+        "label": "Web",
+        "technology": "react",
+        "ports": [
+          {
+            "id": "55555555-5555-4555-8555-555555555555",
+            "name": "out",
+            "direction": "out"
+          }
+        ]
+      },
+      "cccccccc-cccc-4ccc-8ccc-cccccccccccc": {
+        "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "type": "database",
+        "label": "Store",
+        "parentId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "ports": []
+      }
+    },
+    "edges": {
+      "dddddddd-dddd-4ddd-8ddd-dddddddddddd": {
+        "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "source": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "target": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "contractId": "11111111-1111-4111-8111-111111111111",
+        "sourcePortId": "55555555-5555-4555-8555-555555555555",
+        "targetPortId": "66666666-6666-4666-8666-666666666666",
+        "label": "calls"
+      },
+      "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee": {
+        "id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "source": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "target": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "contractId": "22222222-2222-4222-8222-222222222222"
+      }
+    },
+    "contracts": {
+      "11111111-1111-4111-8111-111111111111": {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "kind": "rest",
+        "name": "Web to API",
+        "schema": {
+          "openapi": "3.0"
+        }
+      },
+      "22222222-2222-4222-8222-222222222222": {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "kind": "sql",
+        "name": "API to Store"
+      }
+    },
+    "artifacts": {
+      "33333333-3333-4333-8333-333333333333": {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "nodeId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "path": "/src/api/index.ts",
+        "kind": "source",
+        "contentHash": "abc123"
+      },
+      "44444444-4444-4444-8444-444444444444": {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "nodeId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "path": ".nodespec/tasks/api.task.md",
+        "kind": "task"
+      }
+    }
+  },
+  "mappings": [
+    {
+      "requirementId": "REQ-002",
+      "nodeId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    },
+    {
+      "requirementId": "REQ-001",
+      "nodeId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    },
+    {
+      "requirementId": "REQ-001",
+      "nodeId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    }
+  ],
+  "anchorJson": "{\n  \"modelVersion\": 1,\n  \"generatedBy\": \"nodespec\",\n  \"modelHash\": \"737bb675c1eb40ea5aca000b22065ae8c69047abb747821ba11727419cf5d1bb\",\n  \"nodes\": [\n    {\n      \"id\": \"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\n      \"type\": \"frontend-app\",\n      \"label\": \"Web\",\n      \"technology\": \"react\",\n      \"ports\": [\n        {\n          \"id\": \"55555555-5555-4555-8555-555555555555\",\n          \"name\": \"out\",\n          \"direction\": \"out\"\n        }\n      ],\n      \"contentHash\": \"96f046d59de8455ead0c11dd3d4d5e1fdb1b3df80f5e98c263890813017e31b5\"\n    },\n    {\n      \"id\": \"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\n      \"type\": \"backend-service\",\n      \"label\": \"API\",\n      \"technology\": \"express\",\n      \"ports\": [\n        {\n          \"id\": \"66666666-6666-4666-8666-666666666666\",\n          \"name\": \"in\",\n          \"direction\": \"in\"\n        }\n      ],\n      \"contentHash\": \"f47f4329e98f54e3954ddb8b43460240560a0b896c1b2b50a640016cb67b6168\"\n    },\n    {\n      \"id\": \"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\n      \"type\": \"database\",\n      \"label\": \"Store\",\n      \"parentId\": \"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\n      \"ports\": [],\n      \"contentHash\": \"47a2a24b2d50ae46e73b0cb798451ddff5e734357c2485382da5f3badb96efbc\"\n    }\n  ],\n  \"edges\": [\n    {\n      \"id\": \"dddddddd-dddd-4ddd-8ddd-dddddddddddd\",\n      \"source\": \"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\n      \"target\": \"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\n      \"contractId\": \"11111111-1111-4111-8111-111111111111\",\n      \"sourcePortId\": \"55555555-5555-4555-8555-555555555555\",\n      \"targetPortId\": \"66666666-6666-4666-8666-666666666666\",\n      \"label\": \"calls\",\n      \"contentHash\": \"5d419bab63c3eb0cf7a7e24ee530bb567aac27e76fd82fce17408a53a912a34f\"\n    },\n    {\n      \"id\": \"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\n      \"source\": \"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\n      \"target\": \"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\n      \"contractId\": \"22222222-2222-4222-8222-222222222222\",\n      \"contentHash\": \"f050ba09155d4947a276a9847742419b091d0e2357a82973d4320f6ccc732d47\"\n    }\n  ],\n  \"contracts\": [\n    {\n      \"id\": \"11111111-1111-4111-8111-111111111111\",\n      \"kind\": \"rest\",\n      \"name\": \"Web to API\",\n      \"schemaHash\": \"5bfad88ded94257a4f8c5e15879b75544f4f3422848ffd9712514bd76aecb193\",\n      \"contentHash\": \"e3db8a69d057c2c9422a3c3b218ff40375a857fdee5947bfe244824d53ec5d56\"\n    },\n    {\n      \"id\": \"22222222-2222-4222-8222-222222222222\",\n      \"kind\": \"sql\",\n      \"name\": \"API to Store\",\n      \"contentHash\": \"bd46eaf8935564bcaf487debc87bf52f0e6b3c21910f00326bbf6c6a7c84eaa0\"\n    }\n  ],\n  \"artifacts\": [\n    {\n      \"id\": \"33333333-3333-4333-8333-333333333333\",\n      \"nodeId\": \"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\n      \"path\": \"src/api/index.ts\",\n      \"kind\": \"source\",\n      \"contentHash\": \"abc123\"\n    },\n    {\n      \"id\": \"44444444-4444-4444-8444-444444444444\",\n      \"nodeId\": \"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\n      \"path\": \".nodespec/tasks/api.task.md\",\n      \"kind\": \"task\"\n    }\n  ]\n}\n"
+}

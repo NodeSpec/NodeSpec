@@ -1,0 +1,13 @@
+{
+  "name": "@nodespec/core",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "NodeSpec portable domain core: patch engine, schemas, validation, drift detection, fingerprints, repo-import logic. Pure TS + zod — importable by the Vite app (via workspace/alias) and Deno edge functions (S1-2). No Supabase, no env access, no network.",
+  "exports": {
+    "./*": "./src/*"
+  },
+  "dependencies": {
+    "zod": "^3.22.4"
+  }
+}

@@ -1,0 +1,689 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --theme-background: #fafbfc;
+  --theme-surface: #ffffff;
+  --theme-border: #e5e7eb;
+  --theme-text: #1f2937;
+  --theme-text-secondary: #4b5563;
+  --theme-text-muted: #6b7280;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  font-family: inherit;
+}
+
+input, textarea, select {
+  font-family: inherit;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--theme-border) var(--theme-background);
+}
+
+*::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--theme-background);
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: var(--theme-border);
+  border-radius: 6px;
+  border: 3px solid var(--theme-background);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--theme-text-muted);
+}
+
+.react-flow__controls {
+  background-color: var(--theme-surface) !important;
+  border: 1px solid var(--theme-border) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
+}
+
+.react-flow__controls-button {
+  background-color: var(--theme-surface) !important;
+  border-bottom: 1px solid var(--theme-border) !important;
+  color: var(--theme-text) !important;
+}
+
+.react-flow__controls-button:hover {
+  background-color: var(--theme-background) !important;
+}
+
+.react-flow__controls-button svg {
+  fill: var(--theme-text) !important;
+}
+
+/* Subtle dot grid for dark sections */
+.dark-section-grid::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(139, 143, 230, 0.08) 1px, transparent 1px);
+  background-size: 32px 32px;
+  pointer-events: none;
+  z-index: 0;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 40%, black 30%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 40%, black 30%, transparent 100%);
+}
+
+/* Mesh gradient overlay for hero */
+.hero-mesh::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 50% 40% at 20% 80%, rgba(139, 143, 230, 0.06) 0%, transparent 100%),
+    radial-gradient(ellipse 40% 50% at 80% 20%, rgba(99, 102, 241, 0.04) 0%, transparent 100%),
+    radial-gradient(ellipse 60% 30% at 50% 50%, rgba(139, 143, 230, 0.03) 0%, transparent 100%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Ensure collapse button is above everything */
+.nodrag {
+  pointer-events: auto !important;
+}
+
+.nopan {
+  pointer-events: auto !important;
+}
+
+/* Database Node Styles */
+.database-node {
+  position: relative;
+  overflow: hidden;
+}
+
+.database-node::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 20px;
+  background: linear-gradient(135deg, rgba(255,255,255,0.15) 0%, transparent 50%);
+  border-radius: 8px 8px 0 0;
+  pointer-events: none;
+}
+
+.database-schema-panel {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease-out;
+}
+
+.database-schema-panel.expanded {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+/* Event Bus Node Styles */
+.event-bus-node {
+  position: relative;
+}
+
+.event-bus-node::after {
+  content: '';
+  position: absolute;
+  left: -20px;
+  right: -20px;
+  top: 50%;
+  height: 4px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    var(--bus-color, #8b5cf6) 10%,
+    var(--bus-color, #8b5cf6) 90%,
+    transparent 100%
+  );
+  transform: translateY(-50%);
+  z-index: -1;
+  opacity: 0.3;
+}
+
+/* Custom Edge for Event Bus */
+.react-flow__edge-path.event-bus-edge {
+  stroke-dasharray: 8 4;
+  animation: eventFlow 1s linear infinite;
+}
+
+@keyframes eventFlow {
+  from {
+    stroke-dashoffset: 24;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Specialized Node Icons */
+.node-icon-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.node-icon-container img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* Auto-layout animation */
+@keyframes nodeSlide {
+  from {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.react-flow__node {
+  animation: nodeSlide 0.3s ease-out;
+  /* Only animate transform, not width/height (causes conflicts with programmatic resize) */
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.react-flow__node.dragging {
+  transition: none !important;
+}
+
+/* Disable ALL transitions during resize to prevent visual glitches */
+.react-flow__node.resizing {
+  transition: none !important;
+}
+
+.react-flow__node.resizing * {
+  transition: none !important;
+}
+
+/* Container node specific styles */
+.react-flow__node-container {
+  will-change: width, height;
+  pointer-events: auto;
+}
+
+/* Ensure all interactive elements have proper pointer events */
+.react-flow__node-container button,
+.react-flow__node-container .nodrag,
+.react-flow__node-container .nopan {
+  pointer-events: auto !important;
+}
+
+/* Ensure resize handles are always on top and interactive */
+.react-flow__resize-control.handle {
+  pointer-events: auto !important;
+  z-index: 10000;
+}
+
+/* Schema column visualization */
+.schema-column {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: 'Monaco', 'Menlo', monospace;
+  transition: background-color 0.15s ease;
+}
+
+.schema-column:hover {
+  background-color: rgba(99, 102, 241, 0.1);
+}
+
+.schema-column-type {
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+/* Message queue pulse animation */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.message-indicator {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes containerEnter {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes containerExit {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+}
+
+.react-flow__edge {
+  transition: opacity 0.25s ease;
+}
+
+/* Animated flow particles on hovered/focused edges */
+.sg-edge-flow {
+  animation: sgEdgeFlow 0.8s linear infinite;
+}
+@keyframes sgEdgeFlow {
+  from { stroke-dashoffset: 14; }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* Animated flow for container summary edges */
+.sg-summary-flow {
+  animation: sgSummaryFlow 1.2s linear infinite;
+}
+@keyframes sgSummaryFlow {
+  from { stroke-dashoffset: 20; }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* Blueprint background connection drift */
+.bp-connection-path {
+  animation: bpDrift 12s linear infinite;
+}
+@keyframes bpDrift {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: -40; }
+}
+
+/* Landing hero entrance + scroll cue (2026-08-12 redesign) */
+@keyframes ns-rise {
+  from { opacity: 0; transform: translateY(18px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes ns-cue {
+  0%   { transform: translateY(0); opacity: 0; }
+  40%  { opacity: 1; }
+  100% { transform: translateY(12px); opacity: 0; }
+}
+
+.pricing-table-mobile {
+  display: none;
+}
+
+/* ========== Tablet Responsive: Pre-sign-in pages ========== */
+@media (max-width: 1024px) {
+  /* --- Template Detail 2-column -> stack --- */
+  .template-detail-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* --- Pricing cards: allow wrapping tighter --- */
+  .pricing-cards-row {
+    gap: 16px !important;
+  }
+  .pricing-card-root {
+    max-width: 320px !important;
+    min-width: 220px !important;
+  }
+  .pricing-table-mobile {
+    display: none !important;
+  }
+
+  /* --- Blog grid 2 columns max --- */
+  .blog-posts-grid {
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)) !important;
+    gap: 24px !important;
+  }
+
+  /* --- Template marketplace 2 columns --- */
+  .marketplace-grid {
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)) !important;
+  }
+
+  /* --- Who This Is For: 3 -> 2 columns --- */
+  .who-cards-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+}
+
+/* ========== Mobile Responsive: Pre-sign-in pages ========== */
+@media (max-width: 768px) {
+  /* --- Shared nav bar --- */
+  .landing-nav {
+    padding: 12px 16px !important;
+  }
+  .landing-nav-links {
+    display: none !important;
+  }
+  .landing-nav-signin {
+    margin-left: 0 !important;
+    font-size: 13px !important;
+    padding: 8px 16px !important;
+  }
+
+  /* --- AuthLandingPage hero --- */
+  .landing-hero {
+    padding-top: 48px !important;
+    min-height: auto !important;
+    flex-direction: column !important;
+  }
+  .landing-hero-content-wrapper {
+    padding: 40px 20px 24px !important;
+    align-items: center !important;
+  }
+  .landing-hero-content {
+    max-width: 100% !important;
+    text-align: center !important;
+    align-items: center !important;
+  }
+  .landing-hero-headline {
+    font-size: 26px !important;
+  }
+  .landing-hero-subtitle {
+    font-size: 15px !important;
+  }
+  .landing-hero-logo {
+    height: 100px !important;
+  }
+  .landing-hero-cta-row {
+    flex-direction: column !important;
+    width: 100% !important;
+    gap: 10px !important;
+  }
+  .landing-hero-cta-row button {
+    width: 100% !important;
+    padding: 14px 24px !important;
+  }
+  .landing-hero-form-panel {
+    width: 100% !important;
+    padding: 20px !important;
+  }
+  .landing-form-card {
+    max-width: 100% !important;
+    padding: 28px 20px !important;
+  }
+  .landing-form-title {
+    font-size: 22px !important;
+  }
+
+  /* --- OssCommunitySection --- */
+  .oss-community {
+    padding: 56px 0 !important;
+  }
+  .oss-content {
+    padding: 0 20px !important;
+  }
+  .oss-heading {
+    font-size: 26px !important;
+  }
+  .oss-subtitle {
+    font-size: 15px !important;
+  }
+  .oss-cta-plate {
+    padding: 24px 20px !important;
+    gap: 18px !important;
+  }
+  .oss-cta-mark {
+    width: 36px !important;
+    height: 36px !important;
+  }
+  .oss-cta-title {
+    font-size: 18px !important;
+  }
+  .oss-cta-arrow {
+    display: none !important;
+  }
+
+  /* --- SiteFooter --- */
+  .site-footer-inner {
+    padding: 32px 20px !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 28px !important;
+  }
+  .site-footer-bottom {
+    padding: 16px 20px !important;
+  }
+  .landing-footer-inner {
+    padding: 32px 20px !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 24px !important;
+  }
+  .landing-footer-bottom {
+    padding: 16px 20px !important;
+  }
+
+  /* --- MarketingSection --- */
+  .marketing-content {
+    padding: 24px 20px 56px !important;
+  }
+  .marketing-heading {
+    font-size: 28px !important;
+  }
+  .marketing-subtitle {
+    font-size: 15px !important;
+    margin-bottom: 32px !important;
+  }
+  .marketing-feature-grid {
+    grid-template-columns: 1fr !important;
+    gap: 16px !important;
+  }
+  .marketing-feature-card {
+    padding: 24px !important;
+  }
+  .marketing-feature-headline {
+    font-size: 18px !important;
+  }
+  /* --- Who This Is For --- */
+  .who-this-is-for-content {
+    padding: 0 20px 48px !important;
+  }
+  .who-heading {
+    font-size: 26px !important;
+  }
+  .who-subtitle {
+    font-size: 15px !important;
+  }
+  .who-cards-grid {
+    grid-template-columns: 1fr !important;
+    gap: 16px !important;
+  }
+  .who-card {
+    padding: 24px 20px !important;
+  }
+  .who-card-title {
+    font-size: 18px !important;
+  }
+
+  /* --- Feature Showcase --- */
+  .feature-showcase {
+    padding: 0 16px 56px !important;
+  }
+  .feature-showcase-heading {
+    font-size: 26px !important;
+  }
+  .feature-showcase-subtitle {
+    font-size: 14px !important;
+  }
+  .feature-showcase-tab {
+    padding: 8px 16px !important;
+    font-size: 12px !important;
+  }
+  .feature-showcase-info {
+    padding: 20px 16px !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+  }
+  .feature-showcase-tagline {
+    font-size: 16px !important;
+  }
+
+  /* --- PricingSection / PricingPage --- */
+  .pricing-section-inner {
+    padding: 48px 16px 56px !important;
+  }
+  .pricing-heading {
+    font-size: 28px !important;
+  }
+  .pricing-cards-row {
+    flex-direction: column !important;
+    align-items: center !important;
+  }
+  .pricing-card-root {
+    max-width: 100% !important;
+    min-width: 0 !important;
+    width: 100% !important;
+  }
+  .pricing-page-content {
+    padding: 32px 16px 48px !important;
+  }
+  .pricing-table-desktop {
+    display: none !important;
+  }
+  .pricing-table-mobile {
+    display: block !important;
+  }
+
+  /* --- TemplateMarketplacePage --- */
+  .marketplace-content {
+    padding: 32px 16px 48px !important;
+  }
+  .marketplace-heading {
+    font-size: 26px !important;
+  }
+  .marketplace-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .marketplace-categories {
+    gap: 4px !important;
+  }
+
+  /* --- TemplateDetailPage --- */
+  .template-detail-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .template-detail-content {
+    padding: 24px 16px 48px !important;
+  }
+  .template-detail-sidebar {
+    order: -1 !important;
+  }
+
+  /* --- BlogPage --- */
+  .blog-content {
+    padding: 40px 16px !important;
+  }
+  .blog-heading {
+    font-size: 32px !important;
+  }
+  .blog-subtitle {
+    font-size: 15px !important;
+  }
+  .blog-posts-grid {
+    grid-template-columns: 1fr !important;
+    gap: 20px !important;
+  }
+  .blog-categories-row {
+    gap: 8px !important;
+  }
+  .blog-categories-row button {
+    padding: 8px 14px !important;
+    font-size: 13px !important;
+  }
+
+  /* --- BlogPostPage --- */
+  .blog-post-content {
+    padding: 32px 16px !important;
+  }
+  .blog-post-title {
+    font-size: 26px !important;
+  }
+  .blog-post-nav-links {
+    display: none !important;
+  }
+  .blog-post-social-links {
+    display: none !important;
+  }
+
+  /* --- ResetPasswordPage --- */
+  .reset-container {
+    padding: 16px !important;
+  }
+  .reset-card {
+    padding: 28px 20px !important;
+    max-width: 100% !important;
+  }
+  .reset-title {
+    font-size: 24px !important;
+  }
+}

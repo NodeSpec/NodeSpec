@@ -1,0 +1,52 @@
+{
+  "name": "nodespec",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build && tsx scripts/prerender.ts",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:functions": "npx --yes deno@2 test --no-check --allow-all --node-modules-dir=auto supabase/functions/tests/",
+    "test:watch": "vitest",
+    "validate:preflight": "tsx scripts/validate-preflight.ts",
+    "bench:auto": "node scripts/bench/run.mjs",
+    "n10:coverage": "npx --yes deno@2 run --no-check --allow-net --allow-env --allow-read --allow-write --node-modules-dir=auto scripts/n10-enrichment-coverage.ts",
+    "n10:sweep": "npx --yes deno@2 run --no-check --allow-net --allow-env --allow-read --allow-write --node-modules-dir=auto scripts/n10-packet-sweep.ts",
+    "n10:verify-urls": "npx --yes deno@2 run --no-check --allow-net --allow-env --allow-read --node-modules-dir=auto scripts/n10-verify-docs-urls.ts",
+    "n10:acceptance": "npx --yes deno@2 run --no-check --allow-net --allow-env --allow-read --allow-write --node-modules-dir=auto scripts/n10-acceptance.ts"
+  },
+  "dependencies": {
+    "@marsidev/react-turnstile": "^1.5.0",
+    "@monaco-editor/react": "^4.7.0",
+    "@supabase/supabase-js": "^2.39.0",
+    "@tinymce/tinymce-react": "^6.3.0",
+    "@xyflow/react": "^12.0.0",
+    "dompurify": "^3.3.3",
+    "dotenv": "^17.2.3",
+    "elkjs": "^0.11.1",
+    "fflate": "^0.8.2",
+    "lucide-react": "^0.562.0",
+    "monaco-editor": "^0.55.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.12.0",
+    "tinymce": "^8.3.2",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/dompurify": "^3.0.5",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/react-router-dom": "^5.3.3",
+    "@vitejs/plugin-react": "^4.3.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.4.2",
+    "vitest": "^1.2.0"
+  },
+  "workspaces": [
+    "core"
+  ]
+}

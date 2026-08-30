@@ -1,0 +1,25 @@
+# SHIP-1(e) security audit 2026-08-24: the frontend image builds with the
+# REPO ROOT as its context (deploy/selfhost/docker-compose.frontend.yml) and
+# `COPY . .` — without this file, `.git` history and every filled env file
+# (including supabase/functions/.env, which bootstrap writes BEFORE the build
+# and which carries ENCRYPTION_SECRET + the license) would be baked into an
+# image layer. Nothing below is needed to build the frontend.
+.git
+node_modules
+dist
+dist-selfhost
+supabase/.temp
+supabase/.branches
+ship1-rehearsal
+
+# Secrets and local config — the whole point of this file.
+.env
+.env.*
+!.env.example
+supabase/functions/.env
+deploy/selfhost/selfhost.env
+scripts/bench/.env.bench
+*.nslic
+*.pem
+prod_schema_dump.sql
+cutover-schema.sql

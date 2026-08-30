@@ -1,0 +1,33 @@
+# NodeSpec self-host frontend (SHIP-1(e)): build the Vite app with the
+# deployment's endpoints baked in, serve as static files behind nginx.
+# Built by bootstrap.sh / docker-compose.frontend.yml from the REPO/BUNDLE
+# ROOT (context = ../.., this file passed with -f).
+
+FROM node:20-alpine AS build
+WORKDIR /app
+
+# Endpoint configuration is compile-time for a Vite app — passed as build args
+# from selfhost.env. VITE_NODESPEC_EDITION: empty/absent = community edition;
+# customer bundles ship with 'enterprise' stamped into selfhost.env.example
+# (never 'hosted' — that turns the marketing site + marketplace back on).
+ARG VITE_SUPABASE_URL
+ARG VITE_SUPABASE_ANON_KEY
+ARG VITE_MCP_PUBLIC_URL
+ARG VITE_TURNSTILE_SITE_KEY
+ARG VITE_NODESPEC_EDITION
+ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL \
+    VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY \
+    VITE_MCP_PUBLIC_URL=$VITE_MCP_PUBLIC_URL \
+    VITE_TURNSTILE_SITE_KEY=$VITE_TURNSTILE_SITE_KEY \
+    VITE_NODESPEC_EDITION=$VITE_NODESPEC_EDITION
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
+
+FROM nginx:1.27-alpine
+COPY deploy/selfhost/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 80

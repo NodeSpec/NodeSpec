@@ -1,0 +1,158 @@
+{
+  "description": "Cross-runtime layout parity: generated from src/ui/utils/preview-layout.ts computePreviewLayout. Asserted by supabase/functions/tests/og-preview-layout_test.ts AND src/tests/preview-layout-parity.test.ts.",
+  "nodes": [
+    {
+      "id": "frontend",
+      "type": "container"
+    },
+    {
+      "id": "backend",
+      "type": "container"
+    },
+    {
+      "id": "jobs",
+      "type": "container",
+      "parentId": "backend"
+    },
+    {
+      "id": "web",
+      "type": "default",
+      "parentId": "frontend"
+    },
+    {
+      "id": "mobile",
+      "type": "default",
+      "parentId": "frontend"
+    },
+    {
+      "id": "api",
+      "type": "default",
+      "parentId": "backend"
+    },
+    {
+      "id": "db",
+      "type": "default",
+      "parentId": "backend"
+    },
+    {
+      "id": "cache",
+      "type": "default",
+      "parentId": "backend"
+    },
+    {
+      "id": "worker",
+      "type": "default",
+      "parentId": "jobs"
+    },
+    {
+      "id": "queue",
+      "type": "default",
+      "parentId": "jobs"
+    },
+    {
+      "id": "cdn",
+      "type": "default"
+    },
+    {
+      "id": "dns",
+      "type": "default"
+    }
+  ],
+  "edges": [
+    {
+      "source": "web",
+      "target": "api"
+    },
+    {
+      "source": "api",
+      "target": "db"
+    },
+    {
+      "source": "api",
+      "target": "cache"
+    },
+    {
+      "source": "queue",
+      "target": "worker"
+    }
+  ],
+  "positions": [
+    {
+      "id": "frontend",
+      "x": 60,
+      "y": 60
+    },
+    {
+      "id": "web",
+      "x": 40,
+      "y": 48
+    },
+    {
+      "id": "mobile",
+      "x": 116,
+      "y": 48
+    },
+    {
+      "id": "backend",
+      "x": 480,
+      "y": 60
+    },
+    {
+      "id": "api",
+      "x": 40,
+      "y": 48
+    },
+    {
+      "id": "db",
+      "x": 116,
+      "y": 48
+    },
+    {
+      "id": "cache",
+      "x": 192,
+      "y": 48
+    },
+    {
+      "id": "queue",
+      "x": 40,
+      "y": 48
+    },
+    {
+      "id": "worker",
+      "x": 116,
+      "y": 48
+    },
+    {
+      "id": "jobs",
+      "x": 336,
+      "y": 48
+    },
+    {
+      "id": "cdn",
+      "x": 1276,
+      "y": 100
+    },
+    {
+      "id": "dns",
+      "x": 1352,
+      "y": 100
+    }
+  ],
+  "sizes": [
+    {
+      "id": "frontend",
+      "width": 300,
+      "height": 250
+    },
+    {
+      "id": "backend",
+      "width": 676,
+      "height": 330
+    },
+    {
+      "id": "jobs",
+      "width": 300,
+      "height": 250
+    }
+  ]
+}

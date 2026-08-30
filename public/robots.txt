@@ -1,0 +1,104 @@
+# NodeSpec robots.txt — updated 2026-07-05
+# AI-readable summary available at /llms.txt
+
+User-agent: *
+Allow: /
+Allow: /blog
+Allow: /blog/
+Allow: /templates
+Allow: /templates/
+Allow: /pricing
+Allow: /government
+Allow: /privacy
+Allow: /terms
+Disallow: /app
+Disallow: /admin
+Disallow: /reset-password
+
+Sitemap: https://nodespec.io/sitemap.xml
+
+# Search engines
+User-agent: Googlebot
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+# OpenAI crawlers
+User-agent: GPTBot
+Allow: /
+Disallow: /app
+Disallow: /admin
+
+User-agent: OAI-SearchBot
+Allow: /
+Disallow: /app
+Disallow: /admin
+
+User-agent: ChatGPT-User
+Allow: /
+Disallow: /app
+Disallow: /admin
+
+# Anthropic crawlers
+User-agent: ClaudeBot
+Allow: /
+Disallow: /app
+Disallow: /admin
+
+User-agent: Claude-User
+Allow: /
+Disallow: /app
+Disallow: /admin
+
+User-agent: Claude-SearchBot
+Allow: /
+Disallow: /app
+Disallow: /admin
+
+# Google AI
+User-agent: Google-Extended
+Allow: /
+Disallow: /app
+Disallow: /admin
+
+# Apple
+User-agent: Applebot-Extended
+Allow: /
+Disallow: /app
+Disallow: /admin
+
+# Perplexity
+User-agent: PerplexityBot
+Allow: /
+Disallow: /app
+Disallow: /admin
+
+User-agent: Perplexity-User
+Allow: /
+Disallow: /app
+Disallow: /admin
+
+# Meta
+User-agent: Meta-ExternalAgent
+Allow: /
+Disallow: /app
+Disallow: /admin
+
+# Amazon
+User-agent: Amazonbot
+Allow: /
+Disallow: /app
+Disallow: /admin
+
+# DuckDuckGo AI
+User-agent: DuckAssistBot
+Allow: /
+Disallow: /app
+Disallow: /admin
+
+# Cohere
+User-agent: cohere-ai
+Allow: /
+Disallow: /app
+Disallow: /admin

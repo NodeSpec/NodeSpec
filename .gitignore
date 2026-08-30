@@ -1,0 +1,29 @@
+node_modules
+.env
+dist
+tsconfig.tsbuildinfo
+deno.lock
+.env.bench
+scripts/bench/.env.bench
+.env.local
+deploy/selfhost/selfhost.env
+supabase/functions/.env
+dist-selfhost/
+*.nslic
+ship1-rehearsal/
+
+# Local working artifacts from cutover/bench/db operations — never commit.
+# The runbooks generate these on the owner's machine (STAGING_RUNBOOK: the
+# prod dump is handed to sessions PRIVATELY, "do not commit the raw dump");
+# ignoring them keeps a stray `git add -A` from scooping prod schema/ids.
+prod_schema_dump.sql
+cutover-schema.sql
+cutover-data.sql
+catalog_data.sql
+bench-ids.txt
+prod-ids.txt
+shadow-ids.txt
+supabase/snippets/
+# Supabase CLI db pull output — a schema snapshot that would fight the
+# migration chain on fresh replays; regenerate deliberately, never commit.
+supabase/migrations/*_remote_schema.sql

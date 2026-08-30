@@ -1,0 +1,410 @@
+{
+  "graph": {
+    "nodes": {
+      "uuid-1": {
+        "id": "uuid-1",
+        "type": "database",
+        "label": "DB",
+        "ports": [
+          {
+            "id": "uuid-2",
+            "name": "input",
+            "direction": "in"
+          },
+          {
+            "id": "uuid-3",
+            "name": "output",
+            "direction": "out"
+          }
+        ],
+        "data": {},
+        "metadata": {},
+        "status": "draft",
+        "artifacts": []
+      },
+      "uuid-4": {
+        "id": "uuid-4",
+        "type": "container",
+        "label": "Region",
+        "ports": [
+          {
+            "id": "uuid-5",
+            "name": "input",
+            "direction": "in"
+          },
+          {
+            "id": "uuid-6",
+            "name": "output",
+            "direction": "out"
+          }
+        ],
+        "data": {},
+        "metadata": {},
+        "status": "draft",
+        "artifacts": []
+      }
+    },
+    "edges": {},
+    "contracts": {
+      "uuid-7": {
+        "id": "uuid-7",
+        "kind": "rest",
+        "name": "API-to-DB",
+        "status": "complete",
+        "interactionKind": "request_response",
+        "transport": "http",
+        "specFormat": "openapi"
+      },
+      "uuid-8": {
+        "id": "uuid-8",
+        "kind": "rest",
+        "name": "Payments",
+        "status": "draft",
+        "interactionKind": "request_response",
+        "transport": "http",
+        "specFormat": "openapi"
+      }
+    },
+    "artifacts": {
+      "uuid-9": {
+        "id": "uuid-9",
+        "nodeId": "uuid-10",
+        "kind": "source",
+        "path": "src/index.ts",
+        "content": "export const x = 1",
+        "language": "typescript",
+        "status": "draft",
+        "createdAt": "<TS>",
+        "updatedAt": "<TS>"
+      }
+    }
+  },
+  "patches": [
+    {
+      "type": "add_node",
+      "metadata": {
+        "id": "uuid-11",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Add node: API",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-10",
+        "type": "backend-service",
+        "label": "API",
+        "ports": [
+          {
+            "id": "uuid-12",
+            "name": "input",
+            "direction": "in"
+          },
+          {
+            "id": "uuid-13",
+            "name": "output",
+            "direction": "out"
+          },
+          {
+            "id": "uuid-14",
+            "name": "grpc-out",
+            "direction": "out"
+          }
+        ],
+        "data": {},
+        "metadata": {},
+        "status": "draft",
+        "artifacts": []
+      }
+    },
+    {
+      "type": "add_node",
+      "metadata": {
+        "id": "uuid-15",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Add node: DB",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-1",
+        "type": "database",
+        "label": "DB",
+        "ports": [
+          {
+            "id": "uuid-2",
+            "name": "input",
+            "direction": "in"
+          },
+          {
+            "id": "uuid-3",
+            "name": "output",
+            "direction": "out"
+          }
+        ],
+        "data": {},
+        "metadata": {},
+        "status": "draft",
+        "artifacts": []
+      }
+    },
+    {
+      "type": "add_node",
+      "metadata": {
+        "id": "uuid-16",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Add node: Region",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-4",
+        "type": "container",
+        "label": "Region",
+        "ports": [
+          {
+            "id": "uuid-5",
+            "name": "input",
+            "direction": "in"
+          },
+          {
+            "id": "uuid-6",
+            "name": "output",
+            "direction": "out"
+          }
+        ],
+        "data": {},
+        "metadata": {},
+        "status": "draft",
+        "artifacts": []
+      }
+    },
+    {
+      "type": "update_node",
+      "metadata": {
+        "id": "uuid-17",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Move \"API\" into \"Region\" (scopes)",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-10",
+        "changes": {
+          "parentId": "uuid-4",
+          "placementKind": "scopes"
+        }
+      }
+    },
+    {
+      "type": "update_node",
+      "metadata": {
+        "id": "uuid-18",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Move \"DB\" into \"Region\" (scopes)",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-1",
+        "changes": {
+          "parentId": "uuid-4",
+          "placementKind": "scopes"
+        }
+      }
+    },
+    {
+      "type": "add_contract",
+      "metadata": {
+        "id": "uuid-19",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Add contract: API-to-DB",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-7",
+        "kind": "rest",
+        "name": "API-to-DB",
+        "status": "draft",
+        "interactionKind": "request_response",
+        "transport": "http",
+        "specFormat": "openapi"
+      }
+    },
+    {
+      "type": "add_edge",
+      "metadata": {
+        "id": "uuid-20",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Add edge: API -> DB",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-21",
+        "source": "uuid-10",
+        "target": "uuid-1",
+        "sourcePortId": "uuid-13",
+        "targetPortId": "uuid-2",
+        "contractId": "uuid-7"
+      }
+    },
+    {
+      "type": "update_node",
+      "metadata": {
+        "id": "uuid-22",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Unparent node: DB",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-1",
+        "changes": {
+          "parentId": null,
+          "placementKind": null
+        }
+      }
+    },
+    {
+      "type": "update_node",
+      "metadata": {
+        "id": "uuid-23",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Update node: API",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-10",
+        "changes": {
+          "data": {
+            "description": "Public REST"
+          },
+          "metadata": {
+            "rationale": "External clients"
+          }
+        }
+      }
+    },
+    {
+      "type": "add_port",
+      "metadata": {
+        "id": "uuid-24",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Add port \"grpc-out\" to API",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "nodeId": "uuid-10",
+        "port": {
+          "id": "uuid-14",
+          "name": "grpc-out",
+          "direction": "out"
+        }
+      }
+    },
+    {
+      "type": "add_artifact",
+      "metadata": {
+        "id": "uuid-25",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Add artifact: src/index.ts to API",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-9",
+        "nodeId": "uuid-10",
+        "kind": "source",
+        "path": "src/index.ts",
+        "content": "export {}",
+        "language": "typescript",
+        "status": "draft",
+        "createdAt": "<TS>",
+        "updatedAt": "<TS>"
+      }
+    },
+    {
+      "type": "update_contract",
+      "metadata": {
+        "id": "uuid-26",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Contract \"API-to-DB\" implemented by API",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-7",
+        "changes": {
+          "status": "complete"
+        }
+      }
+    },
+    {
+      "type": "update_artifact",
+      "metadata": {
+        "id": "uuid-27",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Update artifact: src/index.ts on API",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-9",
+        "nodeId": "uuid-10",
+        "changes": {
+          "content": "export const x = 1",
+          "status": "draft",
+          "updatedAt": "<TS>"
+        }
+      }
+    },
+    {
+      "type": "add_contract",
+      "metadata": {
+        "id": "uuid-28",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Add contract: Payments",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-8",
+        "kind": "rest",
+        "name": "Payments",
+        "status": "draft",
+        "interactionKind": "request_response",
+        "transport": "http",
+        "specFormat": "openapi"
+      }
+    },
+    {
+      "type": "remove_edge",
+      "metadata": {
+        "id": "uuid-29",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Remove edge: API -> DB",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-21"
+      }
+    },
+    {
+      "type": "remove_node",
+      "metadata": {
+        "id": "uuid-30",
+        "actorType": "ai",
+        "actorId": "00000000-0000-0000-0000-000000000001",
+        "summary": "Remove node: API",
+        "timestamp": "<TS>"
+      },
+      "payload": {
+        "id": "uuid-10"
+      }
+    }
+  ]
+}
