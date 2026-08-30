@@ -1,0 +1,209 @@
+# NodeSpec Community Edition — the Docker-only install (OSS-17 phase 1).
+#
+# One command, any OS with Docker Desktop/Engine: `docker compose up -d`.
+# No Supabase CLI, no bash bootstrap, no WSL requirement — compose runs
+# natively on Windows/macOS/Linux (owner ruling 2026-09-02 after the
+# README boot-test proved the CLI flow is a developer flow, not a user
+# flow: it dragged in WSL, git line endings, and tool bootstrapping).
+#
+# Topology: the frontend's nginx is BOTH the SPA server and the single-
+# origin API gateway (deploy/community/nginx.conf routes /auth /rest
+# /realtime /storage /functions straight to the services — no Kong; the
+# upstream reference stack itself dropped Kong for a gateway proxy).
+# Only ${FRONTEND_PORT} is ever exposed.
+#
+# Image pins mirror the supabase/docker reference stack (fetched
+# 2026-09-02); postgres major 17 matches supabase/config.toml.
+#
+# Secrets: everything comes from .env (cp .env.example .env). The demo
+# JWT trio works out of the box for a LOCAL install; regenerate all
+# three plus the passwords before exposing beyond your machine — the
+# README shows how.
+
+name: nodespec
+
+services:
+  db:
+    image: supabase/postgres:17.6.1.136
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      PGPORT: 5432
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXP: 3600
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot: aligns the platform role passwords with .env, then applies the
+  # NodeSpec schema + reference data (supabase/migrations) exactly once.
+  # Idempotent — a re-up sees public.projects and exits.
+  db-init:
+    image: supabase/postgres:17.6.1.136
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./db-init/apply.sh:/apply.sh:ro
+      - ../../supabase/migrations:/nodespec-migrations:ro
+    entrypoint: ["bash", "/apply.sh"]
+
+  auth:
+    image: supabase/gotrue:v2.189.0
+    restart: unless-stopped
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${SITE_URL}/auth/v1
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      GOTRUE_SITE_URL: ${SITE_URL}
+      GOTRUE_URI_ALLOW_LIST: ${SITE_URL}/*
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      # No SMTP on a local install: accounts confirm instantly. Password
+      # recovery e-mail needs real SMTP — see the README's production notes.
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+      # Parity with supabase/config.toml: community users can enroll TOTP.
+      GOTRUE_MFA_TOTP_ENROLL_ENABLED: "true"
+      GOTRUE_MFA_TOTP_VERIFY_ENABLED: "true"
+
+  rest:
+    image: postgrest/postgrest:v14.12
+    restart: unless-stopped
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public,storage
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_EXP: 3600
+
+  realtime:
+    image: supabase/realtime:v2.102.3
+    # The tenant resolver derives the tenant from this hostname — keep it.
+    container_name: realtime-dev.supabase-realtime
+    restart: unless-stopped
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      PORT: 4000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: supabaserealtime
+      API_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+
+  storage:
+    image: supabase/storage-api:v1.60.4
+    restart: unless-stopped
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      rest:
+        condition: service_started
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://rest:3000
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      FILE_SIZE_LIMIT: "52428800"
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: stub
+      GLOBAL_S3_BUCKET: stub
+      ENABLE_IMAGE_TRANSFORMATION: "false"
+    volumes:
+      - storage-data:/var/lib/storage
+
+  functions:
+    image: supabase/edge-runtime:v1.74.0
+    restart: unless-stopped
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    command: ["start", "--main-service", "/home/deno/functions/main"]
+    environment:
+      # Runtime-internal URL (server-to-server); the PUBLIC origin the
+      # user's browser needs rides PUBLIC_SUPABASE_URL below.
+      SUPABASE_URL: http://frontend:80
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_DB_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      # NodeSpec deployment configuration (mirrors bootstrap's functions env).
+      NODESPEC_DEPLOYMENT: self-hosted
+      ENCRYPTION_SECRET: ${ENCRYPTION_SECRET}
+      NODESPEC_LICENSE: ${NODESPEC_LICENSE:-}
+      MCP_PUBLIC_URL: ${SITE_URL}/functions/v1/mcp-server
+      PUBLIC_SUPABASE_URL: ${SITE_URL}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY}
+      MCP_LOCAL_TRUST: ${MCP_LOCAL_TRUST}
+      STRIPE_SECRET_KEY: sk_test_dummy_never_called_selfhost
+    volumes:
+      - ../../supabase/functions:/home/deno/functions:ro
+      - ./functions-main:/home/deno/functions/main:ro
+      - deno-cache:/root/.cache/deno
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: deploy/selfhost/Dockerfile.frontend
+      args:
+        VITE_SUPABASE_URL: ${SITE_URL}
+        VITE_SUPABASE_ANON_KEY: ${ANON_KEY}
+        VITE_MCP_PUBLIC_URL: ${SITE_URL}/functions/v1/mcp-server
+        VITE_TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY}
+        VITE_NODESPEC_EDITION: ${VITE_NODESPEC_EDITION:-}
+    restart: unless-stopped
+    depends_on:
+      auth:
+        condition: service_started
+      rest:
+        condition: service_started
+      functions:
+        condition: service_started
+    ports:
+      - "${FRONTEND_PORT}:80"
+    volumes:
+      # The community gateway config replaces the image's CLI-stack default:
+      # same single origin, but routes go straight to the sibling services.
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  db-data:
+  storage-data:
+  deno-cache:

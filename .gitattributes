@@ -1,0 +1,16 @@
+# Line-ending protection (owner boot-test find 2026-09-02): Git for
+# Windows defaults to core.autocrlf=true, which rewrites text files to
+# CRLF at checkout — and a CRLF shell script or mounted config breaks the
+# moment a Linux container executes it (bash dies on `pipefail\r`; the
+# compose db-init and gateway config are bind-mounted straight into
+# containers). Pin LF on every file a Linux runtime consumes directly, so
+# a PowerShell clone boots identically to a Linux clone.
+*.sh        text eol=lf
+*.sql       text eol=lf
+*.conf      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.toml      text eol=lf
+Dockerfile* text eol=lf
+.env.example    text eol=lf
+selfhost.env.example text eol=lf
