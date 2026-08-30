@@ -339,7 +339,7 @@ describe('Container Type Registry', () => {
 
     it('Docker Container should have runtime metadata', () => {
       const docker = getContainerTypeById('docker-container');
-      expect(docker?.defaultMetadata.baseImage).toBe('node:20-alpine');
+      expect(docker?.defaultMetadata.baseImage).toBe('node:24-alpine');
       expect(Array.isArray(docker?.defaultMetadata.ports)).toBe(true);
       expect(typeof docker?.defaultMetadata.environmentVariables).toBe('object');
     });

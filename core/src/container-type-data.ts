@@ -283,7 +283,7 @@ export const STATIC_CONTAINER_TYPE_DATA: ContainerTypeDefinition[] = [
     containerStyle: 'hosting',
     canContain: ['backend-service', 'frontend-app', 'worker', 'database', 'cache', 'inference-service', 'vector-database'],
     defaultMetadata: {
-      baseImage: 'node:20-alpine',
+      baseImage: 'node:24-alpine',
       ports: [3000],
       environmentVariables: {},
       volumes: [],
@@ -293,7 +293,7 @@ export const STATIC_CONTAINER_TYPE_DATA: ContainerTypeDefinition[] = [
       memoryLimit: '512m',
     },
     metadataSchema: {
-      baseImage: { type: 'string', label: 'Base Image', description: 'Docker image (e.g., node:20-alpine)', required: true },
+      baseImage: { type: 'string', label: 'Base Image', description: 'Docker image (e.g., node:24-alpine)', required: true },
       ports: { type: 'array', label: 'Exposed Ports', description: 'Container ports to expose' },
       environmentVariables: { type: 'object', label: 'Environment Variables', description: 'Key-value configuration pairs' },
       volumes: { type: 'array', label: 'Volume Mounts', description: 'Persistent storage paths' },

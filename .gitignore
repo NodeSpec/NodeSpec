@@ -27,3 +27,4 @@ supabase/snippets/
 # Supabase CLI db pull output — a schema snapshot that would fight the
 # migration chain on fresh replays; regenerate deliberately, never commit.
 supabase/migrations/*_remote_schema.sql
+vite.config.ts.timestamp-*

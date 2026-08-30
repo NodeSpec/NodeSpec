@@ -3,7 +3,7 @@
 # Built by bootstrap.sh / docker-compose.frontend.yml from the REPO/BUNDLE
 # ROOT (context = ../.., this file passed with -f).
 
-FROM node:20-alpine AS build
+FROM node:24-alpine AS build
 WORKDIR /app
 
 # Endpoint configuration is compile-time for a Vite app — passed as build args
