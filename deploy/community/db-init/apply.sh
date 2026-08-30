@@ -25,6 +25,59 @@ ALTER USER supabase_storage_admin WITH PASSWORD '${POSTGRES_PASSWORD}';
 CREATE SCHEMA IF NOT EXISTS _realtime;
 SQL
 
+# The CLI/hosted platform provides auth helper functions the raw image
+# baseline may lack (live-caught 2026-09-02: the image ships auth.uid() but
+# not auth.jwt(), so the squashed schema died at its first auth.jwt()
+# reference). Create only what is MISSING — never replace what the image or
+# a newer GoTrue owns — using the canonical Supabase definitions.
+echo "[nodespec-init] ensuring auth helper functions"
+"${PSQL_ADMIN[@]}" <<'SQL'
+DO $do$
+BEGIN
+  IF to_regprocedure('auth.jwt()') IS NULL THEN
+    CREATE FUNCTION auth.jwt() RETURNS jsonb
+      LANGUAGE sql STABLE
+      AS $f$
+        select coalesce(
+          nullif(current_setting('request.jwt.claim', true), ''),
+          nullif(current_setting('request.jwt.claims', true), '')
+        )::jsonb
+      $f$;
+  END IF;
+  IF to_regprocedure('auth.uid()') IS NULL THEN
+    CREATE FUNCTION auth.uid() RETURNS uuid
+      LANGUAGE sql STABLE
+      AS $f$
+        select coalesce(
+          nullif(current_setting('request.jwt.claim.sub', true), ''),
+          (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
+        )::uuid
+      $f$;
+  END IF;
+  IF to_regprocedure('auth.role()') IS NULL THEN
+    CREATE FUNCTION auth.role() RETURNS text
+      LANGUAGE sql STABLE
+      AS $f$
+        select coalesce(
+          nullif(current_setting('request.jwt.claim.role', true), ''),
+          (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role')
+        )::text
+      $f$;
+  END IF;
+  IF to_regprocedure('auth.email()') IS NULL THEN
+    CREATE FUNCTION auth.email() RETURNS text
+      LANGUAGE sql STABLE
+      AS $f$
+        select coalesce(
+          nullif(current_setting('request.jwt.claim.email', true), ''),
+          (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'email')
+        )::text
+      $f$;
+  END IF;
+END
+$do$;
+SQL
+
 # The NodeSpec schema references auth.users (FKs, RLS). The supabase/postgres
 # image ships the auth baseline; if a future image defers it to GoTrue's
 # first migration run, wait rather than fail.
@@ -40,9 +93,13 @@ if [ "$("${PSQL_ADMIN[@]}" -tAc "select to_regclass('public.projects') is not nu
 fi
 
 echo "[nodespec-init] applying the NodeSpec schema + reference data"
+# -1 (single transaction) per file: a failure rolls the whole file back, so
+# the public.projects idempotence check above can never see a half-applied
+# database on the next run (live-caught 2026-09-02: a mid-file error left a
+# partial schema that a retry would have skipped past).
 for f in /nodespec-migrations/*.sql; do
   echo "[nodespec-init] applying ${f}"
-  "${PSQL_PG[@]}" -f "${f}"
+  "${PSQL_PG[@]}" -1 -f "${f}"
 done
 
 echo "[nodespec-init] done"

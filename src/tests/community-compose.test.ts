@@ -47,6 +47,11 @@ describe('community compose — stack coherence', () => {
     expect(initScript).toContain("to_regclass('public.projects')");
     expect(initScript).toContain('already present');
     expect(initScript).toContain("to_regclass('auth.users')");
+    // Live-caught 2026-09-02: the raw image baseline lacks auth.jwt(), and a
+    // mid-file failure must roll back or the idempotence check lies.
+    expect(initScript).toContain("to_regprocedure('auth.jwt()')");
+    expect(initScript).toContain("to_regprocedure('auth.uid()')");
+    expect(initScript).toContain('-1 -f');
     // Role passwords must align with .env or every sibling service 401s.
     for (const role of ['authenticator', 'supabase_auth_admin', 'supabase_storage_admin']) {
       expect(initScript).toContain(`ALTER USER ${role} WITH PASSWORD`);
