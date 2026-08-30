@@ -83,8 +83,19 @@ describe('community compose — stack coherence', () => {
     // Upstreams resolve at REQUEST time (Docker DNS + variable proxy_pass):
     // a literal hostname resolves at startup, and nginx refuses to boot
     // while any sibling is still coming up (cold-boot find 2026-09-02).
-    expect(nginx).toContain('resolver 127.0.0.11');
+    expect(nginx).toContain('resolver 127.0.0.11 valid=10s ipv6=off;');
     expect(nginx).not.toMatch(/proxy_pass http:\/\//);
+    // `set` is a rewrite-module directive and `rewrite ... break` HALTS
+    // rewrite-phase processing — a set placed after the rewrite never runs
+    // and proxy_pass gets an empty string (live 500s, 2026-09-02). Every
+    // set must precede its block's rewrite.
+    for (const m of nginx.matchAll(/location [^{]+\{([\s\S]*?)\n    \}/g)) {
+      const block = m[1];
+      const setIdx = block.indexOf('set $upstream');
+      const rewriteIdx = block.indexOf('rewrite ');
+      if (setIdx === -1 || rewriteIdx === -1) continue;
+      expect(setIdx, `set must precede rewrite in: ${m[0].slice(0, 40)}`).toBeLessThan(rewriteIdx);
+    }
   });
 
   it('the main router spawns per-function workers with full env passthrough', () => {
