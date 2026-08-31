@@ -37,7 +37,7 @@
 //   - ✅/❌/▫️ <test id> — <name> read-only test lines ( (stale) suffixed)
 
 import { computeArchivedRowIds, deriveWorkStatus, type WorkStatus } from "./derive-status.ts";
-import { alignCriterionLanes, formatCriterionAnnotation } from "./board-alignment.ts";
+import { alignCriterionLanes, formatCriterionAnnotation, taskEvidenceDone } from "./board-alignment.ts";
 import { findExistingTestArtifact } from "./test-document-generator.ts";
 import {
   computeTaskDeltas,
@@ -115,8 +115,18 @@ export function renderBoardMd(model: BoardModel): string {
   // Triage first: pulled or viewed on GitHub, the file opens as a TABLE —
   // every row one requirement, anchor-linked to its tickable section below.
   const derived = reqs.map((req) => {
+    // Owner refinement 2026-09-01: evidence-derived task completion. Counts
+    // and annotations reflect it; the tickable checkbox lines below NEVER do
+    // (they are the tick-ingestion surface and keep the recorded state).
+    const effectiveNodes = req.nodes.map((node) => ({
+      ...node,
+      tasks: node.tasks.map((t) => ({
+        ...t,
+        evidenceDone: taskEvidenceDone({ requirementId: req.requirementId, criteria: req.criteria, task: t }),
+      })),
+    }));
     const taskTotal = req.nodes.reduce((n, node) => n + node.tasks.length, 0);
-    const taskDone = req.nodes.reduce((n, node) => n + node.tasks.filter((t) => t.done).length, 0);
+    const taskDone = effectiveNodes.reduce((n, node) => n + node.tasks.filter((t) => t.done || t.evidenceDone).length, 0);
     const status = deriveWorkStatus({
       archived: req.archived,
       requirementStatus: req.status,
@@ -124,7 +134,7 @@ export function renderBoardMd(model: BoardModel): string {
       tests: req.tests,
       tasks: { total: taskTotal, done: taskDone },
     });
-    return { req, status, taskTotal, taskDone };
+    return { req, effectiveNodes, status, taskTotal, taskDone };
   });
   lines.push("| Requirement | Status | Criteria | Tasks | Tests P/F/S | Nodes |");
   lines.push("|---|---|---|---|---|---|");
@@ -138,7 +148,7 @@ export function renderBoardMd(model: BoardModel): string {
   }
   lines.push("");
 
-  for (const { req, status, taskTotal, taskDone } of derived) {
+  for (const { req, effectiveNodes, status, taskTotal, taskDone } of derived) {
     lines.push(`## ${req.requirementId} — ${req.name} <!-- r:${req.requirementId} -->`);
     lines.push(
       `status: ${status.status}${status.tier ? ` (${status.tier})` : ""} · criteria ${status.counts.criteriaMet}/${status.counts.criteriaTotal} · tasks ${taskDone}/${taskTotal} · tests ${req.tests.passed}/${req.tests.failed}/${req.tests.stale} of ${req.tests.total}`,
@@ -151,9 +161,11 @@ export function renderBoardMd(model: BoardModel): string {
     const lanes = alignCriterionLanes({
       requirementId: req.requirementId,
       criteria: req.criteria,
-      tasks: [...req.nodes].sort((a, b) => a.label.localeCompare(b.label)).flatMap((node) =>
+      tasks: [...effectiveNodes].sort((a, b) => a.label.localeCompare(b.label)).flatMap((node) =>
         node.tasks.map((t) => ({
-          displayId: t.displayId, title: t.title, done: t.done, nodeLabel: node.label, serves: t.serves,
+          displayId: t.displayId, title: t.title,
+          done: t.done || t.evidenceDone, evidenceDone: t.evidenceDone,
+          nodeLabel: node.label, serves: t.serves,
         })),
       ),
       tests: [...req.testCases].sort((a, b) => a.testId.localeCompare(b.testId)),

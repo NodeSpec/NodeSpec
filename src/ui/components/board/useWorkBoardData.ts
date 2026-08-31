@@ -20,7 +20,7 @@ import type { SpecificationSection } from '../../../persistence/supabase/section
 import { computeArchivedLineage, findTestPlanArtifact } from '../spec-v3/scale.js';
 import { parseTaskDocTasks } from '../../../../supabase/functions/_shared/task-deltas.js';
 import { deriveWorkStatus, type WorkStatusResult } from './derive-status.js';
-import { alignCriterionLanes, type AlignedLanes } from '../../../../supabase/functions/_shared/board-alignment.js';
+import { alignCriterionLanes, taskEvidenceDone, type AlignedLanes } from '../../../../supabase/functions/_shared/board-alignment.js';
 
 export interface WorkBoardTask {
   nodeId: string;
@@ -32,6 +32,10 @@ export interface WorkBoardTask {
   provenance: Record<string, unknown> | null;
   /** D3 alignment: criteria this work order serves (from the doc's ↳ lines). */
   serves?: Array<{ reqId: string; text: string }>;
+  /** Owner refinement 2026-09-01: `done` was DERIVED from criterion evidence
+   *  (every served criterion met, evidence fresh) — no tick recorded. Display
+   *  state only; the tick lane and task_items are untouched. */
+  evidenceDone: boolean;
 }
 
 export interface WorkBoardTestSummary {
@@ -175,6 +179,13 @@ export function useWorkBoardData(args: {
       // Tasks for this requirement = the mapped nodes' doc tasks, with DB
       // state (done/provenance) merged by stable key; orphaned DB rows whose
       // key the doc no longer emits still count (evidence never vanishes).
+      const criteria = requirement.acceptanceCriteria ?? [];
+      const withEvidence = (t: Omit<WorkBoardTask, 'evidenceDone'>): WorkBoardTask => ({
+        ...t,
+        // Owner refinement 2026-09-01: evidence-derived completion — the same
+        // shared rule BOARD.md renders with (display only, never written).
+        evidenceDone: taskEvidenceDone({ requirementId: requirement.requirementId, criteria, task: t }),
+      });
       const tasks: WorkBoardTask[] = [];
       for (const node of nodes) {
         const seen = new Set<string>();
@@ -182,7 +193,7 @@ export function useWorkBoardData(args: {
           if (!docTask.key) continue;
           seen.add(docTask.key);
           const state = stateByNodeKey.get(`${node.id}::${docTask.key}`);
-          tasks.push({
+          tasks.push(withEvidence({
             nodeId: node.id,
             key: docTask.key,
             displayId: docTask.displayId,
@@ -191,11 +202,11 @@ export function useWorkBoardData(args: {
             orphaned: false,
             provenance: state?.provenance ?? null,
             ...(docTask.serves ? { serves: docTask.serves } : {}),
-          });
+          }));
         }
         for (const row of taskItemRows) {
           if (row.node_id !== node.id || seen.has(row.task_key)) continue;
-          tasks.push({
+          tasks.push(withEvidence({
             nodeId: node.id,
             key: row.task_key,
             displayId: row.display_id ?? '',
@@ -203,7 +214,7 @@ export function useWorkBoardData(args: {
             done: row.done,
             orphaned: true,
             provenance: row.provenance ?? null,
-          });
+          }));
         }
       }
 
@@ -222,7 +233,8 @@ export function useWorkBoardData(args: {
         tasks: tasks.map((t) => ({
           displayId: t.displayId,
           title: t.title,
-          done: t.done,
+          done: t.done || t.evidenceDone,
+          evidenceDone: t.evidenceDone,
           nodeLabel: nodeLabelById.get(t.nodeId) ?? t.nodeId.slice(0, 8),
           serves: t.serves,
         })),
@@ -234,7 +246,7 @@ export function useWorkBoardData(args: {
         requirementStatus: requirement.status,
         criteria: requirement.acceptanceCriteria ?? [],
         tests,
-        tasks: { total: tasks.length, done: tasks.filter((t) => t.done).length },
+        tasks: { total: tasks.length, done: tasks.filter((t) => t.done || t.evidenceDone).length },
       });
       return { requirement, archived, nodes, tests, testCases, planPath, tasks, alignment, status };
     });

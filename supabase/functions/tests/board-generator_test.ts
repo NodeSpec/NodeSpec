@@ -223,7 +223,7 @@ Deno.test("pipes in names cannot break the table", () => {
 
 // ── D3 refinement 2 (owner 2026-08-21): LATERAL alignment per criterion ──────
 
-import { alignCriterionLanes, formatCriterionAnnotation } from "../_shared/board-alignment.ts";
+import { alignCriterionLanes, formatCriterionAnnotation, taskEvidenceDone } from "../_shared/board-alignment.ts";
 import { parseTaskDocTasks } from "../_shared/task-deltas.ts";
 
 function alignedModel(): BoardModel {
@@ -261,7 +261,9 @@ Deno.test("each criterion reads laterally: ITS tasks (via serves) and ITS test (
   const lines = md.split("\n");
   const critIdx = lines.indexOf("- [x] password login succeeds");
   assert(critIdx !== -1);
-  assertEquals(lines[critIdx + 1], "  ↳ tasks: T2 ☐ (API Service) · tests: TC-1 ✅");
+  // Owner refinement 2026-09-01: T2 is unticked but serves ONLY this met,
+  // evidence-fresh criterion — the annotation derives ☑ and says so.
+  assertEquals(lines[critIdx + 1], "  ↳ tasks: T2 ☑ (by evidence) (API Service) · tests: TC-1 ✅");
   // The unaligned criterion carries NO annotation — the board never guesses.
   const bare = lines.indexOf("- [ ] lockout after 5 failures");
   assert(bare !== -1 && !lines[bare + 1].trim().startsWith("↳"), lines[bare + 1]);
@@ -270,6 +272,44 @@ Deno.test("each criterion reads laterally: ITS tasks (via serves) and ITS test (
   assert(md.includes("- ❌ TC-9 — unbound smoke case"), "unbound evidence never hides");
   // General tasks (no serves) still tick in their node section.
   assert(md.includes(`- [x] **T1 — Scaffold the API component.** <!-- t:${K1} -->`));
+});
+
+// ── Owner refinement 2026-09-01: evidence-derived task completion ────────────
+Deno.test("evidence-derived ☑ reaches counts and annotations but NEVER the tick surface", () => {
+  const md = renderBoardMd(alignedModel());
+  // T2's CHECKBOX stays unticked — it is the tick-ingestion surface and keeps
+  // the recorded state; deriving there would fabricate a phantom tick with
+  // git provenance on the next out-of-band diff.
+  assert(md.includes(`- [ ] **T2 — Wire the database.** <!-- t:${K2} -->`),
+    "the tick surface must keep the RAW state");
+  // The counts count it: 1 ticked (T1) + 1 evidence-derived (T2) = 2/2.
+  assert(md.includes("· tasks 2/2 ·"), md.split("\n").find((l) => l.startsWith("status:")));
+  // And ingestion still parses the file exactly as before.
+  const parsed = parseBoardMd(md);
+  assertEquals(parsed.flagged, []);
+  assertEquals(parsed.tasksByNode[NODE_A]!.find((t) => t.key === K2)?.checked, false);
+});
+
+Deno.test("taskEvidenceDone: the strict matrix — derives ONLY on full same-requirement proven coverage", () => {
+  const criteria = [
+    { text: "c-met", met: true },
+    { text: "c-unmet", met: false },
+    { text: "c-stale", met: true, evidenceStale: true },
+  ];
+  const t = (task: { done: boolean; orphaned?: boolean; serves?: Array<{ reqId: string; text: string }> }) =>
+    taskEvidenceDone({ requirementId: "REQ-001", criteria, task });
+  assertEquals(t({ done: false, serves: [{ reqId: "REQ-001", text: "c-met" }] }), true, "served criterion proven → derived");
+  assertEquals(t({ done: true, serves: [{ reqId: "REQ-001", text: "c-met" }] }), false, "already ticked — nothing to derive");
+  assertEquals(t({ done: false }), false, "general task (no serves) never derives — the board never guesses");
+  assertEquals(t({ done: false, orphaned: true, serves: [{ reqId: "REQ-001", text: "c-met" }] }), false, "orphaned rows never derive");
+  assertEquals(t({ done: false, serves: [{ reqId: "REQ-001", text: "c-unmet" }] }), false, "unmet criterion → no derivation");
+  assertEquals(t({ done: false, serves: [{ reqId: "REQ-001", text: "c-stale" }] }), false, "stale evidence → the derived ☑ self-heals away");
+  assertEquals(t({ done: false, serves: [{ reqId: "REQ-001", text: "c-met" }, { reqId: "REQ-001", text: "c-unmet" }] }), false,
+    "EVERY served criterion must be proven, not just one");
+  assertEquals(t({ done: false, serves: [{ reqId: "REQ-001", text: "c-met" }, { reqId: "REQ-777", text: "other" }] }), false,
+    "cross-requirement serves stay undecided — this row cannot see the other requirement's evidence");
+  assertEquals(t({ done: false, serves: [{ reqId: "REQ-001", text: "reworded away" }] }), false,
+    "a serves-line pointing at no current criterion breaks the linkage — never guessed");
 });
 
 Deno.test("annotation lines are INVISIBLE to ingestion — ticks parse exactly as before", () => {

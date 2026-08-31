@@ -134,8 +134,11 @@ export function WorkBoardView({ projectId, specificationId, graph }: {
     const taskChip = (t: AlignableTask, idx: number) => {
       const info = taskInfo.get(`${t.displayId}::${t.title}`);
       const prov = formatProvenance(info?.provenance ?? null);
-      const tip = [t.title, t.nodeLabel, prov, info?.orphaned ? 'orphaned — the doc no longer emits this task; evidence kept' : '']
-        .filter(Boolean).join(' · ');
+      const tip = [
+        t.title, t.nodeLabel, prov,
+        t.evidenceDone ? 'proven by criterion evidence — no tick recorded' : '',
+        info?.orphaned ? 'orphaned — the doc no longer emits this task; evidence kept' : '',
+      ].filter(Boolean).join(' · ');
       return (
         <span key={`${t.displayId || t.title}-${idx}`} title={tip} style={{
           padding: '1px 7px', borderRadius: '8px', fontSize: '11px', whiteSpace: 'nowrap',

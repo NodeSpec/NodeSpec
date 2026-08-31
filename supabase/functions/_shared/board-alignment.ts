@@ -20,6 +20,10 @@ export interface AlignableTask {
   done: boolean;
   nodeLabel: string;
   serves?: Array<{ reqId: string; text: string }>;
+  /** Owner refinement 2026-09-01: set when `done` is DERIVED from criterion
+   *  evidence (taskEvidenceDone) rather than a recorded tick — display
+   *  surfaces mark the difference; tick surfaces never render this. */
+  evidenceDone?: boolean;
 }
 
 export interface AlignableTest {
@@ -84,6 +88,49 @@ export function alignCriterionLanes(args: {
   return { byCriterion, generalTasks, otherTests };
 }
 
+/**
+ * Owner refinement 2026-09-01: evidence-derived task completion, DISPLAY ONLY.
+ *
+ * The task checklist has exactly one write lane (git ticks + user approval),
+ * so in the MCP loop a requirement reads "verified · 0/N tasks" forever —
+ * stale declarations beside proven outcomes. Evidence is strictly stronger
+ * than the declaration a tick would carry: a task whose EVERY served
+ * criterion is met with non-stale evidence is proven complete. This derives
+ * that state at render time — no task_items write, so it self-heals when
+ * evidence goes stale (the derived ☑ disappears with it, which a stamped row
+ * could not do).
+ *
+ * Strictly conservative — derives ONLY when:
+ *   · the task is not already ticked (nothing to derive) and not orphaned;
+ *   · it serves ≥1 criterion, and every serves entry targets THIS requirement
+ *     (cross-requirement work stays undecided — this row cannot see the other
+ *     requirement's evidence);
+ *   · every served text matches a CURRENT criterion (a reworded criterion
+ *     breaks the linkage — the board never guesses);
+ *   · every served criterion is met with evidence not stale.
+ * General/requirement-wide tasks never derive. deriveWorkStatus output is
+ * provably unchanged by this (derivation requires all served criteria met,
+ * which already implies a progress signal) — only the COUNTS move.
+ */
+export function taskEvidenceDone(args: {
+  requirementId: string;
+  criteria: Array<{ text: string; met?: boolean; evidenceStale?: unknown }>;
+  task: { done: boolean; orphaned?: boolean; serves?: Array<{ reqId: string; text: string }> };
+}): boolean {
+  const { task } = args;
+  if (task.done || task.orphaned) return false;
+  const serves = task.serves ?? [];
+  if (serves.length === 0) return false;
+  const byText = new Map(args.criteria.map((c) => [c.text, c]));
+  for (const s of serves) {
+    if (s.reqId !== args.requirementId) return false;
+    const criterion = byText.get(s.text);
+    if (!criterion) return false;
+    if (criterion.met !== true || criterion.evidenceStale) return false;
+  }
+  return true;
+}
+
 const TEST_GLYPHS: Record<string, string> = { passed: "✅", failed: "❌" };
 
 /** The one-line lateral annotation rendered under a criterion — identical in
@@ -93,7 +140,9 @@ export function formatCriterionAnnotation(alignment: CriterionAlignment): string
   if (alignment.tasks.length > 0) {
     parts.push(
       "tasks: " + alignment.tasks
-        .map((t) => `${t.displayId} ${t.done ? "☑" : "☐"} (${t.nodeLabel})`)
+        // "(by evidence)" marks a derived ☑ — the task's checkbox below is
+        // still unticked; its served criteria's evidence proves the work.
+        .map((t) => `${t.displayId} ${t.done ? "☑" : "☐"}${t.done && t.evidenceDone ? " (by evidence)" : ""} (${t.nodeLabel})`)
         .join(", "),
     );
   }

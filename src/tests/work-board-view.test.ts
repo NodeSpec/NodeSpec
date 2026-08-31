@@ -154,3 +154,26 @@ describe('board scroll chain', () => {
     expect(spec).toContain('minHeight: 0');
   });
 });
+
+// ── Owner refinement 2026-09-01: evidence-derived task completion (client) ───
+describe('evidence-derived task completion', () => {
+  it('the client derives with the SAME shared rule and feeds effective done into counts + lanes', () => {
+    const hook = readFileSync(resolve(__dirname, '../ui/components/board/useWorkBoardData.ts'), 'utf-8');
+    // One cross-runtime function — the app and BOARD.md cannot derive differently.
+    expect(hook).toContain("taskEvidenceDone, type AlignedLanes } from '../../../../supabase/functions/_shared/board-alignment.js'");
+    // Status counts and the alignment lanes both read done || evidenceDone…
+    expect(hook).toContain('done: tasks.filter((t) => t.done || t.evidenceDone).length');
+    expect(hook).toContain('done: t.done || t.evidenceDone,');
+    // …and the raw tick state is never overwritten (derivation is display-only).
+    expect(hook).toContain("done: state?.done ?? docTask.checked");
+    const view = readFileSync(resolve(__dirname, '../ui/components/board/WorkBoardView.tsx'), 'utf-8');
+    expect(view).toContain('proven by criterion evidence — no tick recorded');
+  });
+
+  it('the server projection keeps the tick surface raw while counts/annotations derive', () => {
+    const gen = readFileSync(resolve(__dirname, '../../supabase/functions/_shared/board-generator.ts'), 'utf-8');
+    expect(gen).toContain('taskEvidenceDone({ requirementId: req.requirementId, criteria: req.criteria, task: t })');
+    // The checkbox line renders from the RAW node list, never the derived one.
+    expect(gen).toContain('lines.push(`- [${t.done ? "x" : " "}] **${t.displayId} — ${t.title}** <!-- t:${t.key} -->`)');
+  });
+});
