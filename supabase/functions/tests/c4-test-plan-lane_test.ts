@@ -238,7 +238,13 @@ Deno.test('get_test_plan: fresh generation is parked as a proposal — add_artif
   }
 });
 
-Deno.test('get_test_plan: stored plan found via metadata.requirementId after a rename → returned as-is, NO proposal', async () => {
+Deno.test('get_test_plan: stored plan found via metadata.requirementId after a rename → refreshed when stale, NO proposal', async () => {
+  // Dogfood find 2026-09-02 (#3) changed this lane's doctrine: a stored plan
+  // whose fingerprint no longer matches the current inputs is REGENERATED at
+  // read time instead of served as-is (the old behavior kept reporting
+  // "noschema" after a schema landed). The rename-proof lookup still holds —
+  // the artifact is FOUND (isNew false, nothing parked) — and the refresh is
+  // deliberately NOT persisted: that stays the push-time gate's job.
   const sb = new FakeSupabase();
   const g = baseGraph();
   g.artifacts[TP] = {
@@ -251,9 +257,10 @@ Deno.test('get_test_plan: stored plan found via metadata.requirementId after a r
   const r = await handleGetTestPlan(sb as never, READ_AUTH, { project_id: PROJECT.id, branch_id: BRANCH, requirement_id: REQ_ROW });
   assertEquals(r.success, true);
   const data = r.data as Record<string, unknown>;
-  assertEquals(data.testPlanIsNew, false);
-  assert(String(data.testPlanContent).includes('STORED PLAN BODY'), 'rename did not orphan the stored plan');
-  assertEquals(data.proposalId, undefined, 'nothing generated → nothing parked');
+  assertEquals(data.testPlanIsNew, false, 'the stored plan WAS found — rename did not orphan it');
+  assert(!String(data.testPlanContent).includes('STORED PLAN BODY'), 'stale stored content is not served');
+  assert(String(data.testPlanContent).includes('# Test Plan:'), 'a fresh regeneration is served instead');
+  assertEquals(data.proposalId, undefined, 'a refresh parks NOTHING — persistence belongs to the push-time gate');
   assertEquals(sb.callsTo('ai_proposals', 'insert').length, 0);
   assertEquals(sb.callsTo('ai_runs', 'insert').length, 0);
 });

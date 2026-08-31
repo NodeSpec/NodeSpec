@@ -165,7 +165,11 @@ export function OnboardingModal({ onClose, gateOnMcp = false }: OnboardingModalP
       {anchorRect && (
         <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 1 }}>
           {/* spotlight ring; its outer 9999px shadow IS the dimming layer,
-              leaving a clear window over the live control */}
+              leaving a clear window over the live control. On the connect
+              step the modal is the main content, so the dim stays LIGHT and
+              the pulse settles after three beats (owner 2026-09-02: the
+              infinite pulse at 0.6 dim was overwhelming and darkened the
+              popup); the header tour keeps the stronger focus dim. */}
           <div style={{
             position: 'fixed',
             top: anchorRect.top - 6,
@@ -174,8 +178,10 @@ export function OnboardingModal({ onClose, gateOnMcp = false }: OnboardingModalP
             height: anchorRect.height + 12,
             borderRadius: '12px',
             border: `2px solid ${c.primary}`,
-            boxShadow: `0 0 0 4px ${c.primary}40, 0 0 18px ${c.primary}80, 0 0 0 9999px rgba(0, 0, 0, 0.6)`,
-            animation: 'onboardPulse 1.6s ease-in-out infinite',
+            boxShadow: `0 0 0 4px ${c.primary}40, 0 0 18px ${c.primary}80, 0 0 0 9999px rgba(0, 0, 0, ${currentStep === 0 ? 0.28 : 0.6})`,
+            animation: currentStep === 0
+              ? 'onboardPulse 2s ease-in-out 3'
+              : 'onboardPulse 1.6s ease-in-out infinite',
           }} />
           {/* label under the ring */}
           <div style={{
@@ -217,6 +223,9 @@ export function OnboardingModal({ onClose, gateOnMcp = false }: OnboardingModalP
           flexDirection: 'column',
           animation: 'onboardSlideUp 0.3s ease-out',
           position: 'relative',
+          // Above the spotlight's dimming shadow (zIndex 1): the walkthrough
+          // card itself must never be darkened by its own spotlight.
+          zIndex: 2,
           overflow: 'hidden',
         }}
         onClick={(e) => e.stopPropagation()}

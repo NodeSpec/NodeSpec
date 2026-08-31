@@ -192,7 +192,7 @@ export async function refreshTaskPackets(supabase: any, projectId: string, graph
         await reconcileTaskItemOrphans(supabase, projectId, node.id, regeneratedDoc);
       } catch { /* non-fatal */ }
       // N5.17: the AI-authored Implementation Context section survives regeneration
-      // verbatim; the fingerprint flip that got us here flags it REVIEW-NEEDED (once).
+      // verbatim; the fingerprint flip that got us here flags it REVIEW NEEDED (once).
       const content = preserveImplementationContextSection(
         regeneratedDoc, String(artifact.content ?? ""), { flagReview: true },
       );

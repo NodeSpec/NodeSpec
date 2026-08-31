@@ -811,7 +811,22 @@ export function generateTaskDocument(input: TaskDocumentInput): string {
   }
 
   // -- Technology Guidance --
-  if (techRow?.ai_context) {
+  // Dogfood find 2026-09-02 (#5): catalog guidance is GLOBAL truth, and a
+  // project's own rulings could not veto it — a GDScript-decided Godot game
+  // got "@rpc server-authority samples, use C# for complex systems" in all
+  // 18 packets, contradicting an accepted requirement. A node whose metadata
+  // carries suppressCatalogGuidance: true (settable over MCP via update_node
+  // changes.metadata) drops the section and says so — the project's own
+  // Implementation Context governs instead. Setup steps and interface
+  // contracts are unaffected: only the advisory guidance is suppressed.
+  const guidanceSuppressed = node.metadata?.suppressCatalogGuidance === true;
+  if (guidanceSuppressed && techRow?.ai_context) {
+    lines.push("## Technology Guidance");
+    lines.push("");
+    lines.push("_Catalog guidance suppressed for this node (metadata.suppressCatalogGuidance) — the project's own rulings in ## Implementation Context and the requirements govern. Re-enable by removing the flag._");
+    lines.push("");
+  }
+  if (!guidanceSuppressed && techRow?.ai_context) {
     const ctx = techRow.ai_context;
     lines.push("## Technology Guidance");
     lines.push("");
@@ -1791,7 +1806,7 @@ export function getTaskDocumentPath(nodeLabel: string, nodeId: string): string {
 //     fresh scaffold wins (directive wording may have improved between versions);
 //   · authored prose → carried into the regenerated doc VERBATIM;
 //   · flagReview (a fingerprint flip regenerated the doc around it) → a single
-//     REVIEW-NEEDED line is inserted under the heading, once — never duplicated,
+//     REVIEW NEEDED line is inserted under the heading, once — never duplicated,
 //     never wiped; the AI deletes it after re-verifying the section.
 export const IMPLEMENTATION_CONTEXT_HEADING = "## Implementation Context";
 export const IMPLEMENTATION_CONTEXT_PLACEHOLDER = "_Not yet authored._";
@@ -1803,7 +1818,7 @@ export function implementationContextScaffold(): string[] {
     IMPLEMENTATION_CONTEXT_HEADING,
     "",
     "<!-- AI-AUTHORED SECTION: NodeSpec never writes prose here. Your text survives regeneration verbatim while the derived sections around it keep refreshing. -->",
-    `${IMPLEMENTATION_CONTEXT_PLACEHOLDER} **Consuming AI — author this section BEFORE building.** Working from this full packet plus the repository, record the project-specific context no catalog can know: how this node's technology composes with its neighbors in THIS project, the integration specifics behind each interface contract, configuration rationale, and your intended implementation approach. Replace this placeholder (keep the heading) either by editing this file in the repo and pushing — NodeSpec surfaces the edit as a change card for the user to accept — or via an update_artifact patch through propose_patches. If a REVIEW-NEEDED line appears here later, the derived context changed after you wrote this: re-verify the section, then delete that line.`,
+    `${IMPLEMENTATION_CONTEXT_PLACEHOLDER} **Consuming AI — author this section BEFORE building.** Working from this full packet plus the repository, record the project-specific context no catalog can know: how this node's technology composes with its neighbors in THIS project, the integration specifics behind each interface contract, configuration rationale, and your intended implementation approach. Replace this placeholder (keep the heading) either by editing this file in the repo and pushing — NodeSpec surfaces the edit as a change card for the user to accept — or via an update_artifact patch through propose_patches. If a REVIEW NEEDED line appears here later, the derived context changed after you wrote this: re-verify the section, then delete that line.`,
     "",
   ];
 }
@@ -1948,6 +1963,13 @@ export interface TaskContextFingerprint {
      *  and each counterparty technology's apiReference. Empty when the caller has no
      *  catalogs (legacy signature) — every generator callsite should pass them. */
     catalogSignature: string;
+    /** Dogfood 2026-09-02 (#5 follow-up): metadata.suppressCatalogGuidance swaps the
+     *  packet's Technology Guidance section for a suppression note — packet CONTENT,
+     *  so it must move the fingerprint or the push-time freshness gate never
+     *  propagates the flag into committed packets. PRESENT ONLY WHEN TRUE: unflagged
+     *  nodes keep byte-identical field sets, so shipping this costs no global
+     *  re-stale round. */
+    guidanceSuppressed?: true;
   };
 }
 
@@ -2094,6 +2116,13 @@ export function computeTaskContextFingerprint(
       : "",
     // N10(b): the enrichment blind spot closed — catalog content the packet renders.
     catalogSignature: catalogContentSignature(node, graph, catalogs),
+    // Dogfood #5 follow-up: the suppression flag rewrites the rendered Technology
+    // Guidance section. Spread-only-when-true keeps every unflagged node's field
+    // set (and therefore fingerprint) byte-identical — flipping the flag in either
+    // direction moves the fingerprint, nothing else does.
+    ...((node.metadata as Record<string, unknown> | undefined)?.suppressCatalogGuidance === true
+      ? { guidanceSuppressed: true as const }
+      : {}),
   };
 
   return {

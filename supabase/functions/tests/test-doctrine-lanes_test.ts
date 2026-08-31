@@ -255,3 +255,20 @@ Deno.test('WS3 registry: verification field documented on requirement writes; ma
   assert(gtp.description.includes('plans follow schemas (contract-first TDD)'), 'ordering doctrine on get_test_plan');
   assert(gtp.description.includes('schemaBlockedContracts'), 'response field documented');
 });
+
+// ── mock-services seed is conditional (dogfood find 2026-09-02, #6) ───────────
+Deno.test('setup seeds: mock-services line only when a cross-boundary edge exists', () => {
+  // laneGraph wires API Service -> Payment Gateway (outside the mapped set):
+  // external dependency exists, the mock line earns its place.
+  const withExternal = genDoc(laneGraph());
+  assert(withExternal.includes('Set up mock services for external dependencies'), 'external deps present -> line present');
+
+  // A self-contained graph (every edge endpoint mapped, or no edges at all —
+  // the Godot game shape) must NOT tell the AI to mock services it has none of.
+  const selfContained = laneGraph();
+  selfContained.edges = {};
+  const without = genDoc(selfContained);
+  assert(!without.includes('Set up mock services'), 'no external deps -> no mock-services boilerplate');
+  assert(without.includes('Define test data fixtures'), 'the other seeds stay');
+  assert(without.includes('Configure test environment variables'), 'the other seeds stay');
+});

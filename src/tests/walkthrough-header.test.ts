@@ -21,7 +21,13 @@ const topBar = read('../ui/components/panels/TopBar.tsx');
 
 describe('walkthrough spotlight', () => {
   it('is a cutout: the dim layer rides the ring shadow, never over the control', () => {
-    expect(modal).toContain('0 0 0 9999px rgba(0, 0, 0, 0.6)');
+    // Connect step: light dim + finite pulse (owner 2026-09-02 — infinite
+    // pulse at full dim was overwhelming); header tour keeps the focus dim.
+    expect(modal).toContain("0 0 0 9999px rgba(0, 0, 0, ${currentStep === 0 ? 0.28 : 0.6})");
+    expect(modal).toContain("'onboardPulse 2s ease-in-out 3'");
+    // The card renders ABOVE the dimming shadow — never darkened by its own
+    // spotlight.
+    expect(modal).toContain('zIndex: 2');
     // The full-screen backdrop steps aside whenever a control is spotlighted.
     expect(modal).toContain("anchorRect ? 'transparent' : 'rgba(0, 0, 0, 0.6)'");
     expect(modal).toContain("anchorRect ? undefined : 'blur(4px)'");

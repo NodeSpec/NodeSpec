@@ -4,7 +4,7 @@
 // resolve_change depends on THIS module (not the other way round). Structural supabase
 // param + type-only SupabaseClient so it's offline-testable.
 import type { SupabaseClient } from "jsr:@supabase/supabase-js@2";
-import { PatchOperationSchema } from "../../_shared/patch-schema.ts";
+import { PatchOperationSchema, UPDATE_CHANGE_KEYS, UNKNOWN_CHANGE_KEY_HINTS } from "../../_shared/patch-schema.ts";
 import { loadCatalogs } from "../../_shared/catalog-loader.ts";
 import type { CatalogData } from "../../_shared/catalog-loader.ts";
 import { normalizeProposedNode, ensureNodePorts, type NodeNormalizationNote } from "../../_shared/catalog-node-normalization.ts";
@@ -204,6 +204,29 @@ export function validateAndNormalizeProposalPatch(
       error: `patch[${index}] (${p.type}): payload does not match the NodeSpec patch schema — ${issues}. ` +
         `Fix the named fields and resubmit; no proposal was created.`,
     };
+  }
+
+  // Dogfood find 2026-09-02 (#1): Zod strips unknown keys SILENTLY, so an
+  // update whose changes carry a field the schema does not know (the live
+  // case: update_node changes.configuration) validated clean and reported
+  // merged while the data evaporated. The MCP lane refuses unknown change
+  // keys by name — silent data loss reported as success is the one failure
+  // shape this server must never have.
+  const knownKeys = UPDATE_CHANGE_KEYS[p.type as string];
+  const rawChanges = (normalizedPayload as { changes?: unknown })?.changes;
+  if (knownKeys && rawChanges && typeof rawChanges === 'object' && !Array.isArray(rawChanges)) {
+    const unknown = Object.keys(rawChanges as Record<string, unknown>).filter((k) => !knownKeys.has(k));
+    if (unknown.length > 0) {
+      const hints = unknown
+        .map((k) => UNKNOWN_CHANGE_KEY_HINTS[k] ? `"${k}": ${UNKNOWN_CHANGE_KEY_HINTS[k]}` : null)
+        .filter(Boolean);
+      return {
+        error: `patch[${index}] (${p.type}): unknown field(s) in changes: ${unknown.map((k) => `"${k}"`).join(', ')} — ` +
+          `these would be dropped silently, so the patch is refused. Known fields: ${[...knownKeys].join(', ')}.` +
+          (hints.length ? ` Hint — ${hints.join('; ')}.` : '') +
+          ` No proposal was created.`,
+      };
+    }
   }
 
   return { patch: parsed.data as unknown as Record<string, unknown>, notes };
@@ -625,13 +648,28 @@ export async function handleGetProposalStatus(
   }
 
   const patches = proposal.patches as Array<{ patch: unknown; explanation: string; status: string }>;
+
+  // Dogfood find 2026-09-02 (#2): a whole-proposal accept applies every patch
+  // and stamps the ROW merged, but never rewrites the per-patch statuses in
+  // the stored JSON — so this tool reported `status: merged` beside
+  // `pending: 1, merged: 0` and callers had to learn which field to trust.
+  // The row lifecycle governs: under a terminal row, a stored 'pending' or
+  // 'approved' patch WAS carried by the whole-proposal action (individually
+  // rejected patches keep their explicit stamp). Derive at read time — one
+  // consistent answer, no data rewrite, historical proposals self-heal.
+  const effectiveStatus = (stored: string): string => {
+    if (proposal.status === 'merged' && (stored === 'pending' || stored === 'approved')) return 'merged';
+    if (proposal.status === 'rejected' && (stored === 'pending' || stored === 'approved')) return 'rejected';
+    return stored;
+  };
+  const effective = patches.map((p) => effectiveStatus(p.status));
   const patchSummary = {
     total: patches.length,
-    pending: patches.filter(p => p.status === 'pending').length,
-    approved: patches.filter(p => p.status === 'approved').length,
-    rejected: patches.filter(p => p.status === 'rejected').length,
-    merged: patches.filter(p => p.status === 'merged').length,
-    conflicted: patches.filter(p => p.status === 'conflicted').length,
+    pending: effective.filter(s => s === 'pending').length,
+    approved: effective.filter(s => s === 'approved').length,
+    rejected: effective.filter(s => s === 'rejected').length,
+    merged: effective.filter(s => s === 'merged').length,
+    conflicted: effective.filter(s => s === 'conflicted').length,
   };
 
   return {
@@ -645,7 +683,7 @@ export async function handleGetProposalStatus(
       mergedAt: proposal.merged_at,
       patches: patches.map((p, i) => ({
         index: i,
-        status: p.status,
+        status: effective[i],
         explanation: p.explanation,
       })),
     },

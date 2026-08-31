@@ -302,7 +302,19 @@ export function generateTestDocument(input: TestDocumentInput): string {
   lines.push("### Setup & Fixtures");
   lines.push("");
   lines.push("- [ ] Define test data fixtures");
-  lines.push("- [ ] Set up mock services for external dependencies");
+  // Dogfood find 2026-09-02 (#6): "mock services" only means something when
+  // this requirement's nodes actually talk to components OUTSIDE the mapped
+  // set — a self-contained game project got the line in all 30 plans. Emit
+  // it only when a cross-boundary edge exists.
+  {
+    const mappedIds = new Set(mappedNodes.map((n) => n.nodeId));
+    const hasExternalDependency = Object.values(graph.edges).some(
+      (e) => mappedIds.has(e.source) !== mappedIds.has(e.target),
+    );
+    if (hasExternalDependency) {
+      lines.push("- [ ] Set up mock services for external dependencies");
+    }
+  }
   lines.push("- [ ] Configure test environment variables");
   lines.push("");
 

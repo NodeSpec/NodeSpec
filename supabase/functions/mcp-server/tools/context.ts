@@ -7,7 +7,7 @@
 import type { SupabaseClient } from "jsr:@supabase/supabase-js@2";
 import { assembleContextForTarget, findStoredTestDocument, ensureTestDocumentForRequirement } from "../../_shared/mcp-context-assembly.ts";
 import { assembleArchitectureOverview } from "../../_shared/mcp-overview-assembly.ts";
-import { loadCatalogs } from "../../_shared/catalog-loader.ts";
+import { loadCatalogs, type CatalogData } from "../../_shared/catalog-loader.ts";
 import { PatchOperationSchema } from "../../_shared/patch-schema.ts";
 // WS1 read purity: get_project_context reports stored test-plan STATE only — the
 // rename-proof lookup is the only piece of the test-doc module it needs. WS3:
@@ -85,48 +85,57 @@ async function assembleTestPlanForRequirement(
 
   const mappedNodeIds = (mappings || []).map((m: { node_id: string }) => m.node_id);
 
-  const stored = findStoredTestDocument(graphData, requirement.requirement_id, requirement.name);
-
-  let content: string;
-  let fingerprint: unknown;
-  let isNew = false;
-  let stale = false;
+  // Dogfood find 2026-09-02 (#3): the stored branch used to serve the artifact
+  // AS-IS on the word of its stored stale flag — five plans kept reporting
+  // "noschema" after the schema landed, and a read could never self-correct.
+  // Every read now goes through ensureTestDocumentForRequirement, which
+  // compares the CURRENT fingerprint against the stored one and regenerates
+  // on mismatch (user-edited Test Strategy carried forward verbatim), exactly
+  // like the task-doc lane.
+  // Catalog load is BEST-EFFORT on this read (it feeds the framework
+  // recommendation and the fingerprint's narrow catalogSignature): a failed
+  // load degrades to empty catalogs — the legacy-signature behavior — and
+  // never turns a read into a 500.
+  let catalogs: CatalogData;
+  try {
+    catalogs = await loadCatalogs(supabase);
+  } catch {
+    catalogs = { nodeRoles: {}, technologies: {}, deploymentTargets: {}, cloudProviderPatterns: [], scopeArchetypes: {} };
+  }
+  const result = ensureTestDocumentForRequirement(
+    graphData,
+    catalogs,
+    {
+      requirementId: requirement.requirement_id,
+      name: requirement.name,
+      description: requirement.description || '',
+      category: requirement.category,
+      status: requirement.status,
+      acceptanceCriteria: requirement.acceptance_criteria || [],
+    },
+    mappedNodeIds,
+    undefined,
+  );
+  const content = result.content;
+  const fingerprint = result.fingerprint;
+  const isNew = result.isNew;
+  // Served content is fresh BY CONSTRUCTION now — stale only ever reports
+  // false; the field survives for response-shape compatibility.
+  const stale = false;
   let proposalId: string | undefined;
   let persistNote: string | undefined;
+  if (result.refreshed) {
+    persistNote = 'The stored plan was stale (its inputs changed — e.g. a schema landed); this response is a fresh regeneration with your Test Strategy edits preserved. The stored artifact updates on the next git push via the freshness gate.';
+  }
 
-  if (stored) {
-    content = stored.content;
-    fingerprint = stored.fingerprint;
-    stale = stored.stale || false;
-  } else {
-    const catalogs = await loadCatalogs(supabase);
-    const result = ensureTestDocumentForRequirement(
-      graphData,
-      catalogs,
-      {
-        requirementId: requirement.requirement_id,
-        name: requirement.name,
-        description: requirement.description || '',
-        category: requirement.category,
-        status: requirement.status,
-        acceptanceCriteria: requirement.acceptance_criteria || [],
-      },
-      mappedNodeIds,
-      undefined,
+  if (result.isNew && result.rawContent && result.path) {
+    const persisted = await persistGeneratedTestPlan(
+      supabase, auth, projectId, branchId, requirement, graphData as AnyRecord,
+      mappedNodeIds, result.rawContent, result.path, result.fingerprint,
     );
-    content = result.content;
-    fingerprint = result.fingerprint;
-    isNew = result.isNew;
-
-    if (result.isNew && result.rawContent && result.path) {
-      const persisted = await persistGeneratedTestPlan(
-        supabase, auth, projectId, branchId, requirement, graphData as AnyRecord,
-        mappedNodeIds, result.rawContent, result.path, result.fingerprint,
-      );
-      if (persisted) {
-        proposalId = persisted;
-        persistNote = 'This plan was generated fresh and parked as a pending proposal — it persists (and ships on push) once the proposal is accepted in NodeSpec.';
-      }
+    if (persisted) {
+      proposalId = persisted;
+      persistNote = 'This plan was generated fresh and parked as a pending proposal — it persists (and ships on push) once the proposal is accepted in NodeSpec.';
     }
   }
 

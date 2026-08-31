@@ -8,7 +8,7 @@ import { resolveConfigChoice } from "./config-choice.ts";
 import { UNTRUSTED_ADVISORY, wrapField, wrapFieldNullable, wrapUntrusted } from "./untrusted-data.ts";
 import { generateTaskDocument, simpleHash } from "./task-document-generator.ts";
 import { collectInheritedScopes, type InheritedScope } from "./inherited-context.ts";
-import { generateTestDocument, getTestDocumentPath, findExistingTestArtifact, computeTestContextFingerprint } from "./test-document-generator.ts";
+import { generateTestDocument, getTestDocumentPath, findExistingTestArtifact, computeTestContextFingerprint, preserveTestStrategySection } from "./test-document-generator.ts";
 import { liveNodeIdSet } from "./mapping-liveness.ts";
 import { effectiveTreatment, treatmentForRole } from "./ontology.ts";
 
@@ -989,11 +989,13 @@ export function ensureTestDocumentForRequirement(
   requirement: RequirementContext,
   mappedNodeIds: string[],
   projectVision?: string,
-): { content: string; fingerprint: unknown; isNew: boolean; rawContent?: string; path?: string } {
+): { content: string; fingerprint: unknown; isNew: boolean; refreshed?: boolean; rawContent?: string; path?: string } {
   const existing = findStoredTestDocument(graphData, requirement.requirementId, requirement.name);
-  if (existing) {
-    return { content: existing.content, fingerprint: existing.fingerprint, isNew: false };
-  }
+  // Dogfood find 2026-09-02 (#3): a stored plan was served AS-IS on the word
+  // of its stored stale flag, so five plans kept reporting "noschema" after
+  // the schema landed — the read path never compared fingerprints, while the
+  // task-doc lane recomputes on every generate call. The freshness decision
+  // moves below, AFTER the current fingerprint exists to compare against.
 
   const mappedNodes = mappedNodeIds
     .map((nid) => graphData.nodes[nid])
@@ -1009,38 +1011,55 @@ export function ensureTestDocumentForRequirement(
     (a) => mappedNodeIds.includes(a.nodeId) && a.kind === 'source' && a.status !== 'suggested'
   );
 
-  const content = generateTestDocument({
-    requirement: {
-      requirementId: requirement.requirementId,
-      name: requirement.name,
-      description: requirement.description || '',
-      category: requirement.category,
-      acceptanceCriteria: requirement.acceptanceCriteria || [],
-    },
-    graph: graphData,
-    catalogs,
-    mappedNodes,
-    sourceArtifacts,
-    projectVision,
-  });
+  const reqForGen = {
+    requirementId: requirement.requirementId,
+    name: requirement.name,
+    description: requirement.description || '',
+    category: requirement.category,
+    acceptanceCriteria: requirement.acceptanceCriteria || [],
+  };
 
   const fingerprint = computeTestContextFingerprint(
-    {
-      requirementId: requirement.requirementId,
-      name: requirement.name,
-      description: requirement.description || '',
-      category: requirement.category,
-      acceptanceCriteria: requirement.acceptanceCriteria || [],
-    },
-    mappedNodes,
-    sourceArtifacts,
-    graphData,
-    projectVision,
-    catalogs,
+    reqForGen, mappedNodes, sourceArtifacts, graphData, projectVision, catalogs,
   );
 
+  if (existing) {
+    const storedHash = (existing.fingerprint as { fingerprint?: string } | undefined)?.fingerprint;
+    if (!storedHash || storedHash === fingerprint.fingerprint) {
+      // Inputs unchanged -- the stored plan is current, serve it untouched.
+      // (No comparable hash = legacy pre-fingerprint artifact: keep serving
+      // it rather than churn every old plan; the push-time freshness gate
+      // migrates those on the next push.)
+      return { content: existing.content, fingerprint: existing.fingerprint, isNew: false };
+    }
+    // Fingerprint moved (a schema landed, criteria changed, topology
+    // shifted): regenerate NOW so a read never serves stale contract facts,
+    // carrying the user-edited Test Strategy section forward verbatim --
+    // exactly what the push-time gate does. Persistence still belongs to
+    // that gate; this is a read.
+    const rawStored = findExistingTestArtifact(graphData.artifacts, requirement.requirementId, requirement.name);
+    const regenerated = generateTestDocument({
+      requirement: reqForGen, graph: graphData, catalogs, mappedNodes, sourceArtifacts, projectVision,
+    });
+    const merged = rawStored?.content
+      ? preserveTestStrategySection(regenerated, rawStored.content)
+      : regenerated;
+    return {
+      content: wrapUntrusted(merged),
+      fingerprint,
+      isNew: false,
+      refreshed: true,
+      rawContent: merged,
+      path: getTestDocumentPath(requirement.requirementId, requirement.name),
+    };
+  }
+
+  const content = generateTestDocument({
+    requirement: reqForGen, graph: graphData, catalogs, mappedNodes, sourceArtifacts, projectVision,
+  });
+
   // P0-7: wrap the returned copy only (mcp-server-exclusive path; wrapUntrusted is
-  // idempotent, so the findStoredTestDocument early-return above is safe too).
+  // idempotent, so the stored-plan return above is safe too).
   // C4 step 1: rawContent/path ride along so the caller can PERSIST the fresh plan via
   // the patch lane (the artifact must store the unwrapped document; the envelope is a
   // transport concern, never storage).
@@ -1052,3 +1071,4 @@ export function ensureTestDocumentForRequirement(
     path: getTestDocumentPath(requirement.requirementId, requirement.name),
   };
 }
+

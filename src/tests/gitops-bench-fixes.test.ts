@@ -160,6 +160,25 @@ describe('git setup UX', () => {
   });
 });
 
+// ── Dogfood find 2026-09-02 (#4, client half): an unchanged tree mints no commit ──
+describe('unchanged-push honesty (server pin: gitops-bench-fixes_test.ts)', () => {
+  it('PushResult carries the unchanged flag', () => {
+    const source = read('ui/services/GitService.ts');
+    expect(source).toContain('unchanged?: boolean');
+  });
+
+  it('the toast says "already up to date" instead of claiming a commit', () => {
+    const source = read('ui/components/panels/GitIntegrationModal.tsx');
+    expect(source).toContain('if (result.unchanged) {');
+    expect(source).toContain('Already up to date — the repository matches your design');
+    // the unchanged branch is checked BEFORE the PR-mode success message, so a
+    // no-op push in PR mode never renders a commit/PR claim
+    expect(source.indexOf('if (result.unchanged) {')).toBeLessThan(
+      source.indexOf("result.commitMode === 'pull-request' && result.prUrl"),
+    );
+  });
+});
+
 describe('resolved-change recovery lane (owner: "no ability to go back and pull the standing changes")', () => {
   it('GitService reads recently resolved cards and fetches content at an exact ref', () => {
     const source = read('ui/services/GitService.ts');

@@ -538,7 +538,7 @@ Deno.serve(async (req: Request) => {
     const commitMessage = reasonText
       ? `${SELF_PUSH_PREFIX} ${reasonText}`
       : `${SELF_PUSH_PREFIX} ${files.length} files from ${branchName}`;
-    let pushResult: { sha: string; deletedPaths: string[] };
+    let pushResult: { sha: string; deletedPaths: string[]; unchanged?: boolean };
 
     // UX-1.1b: commit mode — 'direct' (default; identical to before) or
     // 'pull-request': commit to a nodespec/push-* work branch cut at the
@@ -589,12 +589,14 @@ Deno.serve(async (req: Request) => {
       throw new Error(`Unsupported provider: ${integration.provider}`);
     }
     const commitSha = pushResult.sha;
+    const unchanged = pushResult.unchanged === true;
 
     // PR mode: open the pull request now that the work branch carries the
     // commit. A PR failure here is a real failure — the user chose PR mode,
     // so silently leaving an orphan work branch would be worse than erroring.
+    // An UNCHANGED push opens no PR: there is nothing to review.
     let prInfo: { url: string; number?: number } | null = null;
-    if (commitMode === "pull-request" && prWorkBranch) {
+    if (commitMode === "pull-request" && prWorkBranch && !unchanged) {
       const prTitle = `NodeSpec design push: ${reasonText || `${files.length} file(s) from ${branchName}`}`;
       const prBody = `NodeSpec pushed ${files.length} file(s) from design branch \`${branchName}\` in pull-request commit mode.\n\nMerging applies the design state to \`${targetRef}\`; NodeSpec reconciles automatically on merge.`;
       const pr = await createPullRequest(
@@ -623,6 +625,7 @@ Deno.serve(async (req: Request) => {
       completed_at: new Date().toISOString(),
       metadata: {
         fileCount: files.length,
+        ...(unchanged ? { unchanged: true } : {}),
         // rename/removal cleanup observability: what the anchor comparison
         // wanted deleted, what the provider commit actually deleted, and why
         // the lane was skipped when it was.
@@ -658,6 +661,10 @@ Deno.serve(async (req: Request) => {
     return new Response(
       JSON.stringify({
         success: true, commitSha, fileCount: files.length,
+        // Dogfood find #4: an unchanged tree mints NO commit — commitSha is
+        // the existing head, and the caller can finally trust that a new sha
+        // means something actually changed.
+        ...(unchanged ? { unchanged: true, message: "Tree identical to the current head — no commit created." } : {}),
         specAnchored,
         ...(prInfo ? { commitMode: "pull-request", prUrl: prInfo.url, prNumber: prInfo.number, workBranch: prWorkBranch } : {}),
         deletedPaths: pushResult.deletedPaths,
@@ -859,6 +866,15 @@ async function pushToGitHub(
     throw new Error(`Failed to create tree (${treeResponse.status}): ${body}`);
   }
   const treeData = await treeResponse.json();
+
+  // Dogfood find 2026-09-02 (#4): git trees are content-addressed, so a push
+  // whose files are byte-identical to the head produces the SAME tree sha.
+  // Minting a commit anyway made "I pushed" meaningless as evidence of
+  // change — the ref moved while nothing did. Report the existing head as
+  // unchanged instead; evidence-over-claims applies to the server too.
+  if (latestCommitSha && baseTreeSha && treeData.sha === baseTreeSha) {
+    return { sha: latestCommitSha, deletedPaths: [], unchanged: true };
+  }
 
   const commitPayload: any = { message, tree: treeData.sha };
   if (latestCommitSha) {

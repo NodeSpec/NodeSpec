@@ -683,3 +683,79 @@ Deno.test('C3: expected_patch_count shape is validated', async () => {
   assertEquals(r.success, false);
   assert((r.error ?? '').includes('positive integer'), r.error);
 });
+
+// ── Dogfood find 2026-09-02 (#1): unknown change keys refuse loudly ───────────
+Deno.test('validate: update_node with an unknown changes key is REFUSED by name, never silently dropped', () => {
+  const r = validateAndNormalizeProposalPatch({
+    type: 'update_node',
+    payload: { id: '22222222-2222-2222-2222-222222222222', changes: { configuration: { speed: 5 } } },
+  }, 0, 'sets config', 'agent');
+  assert('error' in r, 'the silent-drop shape must be an error');
+  const err = (r as { error: string }).error;
+  assert(err.includes('"configuration"'), 'names the offending key');
+  assert(err.includes('metadata.config'), 'teaches where node configuration actually lives');
+  assert(err.includes('replaced wholesale'), 'warns about the metadata replace semantics');
+});
+
+Deno.test('validate: the REAL config write path (changes.metadata.config) still validates clean', () => {
+  const r = validateAndNormalizeProposalPatch({
+    type: 'update_node',
+    payload: { id: '22222222-2222-2222-2222-222222222222', changes: { metadata: { config: { speed: 5 } } } },
+  }, 0, 'sets config properly', 'agent');
+  assert(!('error' in r), `metadata.config path must pass: ${JSON.stringify(r)}`);
+});
+
+Deno.test('validate: known change keys on every update type still pass (blast radius check)', () => {
+  const label = validateAndNormalizeProposalPatch({
+    type: 'update_node',
+    payload: { id: '22222222-2222-2222-2222-222222222222', changes: { label: 'Renamed' } },
+  }, 0, 'rename', 'agent');
+  assert(!('error' in label), 'plain label update unaffected');
+});
+
+// ── Dogfood find 2026-09-02 (#2): status and patchSummary can never disagree ──
+Deno.test('get_proposal_status: a merged row reports merged patches — the pending:1/merged:0 contradiction is gone', async () => {
+  const sb = new FakeSupabase();
+  sb.script('ai_proposals', 'select', {
+    data: { id: 'p1', source_branch_id: 'b1', branches: { projects: { owner_id: 'user-1' } } },
+    error: null,
+  });
+  // The live shape: whole-proposal accept stamped the ROW merged but never
+  // rewrote the per-patch statuses in the stored JSON.
+  sb.script('ai_proposals', 'select', {
+    data: {
+      id: 'p1', status: 'merged', created_at: 't', reviewed_at: 't', merged_at: 't',
+      patches: [
+        { patch: {}, explanation: 'carried by the whole-proposal accept', status: 'pending' },
+        { patch: {}, explanation: 'explicitly rejected during review', status: 'rejected' },
+      ],
+    },
+    error: null,
+  });
+  const r = await handleGetProposalStatus(sb as never, READ_ONLY, { proposal_id: 'p1' });
+  assertEquals(r.success, true);
+  const d = r.data as { status: string; patchSummary: Record<string, number>; patches: Array<{ status: string }> };
+  assertEquals(d.status, 'merged');
+  assertEquals([d.patchSummary.pending, d.patchSummary.merged, d.patchSummary.rejected], [0, 1, 1],
+    'pending derives to merged under a merged row; an explicit rejection keeps its stamp');
+  assertEquals(d.patches[0].status, 'merged');
+  assertEquals(d.patches[1].status, 'rejected');
+});
+
+Deno.test('get_proposal_status: a PENDING row still reports raw patch statuses (no derivation)', async () => {
+  const sb = new FakeSupabase();
+  sb.script('ai_proposals', 'select', {
+    data: { id: 'p2', source_branch_id: 'b1', branches: { projects: { owner_id: 'user-1' } } },
+    error: null,
+  });
+  sb.script('ai_proposals', 'select', {
+    data: {
+      id: 'p2', status: 'pending', created_at: 't', reviewed_at: null, merged_at: null,
+      patches: [{ patch: {}, explanation: 'a', status: 'pending' }],
+    },
+    error: null,
+  });
+  const r = await handleGetProposalStatus(sb as never, READ_ONLY, { proposal_id: 'p2' });
+  const d = r.data as { patchSummary: Record<string, number> };
+  assertEquals([d.patchSummary.pending, d.patchSummary.merged], [1, 0], 'in-flight rows are untouched');
+});

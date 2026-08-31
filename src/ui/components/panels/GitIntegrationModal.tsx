@@ -323,9 +323,14 @@ export function GitIntegrationModal({
       // R7a: the spec plane now travels too — say whether it did, so a project
       // that simply has no requirements yet is distinguishable from a failure.
       const specNote = result.specAnchored ? ' Requirements and acceptance criteria included.' : '';
+      // An unchanged tree mints no commit (and opens no PR) — saying
+      // "Committed N files" here would be the same false evidence the server
+      // fix removed.
+      if (result.unchanged) {
+        setSuccessMsg(`Already up to date — the repository matches your design (head ${result.commitSha.slice(0, 8)}). No commit created.${specNote}`);
       // UX-1.1b: in PR mode the target branch has not moved — say where the
       // commit actually went and link the review.
-      if (result.commitMode === 'pull-request' && result.prUrl) {
+      } else if (result.commitMode === 'pull-request' && result.prUrl) {
         setSuccessMsg(`Committed ${result.fileCount} files (${result.commitSha.slice(0, 8)}) and opened a pull request${result.prNumber ? ` #${result.prNumber}` : ''}: ${result.prUrl} — the design lands on ${integration.defaultBranch} when it merges.${deleted}${specNote}`);
       } else {
         setSuccessMsg(`Committed ${result.fileCount} files (${result.commitSha.slice(0, 8)}).${deleted}${specNote}`);

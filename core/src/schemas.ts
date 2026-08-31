@@ -402,6 +402,28 @@ export const SetEdgeCriticalityPatchSchema = z.object({
   }),
 });
 
+// Dogfood find 2026-09-02 (#1): Zod's default OBJECT MODE STRIPS unknown keys
+// silently — an update_node with `changes.configuration` validated clean,
+// merged "successfully", and the key evaporated (node config actually lives
+// at metadata.config). The MCP lane rejects unknown change keys loudly using
+// these key sets, DERIVED from the schemas above so they can never drift.
+// The UI lane keeps lenient parsing (typed builders; zero behavior change).
+const changeKeys = (schema: z.ZodObject<z.ZodRawShape>): ReadonlySet<string> =>
+  new Set(Object.keys(schema.shape).filter((k) => k !== 'id'));
+export const UPDATE_CHANGE_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
+  update_node: changeKeys(NodeSchema),
+  update_edge: changeKeys(EdgeSchema),
+  update_contract: changeKeys(ContractSchema),
+  update_artifact: changeKeys(ArtifactSchema),
+  update_port: changeKeys(PortSchema),
+  update_node_group: changeKeys(NodeGroupSchema),
+};
+/** Field-specific guidance for the traps we have seen agents hit. */
+export const UNKNOWN_CHANGE_KEY_HINTS: Readonly<Record<string, string>> = {
+  configuration: 'node configuration lives at metadata.config (metadata is replaced wholesale on update — send the complete metadata object)',
+  config: 'node configuration lives at metadata.config (metadata is replaced wholesale on update — send the complete metadata object)',
+};
+
 export const PatchOperationSchema = z.discriminatedUnion('type', [
   AddNodePatchSchema,
   UpdateNodePatchSchema,

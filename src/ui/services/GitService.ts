@@ -152,6 +152,8 @@ export interface PushResult {
   prUrl?: string;
   prNumber?: number;
   workBranch?: string;
+  /** Byte-identical tree: commitSha is the EXISTING head, no commit was minted (and no PR opened). */
+  unchanged?: boolean;
 }
 
 /** R2.2: connect-time anchor outcome returned by save-git-integration. */

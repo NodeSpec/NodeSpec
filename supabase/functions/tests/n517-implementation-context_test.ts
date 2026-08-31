@@ -15,6 +15,7 @@ import {
   IMPLEMENTATION_CONTEXT_HEADING,
   IMPLEMENTATION_CONTEXT_PLACEHOLDER,
   IMPLEMENTATION_CONTEXT_REVIEW_MARKER,
+  implementationContextScaffold,
 } from "../_shared/task-document-generator.ts";
 import { refreshTaskPackets } from "../_shared/packet-freshness.ts";
 
@@ -166,4 +167,16 @@ Deno.test("N5.17 freshness path: a REAL fingerprint flip regenerates the doc ARO
   assert(out.includes(AUTHORED[0]), "authored prose survived the regeneration");
   assert(out.includes(IMPLEMENTATION_CONTEXT_REVIEW_MARKER), "fingerprint flip flagged the section");
   assert(out.includes("## Your Deliverable"), "derived sections are the real regenerated doc");
+});
+
+Deno.test("marker spelling is ONE string everywhere the doc teaches it (dogfood find 2026-09-02)", async () => {
+  // The Godot project's AI grepped the spelling the placeholder taught
+  // ("REVIEW-NEEDED") and got a false zero: the real marker says
+  // "REVIEW NEEDED". Every occurrence in emitted document text must use the
+  // marker's own spelling.
+  const src = await Deno.readTextFile(new URL("../_shared/task-document-generator.ts", import.meta.url));
+  assert(src.includes("REVIEW NEEDED:"), "marker spelling present");
+  const emitted = implementationContextScaffold().join("\n");
+  assert(emitted.includes("REVIEW NEEDED"), "scaffold teaches the real spelling");
+  assert(!emitted.includes("REVIEW-NEEDED"), "hyphenated variant must not survive in emitted text");
 });

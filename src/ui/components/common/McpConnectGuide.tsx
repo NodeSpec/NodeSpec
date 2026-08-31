@@ -137,10 +137,14 @@ export function McpConnectGuide({ isDark, c }: { isDark: boolean; c: Record<stri
                 content, add only the <span style={{ fontFamily: 'ui-monospace, monospace' }}>&quot;nodespec&quot;</span>{' '}
                 entry inside the existing <span style={{ fontFamily: 'ui-monospace, monospace' }}>&quot;mcpServers&quot;</span>{' '}
                 object (create that object if it&apos;s missing).</li>
-              <li>Save, then fully quit and restart Claude Desktop.</li>
+              <li>Make sure you are signed in to NodeSpec first — on a local install the connection
+                approves itself against your account, so the account has to exist before Claude asks.</li>
+              <li>Save, then fully quit and restart Claude Desktop (system tray → Quit — closing the
+                window is not enough; Claude only loads MCP servers at launch).</li>
               <li>Claude opens your browser to finish connecting. On a default local install the
                 connection approves itself — the tab completes on its own and the tools appear. If a
-                sign-in page shows instead, use your NodeSpec account.</li>
+                sign-in page shows instead, use your NodeSpec account. The header here flips to{' '}
+                <strong>MCP connected</strong> within a few seconds of returning to this tab.</li>
             </ol>
             {codeBlock('claude-bridge', bridgeSnippet)}
             <div style={{ color: c.textMuted }}>

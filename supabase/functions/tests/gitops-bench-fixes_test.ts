@@ -181,3 +181,21 @@ Deno.test("every self-push-only range is claimed by the merge-arrival lane (no o
     assert(isNodeSpecMergeArrival(range), `merge-arrival must claim ${JSON.stringify(range)}`);
   }
 });
+
+// ── Dogfood find 2026-09-02 (#4): unchanged trees mint no commits ─────────────
+Deno.test("git-push: a byte-identical tree short-circuits before any commit is created", async () => {
+  const src = await Deno.readTextFile(new URL("../git-push/index.ts", import.meta.url));
+  // The guard compares content-addressed tree shas and returns the EXISTING
+  // head, flagged unchanged — before the commit POST, so no empty commit can
+  // ever exist.
+  const guardIdx = src.indexOf("treeData.sha === baseTreeSha");
+  const commitIdx = src.indexOf("/git/commits`");
+  assert(guardIdx > -1, "unchanged-tree guard present");
+  assert(commitIdx > guardIdx, "guard sits before commit creation");
+  const guard = src.slice(guardIdx, guardIdx + 200);
+  assert(guard.includes("unchanged: true"), "guard reports unchanged, not success-with-new-sha");
+  assert(guard.includes("sha: latestCommitSha"), "existing head sha is what the caller sees");
+  // The response surfaces the flag, and PR mode opens nothing for nothing.
+  assert(src.includes('{ unchanged: true, message: "Tree identical to the current head'), "response carries the flag");
+  assert(src.includes('prWorkBranch && !unchanged'), "no PR is opened for an unchanged tree");
+});

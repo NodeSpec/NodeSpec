@@ -4,7 +4,7 @@
 // Pins the four behavioral deltas plus the two already-correct-by-construction filters:
 // boundary ⇒ NOT is_container (N1 CHECK), so leaf filters and port injection already treat
 // boundary nodes as task-doc-bearing leaves — asserted here so a refactor can't regress it.
-import { generateTaskDocument } from '../_shared/task-document-generator.ts';
+import { computeTaskContextFingerprint, generateTaskDocument } from '../_shared/task-document-generator.ts';
 import { buildNodeContext } from '../_shared/mcp-context-assembly.ts';
 import { inferPlacementKind } from '../_shared/tool-executor.ts';
 import { ensureNodePorts } from '../_shared/catalog-node-normalization.ts';
@@ -608,4 +608,49 @@ Deno.test('generate_task_docs: boundary node passes the leaf filter and gets an 
   const flowDoc = docs.find((p) => String(p.patch.payload.content).includes('Nightly Sync'))!;
   assert(String(flowDoc.patch.payload.content).includes('engine that owns its own internals'),
     'boundary packet is interface-mode over MCP too');
+});
+
+// ── Dogfood find 2026-09-02 (#5): project rulings can veto catalog guidance ──
+Deno.test('metadata.suppressCatalogGuidance drops the Technology Guidance body, keeps everything else', () => {
+  // deno-lint-ignore no-explicit-any
+  const catalogs: any = JSON.parse(JSON.stringify(CATALOGS));
+  catalogs.technologies.n8n.ai_context = {
+    purpose: 'Workflow automation engine',
+    bestPractices: ['USE CSHARP FOR COMPLEX SYSTEMS'],
+  };
+  const g = twoNodeGraph();
+
+  const withGuidance = generateTaskDocument({ node: g.nodes[N_FLOW], graph: g, catalogs, requirements: [] });
+  assert(withGuidance.includes('## Technology Guidance'), 'guidance renders by default');
+  assert(withGuidance.includes('USE CSHARP FOR COMPLEX SYSTEMS'), 'catalog advice present by default');
+
+  g.nodes[N_FLOW].metadata = { suppressCatalogGuidance: true };
+  const suppressed = generateTaskDocument({ node: g.nodes[N_FLOW], graph: g, catalogs, requirements: [] });
+  assert(!suppressed.includes('USE CSHARP FOR COMPLEX SYSTEMS'), 'the contradicting catalog advice is gone');
+  assert(suppressed.includes('Catalog guidance suppressed for this node'), 'the packet says WHY the section is thin');
+  assert(suppressed.includes('metadata.suppressCatalogGuidance'), 'and how to re-enable it');
+  assert(suppressed.includes('# Task:'), 'the rest of the packet is untouched');
+});
+
+// The flag changes packet CONTENT, so it must move the fingerprint — otherwise the
+// push-time freshness gate serves the pre-suppression packet forever. Present only
+// when true: unflagged nodes keep byte-identical fingerprints (no re-stale round).
+Deno.test('suppressCatalogGuidance moves the task fingerprint in BOTH directions; absence changes nothing', () => {
+  const g = twoNodeGraph();
+  const node = g.nodes[N_FLOW];
+
+  const bare = computeTaskContextFingerprint(node, g, [], undefined, CATALOGS);
+  node.metadata = { suppressCatalogGuidance: true };
+  const flagged = computeTaskContextFingerprint(node, g, [], undefined, CATALOGS);
+  assert(flagged.fingerprint !== bare.fingerprint, 'setting the flag stales the stored packet');
+  assertEquals(flagged.fields.guidanceSuppressed, true, 'the field records WHY the fingerprint moved');
+
+  node.metadata = { suppressCatalogGuidance: false };
+  const unflagged = computeTaskContextFingerprint(node, g, [], undefined, CATALOGS);
+  assertEquals(unflagged.fingerprint, bare.fingerprint, 'false and absent hash identically — only strict true participates');
+  assert(!('guidanceSuppressed' in unflagged.fields), 'unflagged nodes keep the pre-change field set byte-identical');
+
+  delete node.metadata;
+  const cleared = computeTaskContextFingerprint(node, g, [], undefined, CATALOGS);
+  assertEquals(cleared.fingerprint, bare.fingerprint, 'removing the flag returns to the original fingerprint (re-enables guidance ⇒ stale again)');
 });
