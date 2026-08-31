@@ -186,7 +186,8 @@ the standard loop.
 ## GitOps
 <img width="703" height="512" alt="image" src="https://github.com/user-attachments/assets/676ab2b0-a5d3-43d6-9dd1-73b309c41a4d" />
 
-NodeSpec is git-native to ensure it remains the source of truth while simultaneously allowing for approval of design or detection of drift.
+NodeSpec is git-native. Your architecture is not a picture of your repository;
+it lives *in* your repository.
 
 - **The model commits to your repo.** The architecture, per-node task briefs, and
   per-requirement test plans are written into a `.nodespec/` directory as

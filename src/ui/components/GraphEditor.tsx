@@ -1634,6 +1634,13 @@ function GraphEditorInner({
               flex: 1,
               display: 'flex',
               position: 'relative',
+              // Owner bug 2026-09-01: a flex item's min-height is AUTO, so tall
+              // intrinsic content (the Work Board with long requirements) grew
+              // this wrapper past the overflow-hidden ancestor — clipped, no
+              // scrollbar anywhere. min-height: 0 lets the chain bound it so
+              // the board's own overflowY: auto region actually scrolls.
+              // Monaco/ReactFlow never exposed this (no intrinsic height).
+              minHeight: 0,
               opacity: isRefreshing ? 0.5 : 1,
               transition: 'opacity 300ms cubic-bezier(0.4, 0, 0.2, 1)',
               filter: isRefreshing ? 'blur(2px)' : 'none',

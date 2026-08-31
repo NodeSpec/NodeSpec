@@ -801,3 +801,70 @@ describe('ProjectExplorer Start from Template option', () => {
     expect(nearbyBlock).toContain('buttonStyles(false)');
   });
 });
+
+// ── Owner 2026-08-31: gallery author attribution (managed editions only) ─────
+describe('gallery author attribution → profile accessibility', () => {
+  const card = readFileSync(resolve(__dirname, '../ui/components/templates/TemplateCard.tsx'), 'utf-8');
+  const market = readFileSync(resolve(__dirname, '../ui/components/templates/TemplateMarketplacePage.tsx'), 'utf-8');
+  const profilePage = readFileSync(resolve(__dirname, '../ui/components/profile/PublicProfilePage.tsx'), 'utf-8');
+
+  it('the card author chip is HOSTED-gated — enterprise and OSS keep the plain badge', () => {
+    expect(card).toContain("isHostedEdition && template.authorType === 'community' && !!authorProfile");
+    // The plain Official/Community badge survives as the fallback branch.
+    expect(card).toContain("template.authorType === 'official' ? 'Official' : 'Community'");
+  });
+
+  it('the chip routes to the author profile without triggering the card click', () => {
+    const chip = card.slice(card.indexOf('showAuthorChip && authorProfile'));
+    expect(chip).toContain('e.stopPropagation()');
+    expect(chip).toContain('navigate(`/u/${authorProfile.handle}`)');
+  });
+
+  it('the marketplace batch-fetches author profiles ONCE per load, hosted-gated, best-effort', () => {
+    expect(market).toContain('if (isHostedEdition) {');
+    expect(market).toContain('getProfilesByUserIds(authorIds)');
+    expect(market).toContain('cards fall back to the plain Community badge');
+    // Only community-authored templates with an author id are looked up.
+    expect(market).toContain("t.authorType === 'community' && t.authorId");
+  });
+
+  it('the profile page passes no authorProfile — its cards stay badge-only (the header names the author)', () => {
+    expect(profilePage).not.toContain('authorProfile');
+  });
+});
+
+// ── Owner 2026-08-31 follow-up: the Templates | Builders split ───────────────
+describe('marketplace view split — Templates | Builders (managed only)', () => {
+  const market = readFileSync(resolve(__dirname, '../ui/components/templates/TemplateMarketplacePage.tsx'), 'utf-8');
+  const buildersView = readFileSync(resolve(__dirname, '../ui/components/templates/BuildersView.tsx'), 'utf-8');
+
+  it('the toggle renders only on hosted builds and the view is linkable via ?view=builders', () => {
+    // State initializer honors the query param ONLY under the hosted literal…
+    expect(market).toContain("isHostedEdition && new URLSearchParams(window.location.search).get('view') === 'builders'");
+    // …and the toggle itself sits behind the same gate.
+    expect(market).toMatch(/\{isHostedEdition && \(\s*<div role="tablist"/);
+    // Switching views keeps the URL shareable without a router remount.
+    expect(market).toContain("params.set('view', 'builders')");
+  });
+
+  it('builders view replaces the grid AND the category chips; search is repurposed', () => {
+    expect(market).toContain("view === 'builders' ? (");
+    expect(market).toContain('<BuildersView searchQuery={searchQuery} />');
+    expect(market.indexOf("view === 'builders' ? (")).toBeLessThan(market.indexOf('marketplace-categories'));
+    expect(market).toContain("view === 'builders' ? 'Search builders...' : 'Search templates...'");
+  });
+
+  it('builders derive client-side from community templates + one batch profile read', () => {
+    // No migration, no view — public templates aggregate per author, and only
+    // authors with a public profile appear (same rule as the chips).
+    expect(buildersView).toContain("t.authorType !== 'community' || !t.authorId");
+    expect(buildersView).toContain('getProfilesByUserIds([...byAuthor.keys()])');
+    expect(buildersView).toContain('if (profile) rows.push({ profile, ...agg });');
+  });
+
+  it('a builder card routes to the profile portfolio at /u/:handle', () => {
+    expect(buildersView).toContain('navigate(`/u/${profile.handle}`)');
+    // Ranked by community signal: upvotes, then volume, then name.
+    expect(buildersView).toContain('b.upvoteTotal - a.upvoteTotal');
+  });
+});

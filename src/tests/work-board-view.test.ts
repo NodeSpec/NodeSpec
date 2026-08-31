@@ -135,3 +135,22 @@ describe('D3 wiring contracts', () => {
     expect(board).toContain('sprawl');
   });
 });
+
+// ── Owner bug 2026-09-01: long boards must scroll, not clip ──────────────────
+describe('board scroll chain', () => {
+  it('every flex link between GraphEditor and the board scroll region can shrink (min-height: 0)', () => {
+    // A flex item's min-height is AUTO — one link without minHeight: 0 lets
+    // tall board content inflate the chain past the overflow-hidden ancestor:
+    // clipped rows, no scrollbar (headless-repro-proven: 4322px unscrollable
+    // without the GraphEditor link, 634px scrollable with it). Monaco and
+    // ReactFlow have no intrinsic height, so only the board exposes a break.
+    const board = readFileSync(resolve(__dirname, '../ui/components/board/WorkBoardView.tsx'), 'utf-8');
+    expect(board).toContain("flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column'");
+    expect(board).toContain("flex: 1, overflowY: 'auto'");
+    const editor = readFileSync(resolve(__dirname, '../ui/components/GraphEditor.tsx'), 'utf-8');
+    const wrapper = editor.slice(editor.indexOf("filter: isRefreshing ? 'blur(2px)' : 'none'") - 900);
+    expect(wrapper.slice(0, 900)).toContain('minHeight: 0');
+    const spec = readFileSync(resolve(__dirname, '../ui/components/layout/SpecificationMarkdownView.tsx'), 'utf-8');
+    expect(spec).toContain('minHeight: 0');
+  });
+});

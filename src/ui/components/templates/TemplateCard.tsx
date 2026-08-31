@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import type { ProjectTemplate } from '../../../persistence/types.js';
 import { TemplatePreviewCanvas } from './TemplatePreviewCanvas.js';
 import { TECHNOLOGY_LOGO_MAP, getTechnologyDisplayName } from '../../utils/technology-logo-map.js';
+import { isHostedEdition } from '../../config/edition.js';
+import type { UserProfile } from '../../services/ProfileService.js';
 
 const ACCENT = '#8B8FE6';
 const MAX_VISIBLE_TECH = 6;
@@ -15,6 +17,12 @@ interface TemplateCardProps {
   upvoted?: boolean;
   onToggleUpvote?: (templateId: string) => void;
   catalogReady?: boolean;
+  /** Owner 2026-08-31 (managed editions only): the community author's public
+   *  profile, batch-fetched by the gallery. When present, the card's badge
+   *  becomes a clickable author chip → /u/:handle — the profile page lists
+   *  everything that builder has shared. Absent/private profiles (and every
+   *  non-hosted edition) keep the plain Community badge. */
+  authorProfile?: UserProfile | null;
 }
 
 function extractTechnologies(template: ProjectTemplate): Array<{ id: string; logo: string; name: string }> {
@@ -48,9 +56,10 @@ function extractTechnologies(template: ProjectTemplate): Array<{ id: string; log
   return results;
 }
 
-export function TemplateCard({ template, isAuthenticated, onUseTemplate, loading, upvoted, onToggleUpvote, catalogReady }: TemplateCardProps) {
+export function TemplateCard({ template, isAuthenticated, onUseTemplate, loading, upvoted, onToggleUpvote, catalogReady, authorProfile }: TemplateCardProps) {
   const navigate = useNavigate();
   const [hovered, setHovered] = useState(false);
+  const showAuthorChip = isHostedEdition && template.authorType === 'community' && !!authorProfile;
 
   const technologies = useMemo(() => extractTechnologies(template), [template, catalogReady]);
   const visibleTech = technologies.slice(0, MAX_VISIBLE_TECH);
@@ -307,6 +316,51 @@ export function TemplateCard({ template, isAuthenticated, onUseTemplate, loading
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {showAuthorChip && authorProfile ? (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigate(`/u/${authorProfile.handle}`);
+                }}
+                title={`See everything ${authorProfile.displayName || `@${authorProfile.handle}`} has shared`}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '5px',
+                  maxWidth: '132px', padding: '2px 7px 2px 2px',
+                  fontSize: '11px', fontWeight: 600, color: '#6b7280',
+                  backgroundColor: '#f3f4f6', border: '1px solid #e5e7eb',
+                  borderRadius: '999px', cursor: 'pointer',
+                  transition: 'all 0.15s ease',
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.color = ACCENT;
+                  e.currentTarget.style.borderColor = 'rgba(139, 143, 230, 0.4)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.color = '#6b7280';
+                  e.currentTarget.style.borderColor = '#e5e7eb';
+                }}
+              >
+                {authorProfile.avatarUrl ? (
+                  <img
+                    src={authorProfile.avatarUrl}
+                    alt=""
+                    style={{ width: '18px', height: '18px', borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }}
+                  />
+                ) : (
+                  <span style={{
+                    width: '18px', height: '18px', borderRadius: '50%', flexShrink: 0,
+                    backgroundColor: 'rgba(139, 143, 230, 0.15)', color: ACCENT,
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: '10px', fontWeight: 700,
+                  }}>
+                    {(authorProfile.displayName || authorProfile.handle).charAt(0).toUpperCase()}
+                  </span>
+                )}
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {authorProfile.displayName || `@${authorProfile.handle}`}
+                </span>
+              </button>
+            ) : (
             <span style={{
               fontSize: '10px',
               fontWeight: 600,
@@ -322,6 +376,7 @@ export function TemplateCard({ template, isAuthenticated, onUseTemplate, loading
             }}>
             {template.authorType === 'official' ? 'Official' : 'Community'}
             </span>
+            )}
 
             <button
               onClick={(e) => {

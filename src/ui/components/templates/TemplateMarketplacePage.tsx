@@ -13,6 +13,11 @@ import { CatalogService } from '../../services/CatalogService.js';
 import { isTechnologyVisualsPopulated } from '../../utils/technology-logo-map.js';
 import { usePageSeo, BASE_URL } from '../../hooks/usePageSeo.js';
 import { SiteFooter } from '../common/SiteFooter.js';
+import { isHostedEdition } from '../../config/edition.js';
+import { getProfilesByUserIds, type UserProfile } from '../../services/ProfileService.js';
+import { BuildersView } from './BuildersView.js';
+
+type MarketplaceView = 'templates' | 'builders';
 
 const LIGHT_BG = '#f8f9fc';
 const LIGHT_SURFACE = '#ffffff';
@@ -37,11 +42,26 @@ export function TemplateMarketplacePage() {
   const templateService = useTemplates();
   const [user, setUser] = useState<User | null>(null);
   const [templates, setTemplates] = useState<ProjectTemplate[]>([]);
+  const [authorProfiles, setAuthorProfiles] = useState<Map<string, UserProfile>>(new Map());
   const [loading, setLoading] = useState(true);
   const [catalogReady, setCatalogReady] = useState(isTechnologyVisualsPopulated());
   const [usingTemplateId, setUsingTemplateId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState<TemplateCategory | 'all'>('all');
+  // Owner 2026-08-31: the page splits into Templates | Builders (hosted only —
+  // enterprise shares the gallery but has no profiles; OSS compiles the lane
+  // out). ?view=builders makes the directory linkable.
+  const [view, setViewState] = useState<MarketplaceView>(() =>
+    isHostedEdition && new URLSearchParams(window.location.search).get('view') === 'builders'
+      ? 'builders' : 'templates');
+  const setView = (next: MarketplaceView) => {
+    setViewState(next);
+    const params = new URLSearchParams(window.location.search);
+    if (next === 'builders') params.set('view', 'builders');
+    else params.delete('view');
+    const qs = params.toString();
+    window.history.replaceState(null, '', `/templates${qs ? `?${qs}` : ''}`);
+  };
   const [error, setError] = useState<string | null>(null);
   const [upvotedIds, setUpvotedIds] = useState<Set<string>>(new Set());
 
@@ -144,6 +164,24 @@ export function TemplateMarketplacePage() {
       }
       const result = await templateService.listTemplates(filters as Parameters<typeof templateService.listTemplates>[0]);
       setTemplates(result);
+      // Owner 2026-08-31 (managed editions only): community authors are
+      // browsable people — one batch profile read attributes every card, and
+      // the chip links to /u/:handle (everything that builder has shared).
+      // Best-effort: attribution failure never breaks the gallery. Enterprise
+      // and self-host builds compile this branch out (isHostedEdition literal)
+      // and never query user_profiles.
+      if (isHostedEdition) {
+        const authorIds = result
+          .filter((t) => t.authorType === 'community' && t.authorId)
+          .map((t) => t.authorId as string);
+        if (authorIds.length > 0) {
+          getProfilesByUserIds(authorIds)
+            .then(setAuthorProfiles)
+            .catch(() => { /* cards fall back to the plain Community badge */ });
+        } else {
+          setAuthorProfiles(new Map());
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load templates');
     } finally {
@@ -322,9 +360,38 @@ export function TemplateMarketplacePage() {
             marginLeft: 'auto',
             marginRight: 'auto',
           }}>
-            Start with a proven architecture. Browse pre-built templates and launch your project in seconds.
+            {view === 'builders'
+              ? 'The people behind the community templates. Open a builder to see everything they have shared.'
+              : 'Start with a proven architecture. Browse pre-built templates and launch your project in seconds.'}
           </p>
         </div>
+
+        {isHostedEdition && (
+          <div role="tablist" style={{
+            display: 'flex', justifyContent: 'center', gap: '4px',
+            margin: '0 auto 24px', padding: '4px', width: 'fit-content',
+            backgroundColor: '#f3f4f6', borderRadius: '10px', border: '1px solid #e5e7eb',
+          }}>
+            {([['templates', 'Templates'], ['builders', 'Builders']] as Array<[MarketplaceView, string]>).map(([id, label]) => (
+              <button
+                key={id}
+                role="tab"
+                aria-selected={view === id}
+                onClick={() => setView(id)}
+                style={{
+                  padding: '7px 22px', fontSize: '13px', fontWeight: 600,
+                  border: 'none', borderRadius: '7px', cursor: 'pointer',
+                  backgroundColor: view === id ? '#ffffff' : 'transparent',
+                  color: view === id ? '#1f2937' : '#6b7280',
+                  boxShadow: view === id ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                  transition: 'all 0.15s ease',
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
 
         <form
           onSubmit={handleSearchSubmit}
@@ -339,7 +406,7 @@ export function TemplateMarketplacePage() {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search templates..."
+            placeholder={view === 'builders' ? 'Search builders...' : 'Search templates...'}
             style={{
               width: '100%',
               padding: '12px 16px 12px 42px',
@@ -368,6 +435,10 @@ export function TemplateMarketplacePage() {
           </svg>
         </form>
 
+        {view === 'builders' ? (
+          <BuildersView searchQuery={searchQuery} />
+        ) : (
+        <>
         <div className="marketplace-categories" style={{
           display: 'flex',
           flexWrap: 'wrap',
@@ -475,9 +546,12 @@ export function TemplateMarketplacePage() {
                 upvoted={upvotedIds.has(template.id)}
                 onToggleUpvote={handleToggleUpvote}
                 catalogReady={catalogReady}
+                authorProfile={template.authorId ? authorProfiles.get(template.authorId) ?? null : null}
               />
             ))}
           </div>
+        )}
+        </>
         )}
       </div>
 
