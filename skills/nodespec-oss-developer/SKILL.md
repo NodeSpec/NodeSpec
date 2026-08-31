@@ -1,13 +1,13 @@
 ---
-name: nodespec-developer
-description: Drive implementation work on a project managed by NodeSpec (the user has the NodeSpec MCP server connected). Use whenever the user asks to build, implement, continue, or verify work on a NodeSpec project — "build the next node", "implement REQ-007", "work through the backlog", "run the verification loop", "what should I build next" — whenever they ask to import, visualize, or reverse-engineer an existing repository into NodeSpec ("import my repo", "map this codebase", "get my project onto the canvas"), or whenever a repo contains a .nodespec/ directory (model.json / spec.json / tasks/ / tests/). NodeSpec is the source of truth for architecture, requirements, and acceptance criteria; this skill defines the exact tool loop, the repo-import and spec-backfill workflow, the honesty rules that prevent invented schemas and unearned completions, and the token discipline. Do NOT use for editing the NodeSpec application's own source code.
+name: nodespec-oss-developer
+description: NodeSpec OSS Skill for Developers — drive implementation work on a project managed by a self-hosted NodeSpec Community Edition (the user runs NodeSpec locally and has its MCP server connected). Use whenever the user asks to plan, build, implement, continue, or verify work on a NodeSpec project — "design my architecture", "build the next node", "implement REQ-007", "work through the backlog", "run the verification loop", "what should I build next" — or whenever a repo contains a .nodespec/ directory (model.json / spec.json / tasks/ / tests/). NodeSpec is the source of truth for architecture, requirements, and acceptance criteria; this skill defines the end-to-end flow from empty project to verified software, the exact tool loop, the honesty rules that prevent invented schemas and unearned completions, and the token discipline. Do NOT use for editing the NodeSpec application's own source code — Community Edition users have that code checked out, and this skill governs building THEIR projects with NodeSpec, never modifying NodeSpec itself.
 ---
 
-# NodeSpec Development Loop
+# NodeSpec OSS Skill for Developers
 
 You are implementing software whose architecture, requirements, and acceptance
-criteria live in NodeSpec. NodeSpec assembles deterministic, trusted context;
-you supply the code. Three rules override everything else:
+criteria live in a self-hosted NodeSpec. NodeSpec assembles deterministic,
+trusted context; you supply the code. Three rules override everything else:
 
 1. **Never invent what NodeSpec marks missing.** `⚠ SCHEMA UNDEFINED`,
    `[PLACEHOLDER: …]`, and `[blocked by schema: …]` are stop signs, not
@@ -19,14 +19,50 @@ you supply the code. Three rules override everything else:
    re-fetching. One brief per node, one plan per requirement, summary-first
    readiness.
 
+## The flow at a glance — empty project to verified software
+
+Every NodeSpec project moves through the same concrete pipeline. Each stage
+produces an artifact the next stage consumes; skipping a stage is what the
+readiness gate exists to catch.
+
+1. **Capture intent.** `update_vision` records the product vision in the
+   user's own words. `create_requirement` adds requirements with acceptance
+   criteria (criteria always start unmet); `section` groups them.
+2. **Design the architecture.** `search_catalog` for exact role/technology
+   ids, then ONE `propose_patches` batch: contracts first, then nodes, then
+   edges referencing both. The user accepts or rejects each patch in the app —
+   nothing lands on the canvas without their approval.
+3. **Map ownership.** `map_requirement` binds each requirement to the node(s)
+   that serve it. This traceability edge is what lets readiness, task docs,
+   and test plans exist at all.
+4. **Preflight.** `get_build_readiness` names every gap standing between the
+   graph and buildable work: contracts missing schemas (you draft them from
+   the provided inputs and propose them), unresolved criterion owners,
+   missing task docs. Clear blockers; advisories inform.
+5. **Implement, node by node.** Work `buildOrder`. The node's task document
+   (`.nodespec/tasks/<node>.task.md` in the repo, or the `get_project_context`
+   brief) is the implementation spec — T-numbered tasks, configuration
+   decisions, contract references. Your read set is the node's bound
+   artifacts, not the whole repo.
+6. **Verify, requirement by requirement.** `get_test_plan` gives the
+   scenarios; you implement and RUN them; `report_test_results` with each
+   criterion's exact wording is the only thing that flips criteria met.
+   Manual steps are the user's to confirm, never yours to report.
+7. **Close.** `mark_entity_complete` per node — it returns any still-unmet
+   criteria, and unmet means not done. Then back to step 4 for the next node.
+
+Git-connected projects wrap this loop: NodeSpec's pushes write the task docs,
+test plans, and board file into `.nodespec/`; your out-of-band commits come
+back as change cards to reconcile before building further. The sections below
+are the full doctrine for each stage.
+
 ## Where to look — routing questions to the right source
 
 NodeSpec owns **intent** (what should exist, what "done" means, how components
 relate); the repo owns **actuality** (what the code currently does). Route
 every question to the side that owns it — the classic failure is answering an
-intent question from code (you'll reverse-engineer requirements that were
-never asked for) or an actuality question from NodeSpec (previews aren't
-files).
+intent question from code (you'll invent requirements that were never asked
+for) or an actuality question from NodeSpec (previews aren't files).
 
 | You need… | Go to | NOT |
 |---|---|---|
@@ -49,63 +85,8 @@ Two hard routing rules:
 - **When NodeSpec and the repo disagree,** the repo wins on what code IS,
   NodeSpec wins on what code SHOULD BE — and the disagreement itself is the
   finding: reconcile pending cards first; if none exist, surface the mismatch
-  to the user (`update_requirement` / `update_contract` proposal or a plain
-  question) instead of quietly picking a side.
-
-## Importing an existing repo (first-time visualization)
-
-When the user wants an existing codebase on the NodeSpec canvas, ONE tool
-carries the whole flow: `run_repo_import` (Indie tier and above — a
-Community account gets a refusal naming the upgrade path). Never build the model by hand —
-do not scan the repo and `propose_patches` nodes yourself; the deterministic
-pipeline classifies, groups, and synthesizes with provenance, and your job is
-judgment over its output, not re-derivation.
-
-Preconditions: the project exists, the repo is connected in the app's Git
-panel, and the canvas is empty (a populated canvas or a repo carrying
-`.nodespec/model.json` is refused — those are adopt/drift territory).
-
-**Phase 1 — drive.** Call `run_repo_import(project_id)`. A `running` response
-means call it again — completed work replays instantly. Most repos stage in
-one call.
-
-**Phase 2 — review and decide.** The staged response is the complete review
-package: per-group frames with evidence, the draft's nodes/edges/contracts,
-per-node **signals** (declared routes, outbound HTTP clients, manifest deps,
-top imports, deployment surfaces), open questions, review hints, and the
-import doctrine. Actually review it — rubber-stamping defeats the lane:
-- Answer every open question; fix generic labels; verify roles.
-- Missing relationships are usually visible in the signals: a node with
-  `outboundHttp` calling a node with `routes` is an `add_edges` candidate,
-  citing both sides as evidence. Never ask for the repo URL — the signals
-  section replaces file reading.
-- Tag stacks the pipeline could not infer: `set_technology` with catalog ids
-  (`search_catalog` when unsure). Untagged nodes render generic on the canvas.
-Then call `run_repo_import` again with `decisions`: `{approve: true}` or the
-bounded revisions (renames, role_changes, set_technology, drop_nodes,
-add_edges with evidence, drop_edges). This promotes ONE proposal into the app.
-
-**Phase 3 — the user accepts in the app.** The proposal appears in their
-review panel; you cannot accept it for them. Tell them it is ready and wait.
-
-**Phase 4 — spec backfill (do NOT stop at acceptance).** An accepted import
-is structure without intent — half an import. As soon as the user confirms
-acceptance (or your next `run_repo_import` call reports state `accepted`
-with coverage gaps), run the backfill workflow in this order:
-1. `update_vision` — ask the user for their product vision in THEIR words
-   first; never write vision from the code.
-2. `create_requirement` — propose requirements with acceptance criteria for
-   what the code evidently does; criteria START UNMET (existing code proves
-   nothing until tested). Group related requirements as you go with the
-   `section` parameter (a section name — created when absent).
-3. `map_requirement` — bind each requirement to the node(s) serving it.
-Repeat 2–3 until `run_repo_import` reports empty coverage (it lists exactly
-which nodes still lack requirements). Then hand off to the normal build loop
-below — readiness, briefs, test plans all activate once the spec plane exists.
-
-Restart semantics: `restart=true` only after a failure, or when the user
-explicitly wants a fresh re-analysis over an existing canvas or accepted
-import. A `rejected` proposal means ask the user what was wrong FIRST.
+  to the user (an `update_requirement` call or an `update_contract` patch
+  proposal, or a plain question) instead of quietly picking a side.
 
 ## Patch discipline — how graph writes actually behave
 
@@ -317,7 +298,7 @@ naming the missing paths.
   with what you sent before telling the user a proposal is complete.
 - Don't paste tool responses back into your own messages; act on them.
 
-## Tool reference — the 30 tools by job
+## Tool reference — the tools by job
 
 Grouped by the question you are answering. Every tool takes `project_id`
 (name or UUID) unless noted. Read tools are cheap but not free — see token
@@ -331,12 +312,7 @@ discipline above.
 | `get_project_status` | START HERE each session: phase, counts, pending drift, `nextAction` |
 | `get_architecture_overview` | The whole topology at once (Mermaid) — orientation, not implementation detail |
 
-**Import — "get this repo onto the canvas"**
-| Tool | Use when |
-|---|---|
-| `run_repo_import` | THE import tool, every state: drive the pipeline, receive the staged package, submit `decisions`, and after acceptance read backfill coverage. See the import section above |
-
-**Spec plane — "capture intent" (the backfill workflow lives here)**
+**Spec plane — "capture intent"**
 | Tool | Use when |
 |---|---|
 | `update_vision` | Set the product vision — the user's words, asked for, never inferred from code |
@@ -361,7 +337,7 @@ discipline above.
 **Verify — "prove it"**
 | Tool | Use when |
 |---|---|
-| `get_test_plan` | Per requirement: the scenarios to implement (schemas → plans → implement → verify; budget: one binding test per criterion first) |
+| `get_test_plan` | Per requirement: the scenarios to implement (schemas → plans → implement → verify; budget: one binding test per criterion first). Served plans are freshness-checked at read time — trust what you receive |
 | `report_test_results` | EVERY outcome you actually ran, exact `criterion_text` — this is what flips criteria; heed the testBudget nudge |
 | `update_test_case` | Fix a mistyped `test_id`, move a case to the requirement it actually verifies (`reassign_to` — it arrives stale, re-run there), retire a superseded case (`retire` + reason — never a hard delete; a fresh report revives it), or re-bind after a criterion reword (`criterion_text`, exact text; binding alone never flips met) |
 
@@ -374,19 +350,19 @@ discipline above.
 **Catalog — "what roles/technologies exist"**
 | Tool | Use when |
 |---|---|
-| `search_catalog` | Find role and technology ids by capability or name (before role_changes / set_technology) |
+| `search_catalog` | Find role and technology ids by capability or name (before proposing nodes or setting technology) |
 | `lookup_catalog` | Full detail on one known id |
 
-**Keys — "connection admin" (rare; usually the user's job in the app)**
+**Keys & projects — "connection admin" (rare; usually the user's job in the app)**
 | Tool | Use when |
 |---|---|
 | `create_api_key` / `list_api_keys` / `revoke_api_key` | Mint, audit, or revoke MCP API keys when the user asks |
-| `create_project` | Start a brand-new project (respects the account's project limit) |
+| `create_project` | Start a brand-new project |
 
 ## When something looks wrong
 Contradictions between the brief and the live graph, criteria that can't be
 tested as written, requirements that seem to belong to a different node — raise
 them to the user via the named tools (`update_requirement`, `map_requirement`,
-`update_contract` proposals), never by silently building your own
+an `update_contract` patch proposal), never by silently building your own
 interpretation. NodeSpec's cards and proposals exist so the human rules once,
 in one place, with provenance.

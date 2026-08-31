@@ -404,9 +404,9 @@ export async function handleCreateProject(
     return { success: false, error: 'Project name is required.' };
   }
 
-  // Community-tier scale cap (owner ruling 2026-08-25, open-core GTM: hosted
-  // community includes ONE project — Indie unlocks unlimited; supersedes the
-  // 3-project 2026-08-12 design). Server-side because the UI check alone
+  // Free-tier scale cap (owner ruling 2026-08-31 Stripe round: hosted Free
+  // includes TWO projects — Indie unlocks unlimited; supersedes the
+  // 1-project 2026-08-25 cap). Server-side because the UI check alone
   // would not bind the MCP surface. Admins are exempt, and a self-hosted
   // deployment lifts the cap entirely (NODESPEC_DEPLOYMENT is THE
   // deployment-mode flag — config, never a fork, per the SHIP-1 doctrine).
@@ -426,7 +426,7 @@ export async function handleCreateProject(
         return {
           success: false,
           error:
-            `Community accounts include ${HOSTED_COMMUNITY_PROJECT_LIMIT} project and this account already has ${count}. ` +
+            `Free accounts include ${HOSTED_COMMUNITY_PROJECT_LIMIT} projects and this account already has ${count}. ` +
             'Delete a project you no longer need, or upgrade to Indie for unlimited projects and repo import — https://nodespec.io/pricing',
         };
       }

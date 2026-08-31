@@ -363,8 +363,6 @@ instructions for Claude Desktop, Claude Code, Cursor, OpenAI Codex, VS Code,
 and other MCP clients. The server URL is always
 `http(s)://<your-host>/functions/v1/mcp-server`.
 
-For systems like Claude Desktop for local MCP that doesn't accept non-https, copy the configuration file into the desktop config.json.
-
 Three behaviors are specific to a local install:
 
 - Create your NodeSpec account **before** connecting your AI — with
@@ -397,6 +395,11 @@ how.
 Building and hacking on NodeSpec itself uses the Supabase-CLI flow in
 [`deploy/selfhost/`](deploy/selfhost/README.md) — that path requires a Linux
 shell and the Supabase CLI, and is not needed just to run the product.
+
+A live end-to-end test bench ships in [`scripts/bench/`](scripts/bench/README.md):
+`npm run bench:oss` drives real scenarios against your running stack, grouped
+by functionality (repository sync, pull requests, MCP proposals, requirements,
+test plans, and more).
 
 ---
 

@@ -75,7 +75,7 @@ const FEATURE_RULES: Record<Feature, FeatureRule> = {
   unlimited_projects: {
     minimumTier: 'indie',
     label: 'Multiple Projects',
-    upgradeMessage: 'Hosted Community includes 1 project; Indie and above are unlimited.',
+    upgradeMessage: 'Hosted Free includes 2 projects; Indie and above are unlimited.',
   },
   mcp_connectivity: {
     minimumTier: 'community',
@@ -244,7 +244,7 @@ export function useFeatureGate(): FeatureGate {
 
   const projectLimitReached = useCallback(
     (currentCount: number): boolean => {
-      // Hosted Community: 1 project (2026-08-25 open-core GTM; server mirror
+      // Hosted Free: 2 projects (2026-08-31 Stripe round; server mirror
       // in MCP create_project). Indie and above are unlimited. Self-hosted
       // deployments are UNCAPPED — same lift the server applies (projects.ts
       // checks NODESPEC_DEPLOYMENT); without this, the container's users all

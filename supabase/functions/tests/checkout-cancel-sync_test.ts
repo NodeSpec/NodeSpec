@@ -8,11 +8,19 @@ import { assert, assertEquals } from './helpers.ts';
 
 // ── stripe-checkout ─────────────────────────────────────────────────────────────────
 
-Deno.test('checkout: every plan tier key and the addon validate; garbage rejected', () => {
+Deno.test('checkout: ONLY the live Indie prices sell; placeholders refuse by name (owner 2026-08-31)', () => {
+  // The live purchasable catalog: Indie monthly + Indie annual.
+  assertEquals(validateCheckoutPrice('price_indie_monthly_new'), null);
+  assertEquals(validateCheckoutPrice('price_indie_annual_new'), null);
+  // Team is a placeholder tier and the token add-on product is archived —
+  // both refuse with a message that says WHY, never a generic "invalid".
   for (const key of Object.keys(PLAN_BY_LOOKUP_KEY)) {
-    assertEquals(validateCheckoutPrice(key), null, key);
+    if (key.startsWith('price_indie_')) continue;
+    const err = validateCheckoutPrice(key);
+    assert(err !== null && err.includes('not available for purchase yet'), `${key}: ${err}`);
   }
-  assertEquals(validateCheckoutPrice('price_token_addon_1m'), null);
+  const addonErr = validateCheckoutPrice('price_token_addon_1m');
+  assert(addonErr !== null && addonErr.includes('not currently offered'), String(addonErr));
   assert(validateCheckoutPrice('price_free_lunch') !== null, 'unknown key rejected');
   assert(validateCheckoutPrice('')!.includes('Invalid price identifier'), 'error names the problem');
 });

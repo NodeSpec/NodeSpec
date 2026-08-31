@@ -3,14 +3,23 @@
   from index.ts so they are testable (index.ts is a Deno.serve module). index.ts keeps
   auth, customer provisioning side effects, and the Stripe calls.
 */
-import { VALID_LOOKUP_KEYS } from '../_shared/stripe-plans.ts';
+import { CHECKOUT_LOOKUP_KEYS, VALID_LOOKUP_KEYS } from '../_shared/stripe-plans.ts';
 
-/** Exactly the inline check index.ts performed, against the now-shared key set. */
+/**
+ * Owner ruling 2026-08-31: checkout sells exactly the live catalog
+ * (CHECKOUT_LOOKUP_KEYS — Indie monthly/annual). Keys the resolution side
+ * still recognizes but checkout no longer offers get a NAMED refusal so a
+ * stale client says why, not "invalid".
+ */
 export function validateCheckoutPrice(price_id: string): string | null {
-  if (!VALID_LOOKUP_KEYS.has(price_id)) {
-    return `Invalid price identifier: ${price_id}`;
+  if (CHECKOUT_LOOKUP_KEYS.has(price_id)) return null;
+  if (VALID_LOOKUP_KEYS.has(price_id)) {
+    if (price_id.includes('token_addon')) {
+      return 'Token add-ons are not currently offered.';
+    }
+    return 'This plan is not available for purchase yet — Indie is the current paid tier ($15/mo or $144/yr). For Team, join the waitlist at https://nodespec.io/pricing.';
   }
-  return null;
+  return `Invalid price identifier: ${price_id}`;
 }
 
 export interface CheckoutSessionParams {

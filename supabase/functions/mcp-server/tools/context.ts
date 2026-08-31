@@ -49,6 +49,10 @@ interface AssembledTestPlan {
   /** C4 step 1: set when a freshly generated plan was parked as a pending proposal. */
   proposalId?: string;
   persistNote?: string;
+  /** Dogfood #3: true when the stored plan's fingerprint no longer matched the
+   *  live graph and this response is a read-time regeneration (Test Strategy
+   *  edits preserved; nothing persisted — the push gate owns the artifact). */
+  refreshed: boolean;
 }
 
 // C4 step 1: the ONE requirement-scoped test-plan assembly — get_test_plan's lane
@@ -164,6 +168,7 @@ async function assembleTestPlanForRequirement(
     },
     proposalId,
     persistNote,
+    refreshed: result.refreshed === true,
   };
 }
 
@@ -488,7 +493,12 @@ export async function handleGetTestPlan(
       testCaseSummary: assembled.testCaseSummary,
       // C4 step 1: a fresh generation no longer evaporates — it is parked as a pending
       // proposal; the plan persists into the graph when that proposal is accepted.
-      ...(assembled.proposalId ? { proposalId: assembled.proposalId, note: assembled.persistNote } : {}),
+      ...(assembled.proposalId ? { proposalId: assembled.proposalId } : {}),
+      // Dogfood #3 follow-up: a read-time refresh must SAY so — persistNote was
+      // set on refresh but only shipped beside proposalId (which a refresh never
+      // has), so the caller got a silently different plan with no explanation.
+      ...(assembled.refreshed ? { testPlanRefreshed: true } : {}),
+      ...(assembled.persistNote ? { note: assembled.persistNote } : {}),
     },
   };
 }

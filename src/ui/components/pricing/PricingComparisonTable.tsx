@@ -22,7 +22,7 @@ function getFeatureRows(): FeatureRow[] {
   return [
     { label: 'Scale', category: true, values: [] },
     { label: 'Where it runs', values: ['Your container', 'Hosted', 'Hosted', 'Hosted', 'Self-hosted', 'Gov enclave'] },
-    { label: 'Projects', values: ['Unlimited (local)', '1', 'Unlimited', 'Unlimited', 'Unlimited', 'Unlimited'] },
+    { label: 'Projects', values: ['Unlimited (local)', '2', 'Unlimited', 'Unlimited', 'Unlimited', 'Unlimited'] },
     { label: 'Users', values: ['Self-managed', '1', '1', 'Per seat', 'Custom', 'Custom'] },
     { label: 'The platform — every tier', category: true, values: [] },
     { label: 'MCP-native connection for your AI', values: [true, true, true, true, true, true] },
@@ -51,8 +51,36 @@ function getFeatureRows(): FeatureRow[] {
 const highlightIdx = deploymentTiers.findIndex((t) => t.highlighted);
 
 interface PricingComparisonTableProps {
-  onSelect: (tierId: DeploymentTierId) => void;
+  /** Owner 2026-08-31: Indie sells monthly ($15/mo) or annual ($144/yr) — the
+   *  interval arrives from the card's CTA pair; every other tier ignores it. */
+  onSelect: (tierId: DeploymentTierId, interval?: 'month' | 'year') => void;
   loading?: boolean;
+}
+
+/** The annual secondary action under Indie's monthly CTA. */
+function AnnualLink({ onClick, disabled }: { onClick: () => void; disabled: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        display: 'block',
+        width: '100%',
+        marginTop: '8px',
+        padding: 0,
+        background: 'none',
+        border: 'none',
+        fontSize: '11.5px',
+        fontWeight: 600,
+        color: '#8a8f9e',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        textDecoration: 'underline',
+        textUnderlineOffset: '3px',
+      }}
+    >
+      or $144 billed yearly — save 20%
+    </button>
+  );
 }
 
 export function PricingComparisonTable({ onSelect, loading = false }: PricingComparisonTableProps) {
@@ -244,6 +272,9 @@ export function PricingComparisonTable({ onSelect, loading = false }: PricingCom
                   >
                     {tier.cta}
                   </button>
+                  {tier.id === 'indie' && (
+                    <AnnualLink onClick={() => onSelect('indie', 'year')} disabled={loading} />
+                  )}
                 </td>
               ))}
             </tr>
@@ -366,6 +397,9 @@ export function PricingComparisonTable({ onSelect, loading = false }: PricingCom
                   >
                     {tier.cta}
                   </button>
+                  {tier.id === 'indie' && (
+                    <AnnualLink onClick={() => onSelect('indie', 'year')} disabled={loading} />
+                  )}
                 </div>
               )}
             </div>

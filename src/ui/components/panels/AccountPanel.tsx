@@ -515,7 +515,7 @@ function AccountPanelComponent({ userEmail, userId, onClose }: AccountPanelProps
                 </span>
               </div>
               <div style={{ fontSize: '12px', color: c.textMuted }}>
-                1 project, canvas access, and GitHub push. Upgrade to unlock AI generation, repo import, and more.
+                2 projects, canvas access, and GitHub push. Upgrade to unlock AI generation, repo import, and more.
               </div>
             </div>
           </div>

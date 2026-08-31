@@ -34,10 +34,10 @@ export const TIER_RANK: Record<PlanTier, number> = {
   government: 4,
 };
 
-/** Hosted community accounts include one project (owner ruling 2026-08-25;
- *  supersedes the 3-project 2026-08-12 design). Self-host deployments are
+/** Hosted Free accounts include two projects (owner ruling 2026-08-31 Stripe
+ *  round; supersedes the 1-project 2026-08-25 cap). Self-host deployments are
  *  uncapped at every tier — the container is the free product. */
-export const HOSTED_COMMUNITY_PROJECT_LIMIT = 1;
+export const HOSTED_COMMUNITY_PROJECT_LIMIT = 2;
 
 /**
  * Resolve any tier/plan string — canonical, legacy, or a display-decorated

@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "validate:preflight": "tsx scripts/validate-preflight.ts",
     "bench:auto": "node scripts/bench/run.mjs",
+    "bench:oss": "node scripts/bench/oss-run.mjs",
     "n10:coverage": "npx --yes deno@2 run --no-check --allow-net --allow-env --allow-read --allow-write --node-modules-dir=auto scripts/n10-enrichment-coverage.ts",
     "n10:sweep": "npx --yes deno@2 run --no-check --allow-net --allow-env --allow-read --allow-write --node-modules-dir=auto scripts/n10-packet-sweep.ts",
     "n10:verify-urls": "npx --yes deno@2 run --no-check --allow-net --allow-env --allow-read --node-modules-dir=auto scripts/n10-verify-docs-urls.ts",

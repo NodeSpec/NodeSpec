@@ -34,7 +34,7 @@ export function PricingSection({ onRequestSignUp }: PricingSectionProps) {
     });
   }, []);
 
-  const handleSelect = (tierId: DeploymentTierId) => {
+  const handleSelect = (tierId: DeploymentTierId, interval: 'month' | 'year' = 'month') => {
     if (tierId === 'community') {
       // The downloadable container — the CTA is the public repository.
       window.open(COMMUNITY_REPO_URL, '_blank', 'noopener,noreferrer');
@@ -60,7 +60,7 @@ export function PricingSection({ onRequestSignUp }: PricingSectionProps) {
         const { data: { session } } = await supabase.auth.getSession();
         if (!session?.access_token) return;
         const svc = new SubscriptionService(supabase);
-        const result = await svc.createCheckoutSession('indie', 'month', session.access_token);
+        const result = await svc.createCheckoutSession('indie', interval, session.access_token);
         if ('url' in result) window.location.href = result.url;
         else console.error('[PricingSection] Checkout error:', result.error);
       })();

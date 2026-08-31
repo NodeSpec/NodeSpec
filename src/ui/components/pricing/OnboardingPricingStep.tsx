@@ -15,7 +15,7 @@ interface OnboardingPricingStepProps {
 }
 
 // Onboarding: every new hosted account starts on the Free card (the hosted
-// community plan — 1 project, no card). This step welcomes rather than
+// free plan — 2 projects, no card). This step welcomes rather than
 // sells — the only decision is "continue", with contact lanes for
 // Team/Enterprise. NOT the 'community' card: that one is the downloadable
 // container, whose CTA is the public repository.

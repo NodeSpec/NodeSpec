@@ -24,7 +24,7 @@ export function PricingPage() {
   usePageSeo({
     title: 'Pricing - NodeSpec',
     description:
-      'NodeSpec tiers: Community is the free open-source container, Free is hosted with 1 project, Indie adds repo import reverse visualization, Team adds teamwork integrations, Enterprise and Government run self-hosted.',
+      'NodeSpec tiers: Community is the free open-source container, Free is hosted with 2 projects, Indie ($15/mo or $144/yr) adds repo import reverse visualization, Team adds teamwork integrations, Enterprise and Government run self-hosted.',
     path: '/pricing',
     keywords:
       'NodeSpec pricing, AI architecture tool pricing, self-hosted architecture tool, software architecture governance, MCP architecture context, free architecture tool',
@@ -44,7 +44,7 @@ export function PricingPage() {
     });
   }, []);
 
-  const handleSelect = (tierId: DeploymentTierId) => {
+  const handleSelect = (tierId: DeploymentTierId, interval: 'month' | 'year' = 'month') => {
     if (tierId === 'community') {
       // The downloadable container — the CTA is the public repository.
       window.open(COMMUNITY_REPO_URL, '_blank', 'noopener,noreferrer');
@@ -64,7 +64,7 @@ export function PricingPage() {
         const { data: { session } } = await supabase.auth.getSession();
         if (!session?.access_token) return;
         const svc = new SubscriptionService(supabase);
-        const result = await svc.createCheckoutSession('indie', 'month', session.access_token);
+        const result = await svc.createCheckoutSession('indie', interval, session.access_token);
         if ('url' in result) window.location.href = result.url;
         else console.error('[PricingPage] Checkout error:', result.error);
       })();

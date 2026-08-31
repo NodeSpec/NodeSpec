@@ -1,6 +1,7 @@
 // P0-8: pins the price -> plan mapping (previously duplicated AND drifted between
 // stripe-webhook and sync-subscription; now single-sourced in _shared/stripe-plans.ts).
 import {
+  CHECKOUT_LOOKUP_KEYS,
   PLAN_BY_LOOKUP_KEY,
   resolvePlanInfoStrict,
   resolvePlanInfoWithFallbacks,
@@ -20,10 +21,14 @@ Deno.test('lookup keys map to the expected tiers', () => {
   assertEquals(Object.keys(PLAN_BY_LOOKUP_KEY).length, 10);
 });
 
-Deno.test('checkout accepts exactly the plan keys plus the token addon', () => {
+Deno.test('resolution recognizes every key; checkout SELLS only live Indie (owner 2026-08-31)', () => {
   assertEquals(VALID_LOOKUP_KEYS.size, 11);
-  assert(VALID_LOOKUP_KEYS.has('price_token_addon_1m'), 'addon key accepted');
+  assert(VALID_LOOKUP_KEYS.has('price_token_addon_1m'), 'addon key still resolves');
   assert(!VALID_LOOKUP_KEYS.has('price_enterprise_secret'), 'unknown keys rejected');
+  // The purchasable catalog after the Stripe reset: Indie monthly + annual.
+  // Team is a placeholder (features unbuilt, planned separately) and the
+  // token add-on product is archived.
+  assertEquals([...CHECKOUT_LOOKUP_KEYS].sort(), ['price_indie_annual_new', 'price_indie_monthly_new']);
 });
 
 Deno.test('strict resolver (webhook behavior): unknown lookup key -> unknown, no heuristics', () => {
@@ -41,4 +46,8 @@ Deno.test('fallback resolver (sync behavior): nickname then amount heuristics', 
   assertEquals(resolvePlanInfoWithFallbacks({ lookup_key: '', nickname: '', unit_amount: 4000 }).name, 'team');
   assertEquals(resolvePlanInfoWithFallbacks({ lookup_key: '', nickname: '', unit_amount: 1200 }).name, 'indie');
   assertEquals(resolvePlanInfoWithFallbacks({ lookup_key: '', nickname: '', unit_amount: 100 }).name, 'unknown');
+  // Current Indie amounts resolve as indie by exact value — Indie Annual is
+  // $144 (14400¢), which the >= 7900 team rung would otherwise swallow.
+  assertEquals(resolvePlanInfoWithFallbacks({ lookup_key: '', nickname: '', unit_amount: 14400 }).name, 'indie');
+  assertEquals(resolvePlanInfoWithFallbacks({ lookup_key: '', nickname: '', unit_amount: 1500 }).name, 'indie');
 });

@@ -261,6 +261,11 @@ Deno.test('get_test_plan: stored plan found via metadata.requirementId after a r
   assert(!String(data.testPlanContent).includes('STORED PLAN BODY'), 'stale stored content is not served');
   assert(String(data.testPlanContent).includes('# Test Plan:'), 'a fresh regeneration is served instead');
   assertEquals(data.proposalId, undefined, 'a refresh parks NOTHING — persistence belongs to the push-time gate');
+  // #3 follow-up: the refresh must SAY so — persistNote used to ship only
+  // beside proposalId, which a refresh never has, so the caller got a
+  // silently different plan with no explanation.
+  assertEquals(data.testPlanRefreshed, true, 'the response flags the read-time refresh');
+  assert(String(data.note).includes('fresh regeneration'), 'the note explains what happened and where persistence lives');
   assertEquals(sb.callsTo('ai_proposals', 'insert').length, 0);
   assertEquals(sb.callsTo('ai_runs', 'insert').length, 0);
 });

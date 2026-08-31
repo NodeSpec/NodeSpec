@@ -37,7 +37,7 @@ interface SkillEntry {
 
 /** `nodespec-developer` → `NodeSpec Developer`; `aws-architecture` → `AWS Architecture`. */
 function prettify(dir: string): string {
-  const ACRONYMS = new Set(['aws', 'gcp', 'ai', 'ml', 'api', 'iac', 'ci', 'cd', 'sql', 'ui', 'ux']);
+  const ACRONYMS = new Set(['aws', 'gcp', 'ai', 'ml', 'api', 'iac', 'ci', 'cd', 'sql', 'ui', 'ux', 'oss']);
   return dir
     .split(/[-_]/)
     .filter(Boolean)

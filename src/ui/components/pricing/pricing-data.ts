@@ -4,8 +4,8 @@
     Community  — free: the Apache-2.0 downloadable container. MCP-native AI
                  connection, git connection & provenance, the full spec-driven
                  engine, Architecture Canvas, open node technology catalog.
-    Free       — free: HOSTED at nodespec.io, up to 1 project.
-    Indie      — $15/mo hosted: all features + repo import reverse
+    Free       — free: HOSTED at nodespec.io, up to 2 projects.
+    Indie      — $15/mo or $144/yr hosted: all features + repo import reverse
                  visualization and deduction (no teamwork features).
     Team       — $60/user/mo hosted: all features + the teamwork lane
                  (Notion/Atlassian/Slack, Workflow Designer).
@@ -68,13 +68,13 @@ export const deploymentTiers: DeploymentTier[] = [
     id: 'free',
     name: 'Free',
     price: 'Free',
-    audience: 'Hosted · up to 1 project',
+    audience: 'Hosted · up to 2 projects',
     badge: 'Start here',
     description:
-      'A hosted account at nodespec.io — everything in Community, run for you, with one project. No card, no trial clock.',
+      'A hosted account at nodespec.io — everything in Community, run for you, with two projects. No card, no trial clock.',
     features: [
       'Everything in Community, hosted',
-      'Up to 1 project',
+      'Up to 2 projects',
       'Full hosted technology catalog',
       'No card, no trial clock',
     ],
@@ -85,6 +85,7 @@ export const deploymentTiers: DeploymentTier[] = [
     id: 'indie',
     name: 'Indie',
     price: '$15/mo',
+    priceNote: 'or $144/yr — save 20%',
     audience: 'Hosted · unlimited projects',
     badge: 'Most popular',
     description:

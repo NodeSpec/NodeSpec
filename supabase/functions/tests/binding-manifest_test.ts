@@ -250,17 +250,19 @@ Deno.test("B1 review: '..' escape check is per-segment — dotted filenames are 
   assertEquals(parsed.flagged, [{ reason: "path-escape", detail: "src/../../etc/passwd" }]);
 });
 
-Deno.test("B1 review: skill and parser agree on the declarable-kind list", async () => {
-  const skill = await Deno.readTextFile(
-    new URL("../../../skills/nodespec-developer/SKILL.md", import.meta.url),
-  );
-  // The skill's documented list is the contract users see; keep it lockstep
-  // with DECLARABLE_KINDS so neither side drifts silently.
-  assert(
-    skill.includes("`kind` is one of source, schema, doc,\nconfig, build, design") ||
-    skill.includes("kind is one of source, schema, doc"),
-    "skill must document the six declarable kinds",
-  );
+Deno.test("B1 review: skills and parser agree on the declarable-kind list", async () => {
+  // The skills' documented list is the contract users see; keep BOTH product
+  // skills lockstep with DECLARABLE_KINDS so neither side drifts silently.
+  for (const dir of ["nodespec-developer", "nodespec-oss-developer"]) {
+    const skill = await Deno.readTextFile(
+      new URL(`../../../skills/${dir}/SKILL.md`, import.meta.url),
+    );
+    assert(
+      skill.includes("`kind` is one of source, schema, doc,\nconfig, build, design") ||
+      skill.includes("kind is one of source, schema, doc"),
+      `${dir} must document the six declarable kinds`,
+    );
+  }
   const { DECLARABLE_KINDS } = await import("../_shared/binding-manifest.ts");
   assertEquals([...DECLARABLE_KINDS].sort(), ["build", "config", "design", "doc", "schema", "source"]);
 });

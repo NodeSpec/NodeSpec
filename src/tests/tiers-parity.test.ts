@@ -37,8 +37,9 @@ describe('canonical tier vocabulary — client/server parity', () => {
     for (const [tier, rank] of Object.entries(TIER_RANK)) {
       expect(denoSrc).toContain(`${tier}: ${rank},`);
     }
-    expect(HOSTED_COMMUNITY_PROJECT_LIMIT).toBe(1);
-    expect(denoSrc).toContain('export const HOSTED_COMMUNITY_PROJECT_LIMIT = 1;');
+    // Owner 2026-08-31 (Stripe round): hosted Free includes 2 projects.
+    expect(HOSTED_COMMUNITY_PROJECT_LIMIT).toBe(2);
+    expect(denoSrc).toContain('export const HOSTED_COMMUNITY_PROJECT_LIMIT = 2;');
   });
 
   it('canonicalizeTier resolves canonical, legacy, decorated, and sentinel inputs', () => {

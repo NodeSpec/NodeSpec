@@ -157,15 +157,15 @@ Deno.test('create_project: write scope + non-empty name required', async () => {
   assert((r.error ?? '').includes('name is required'));
 });
 
-Deno.test('create_project: hosted community tier is capped at ONE project (2026-08-25 open-core GTM)', async () => {
+Deno.test('create_project: hosted Free tier is capped at TWO projects (owner 2026-08-31 Stripe round)', async () => {
   const sb = new FakeSupabase();
-  // getUserTier → community (no subscription), not admin, project count already 1.
+  // getUserTier → community (no subscription), not admin, project count already at the cap.
   sb.script('stripe_subscriptions', 'select', { data: null, error: null });
   sb.script('user_settings', 'select', { data: null, error: null });
-  sb.script('projects', 'select', { count: 1, data: null, error: null });
-  const r = await handleCreateProject(sb as never, WRITE, { name: 'Second' });
+  sb.script('projects', 'select', { count: 2, data: null, error: null });
+  const r = await handleCreateProject(sb as never, WRITE, { name: 'Third' });
   assertEquals(r.success, false);
-  assert((r.error ?? '').includes('Community accounts include 1 project'));
+  assert((r.error ?? '').includes('Free accounts include 2 projects'));
   assert((r.error ?? '').includes('Indie'), 'the refusal steers to the upgrade path');
   assertEquals(sb.callsTo('projects', 'insert').length, 0, 'no project created when capped');
 });
@@ -174,7 +174,7 @@ Deno.test('create_project: community tier below the cap proceeds past the limit 
   const sb = new FakeSupabase();
   sb.script('stripe_subscriptions', 'select', { data: null, error: null });
   sb.script('user_settings', 'select', { data: null, error: null });
-  sb.script('projects', 'select', { count: 0, data: null, error: null }); // 0 of 1 used
+  sb.script('projects', 'select', { count: 0, data: null, error: null }); // 0 of 2 used
   sb.script('projects', 'select', { data: { id: 'existing' }, error: null }); // duplicate-name check hits
   const r = await handleCreateProject(sb as never, WRITE, { name: 'First' });
   assertEquals(r.success, false);

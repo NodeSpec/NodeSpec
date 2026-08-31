@@ -6,7 +6,7 @@ import { canonicalizeTier } from '../ui/config/tiers.js';
 
 /*
   Six-card pricing model (owner ruling 2026-08-26): Community (the
-  downloadable container) and Free (hosted, 1 project) are separate CARDS of
+  downloadable container) and Free (hosted, 2 projects) are separate CARDS of
   the same canonical community plan. The canonical tier vocabulary stays
   five values — nothing billed or persisted changes shape.
 */
@@ -33,13 +33,27 @@ describe('pricing — six display cards', () => {
     expect(COMMUNITY_REPO_URL).toBe('https://github.com/NodeSpec/NodeSpec');
   });
 
-  it('Free is hosted with up to 1 project and signs up; it resolves to the community plan', () => {
+  it('Free is hosted with up to 2 projects and signs up; it resolves to the community plan', () => {
     const free = deploymentTiers.find((t) => t.id === 'free')!;
     expect(free.ctaKind).toBe('signup');
     expect(free.audience.toLowerCase()).toContain('hosted');
-    expect(free.features.join(' ')).toContain('1 project');
+    expect(free.features.join(' ')).toContain('2 projects');
     // The display card is not a new canonical tier: 'free' aliases community.
     expect(canonicalizeTier('free')).toBe('community');
+  });
+
+  it('Indie sells monthly and annual (owner 2026-08-31: $15/mo or $144/yr)', () => {
+    const indie = deploymentTiers.find((t) => t.id === 'indie')!;
+    expect(indie.price).toBe('$15/mo');
+    expect(indie.priceNote).toContain('$144/yr');
+    // Both surfaces pass the chosen interval through to checkout, and the
+    // table's Indie card renders the annual secondary action.
+    const table = readFileSync(resolve(__dirname, '../ui/components/pricing/PricingComparisonTable.tsx'), 'utf-8');
+    expect(table).toContain("onSelect('indie', 'year')");
+    for (const rel of ['../ui/components/pricing/PricingPage.tsx', '../ui/components/pricing/PricingSection.tsx']) {
+      const src = readFileSync(resolve(__dirname, rel), 'utf-8');
+      expect(src, `${rel} must pass the interval through`).toContain("createCheckoutSession('indie', interval");
+    }
   });
 
   it('Indie adds repo import and none of the teamwork features; Team adds teamwork', () => {
