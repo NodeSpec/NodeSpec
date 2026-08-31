@@ -363,6 +363,8 @@ instructions for Claude Desktop, Claude Code, Cursor, OpenAI Codex, VS Code,
 and other MCP clients. The server URL is always
 `http(s)://<your-host>/functions/v1/mcp-server`.
 
+For systems like Claude Desktop for local MCP that doesn't accept non-https, copy the configuration file into the desktop config.json.
+
 Three behaviors are specific to a local install:
 
 - Create your NodeSpec account **before** connecting your AI — with
