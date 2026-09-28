@@ -300,6 +300,7 @@ current details.
 
 ## Links
 
+- **MySpec** — [myspec.dev](https://myspec.dev) (interactive spec discovery platform compiling guided interviews into 4-file bundles with MCP server)
 - **Web app** — [nodespec.io](https://nodespec.io)
 - **Templates** — [nodespec.io/templates](https://nodespec.io/templates)
 - **Connecting your AI** — [nodespec.io/docs/mcp](https://nodespec.io/docs/mcp)
