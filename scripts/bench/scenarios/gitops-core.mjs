@@ -45,8 +45,10 @@ export const connectBaseline = {
       re = await connectRepo(env, session, callFn, fx.ids.project);
     }
     const skipped = re.connect.anchorAdopt?.skipped ?? '';
+    // UAT hardening 2026-09-27: an anchor never found also raises no card; the
+    // reconnect proves the silent re-baseline only when it saw the anchor.
     s.check('reconnect re-establishes the baseline silently (no card, no proposal)',
-      !re.connect.anchorAdopt?.mismatchCardId && !re.connect.anchorAdopt?.proposalId,
+      re.connect.anchorAdopt?.detected === true && !re.connect.anchorAdopt?.mismatchCardId && !re.connect.anchorAdopt?.proposalId,
       JSON.stringify(re.connect.anchorAdopt).slice(0, 300));
     s.check('reconnect names its outcome (observability)', typeof skipped === 'string' && skipped.length > 0, skipped);
 

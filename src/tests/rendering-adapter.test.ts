@@ -11,7 +11,7 @@ import {
   populateTechnologyVisuals,
   TECHNOLOGY_LOGO_MAP,
 } from '../ui/utils/technology-logo-map.js';
-import { mapNodeToRFNode } from '../ui/adapters/graph-to-reactflow.js';
+import { isBoxNode, isExplodedNode, mapNodeToRFNode } from '../ui/adapters/graph-to-reactflow.js';
 import type { Graph, Node } from '@nodespec/core/types.js';
 import type { CatalogResolver, NodeRole, TechnologyCatalogEntry } from '../persistence/supabase/catalog-repository.js';
 
@@ -59,7 +59,6 @@ function makeRole(id: string, rfVisualType: string, opts: Partial<NodeRole> = {}
     containerStyle: opts.containerStyle ?? null,
     canContain: opts.canContain ?? [],
     metadataSchema: opts.metadataSchema ?? null,
-    defaultPorts: opts.defaultPorts ?? [],
     suggestedContracts: opts.suggestedContracts ?? [],
     sortOrder: opts.sortOrder ?? 0,
     deprecated: opts.deprecated ?? false,
@@ -413,5 +412,37 @@ describe('Rendering Adapter Integration', () => {
 
     const rfNode = mapNodeToRFNode(graph.nodes['svc-1'], graph, 'nested');
     expect(rfNode.type).toBe('icon');
+  });
+});
+
+// AB.5 (owner 2026-09-24): an Electron app is a node, not a container. The
+// container flag decides; a leaf left with rf_visual_type 'container' (as
+// desktop-app was after M3) draws as a service and holds nothing as a
+// container, and still draws as a box once it is exploded into its parts.
+describe('AB.5 · the container flag decides, not the drawing type', () => {
+  const desktop = makeRole('desktop-app', 'container', { isContainer: false, canContain: ['part-page', 'part-component', 'part-module'] });
+  const aws = makeRole('aws', 'container', { isContainer: true, containerStyle: 'hosting', canContain: { natures: ['build'], roleIds: [], providers: ['aws'] } as never });
+  const catalog = makeMockCatalog({ roles: [desktop, aws, makeRole('mobile-app', 'service', { canContain: ['part-page'] }), makeRole('part-page', 'service')] });
+
+  it('a leaf drawn as a container is neither drawn nor treated as one', () => {
+    expect(isContainerType('desktop-app', catalog)).toBe(false);
+    expect(resolveRFVisualType('desktop-app', catalog)).toBe('service');
+    populateRFVisualTypes(catalog);
+    expect(resolveRFVisualType('desktop-app')).toBe('service');
+  });
+
+  it('a platform that admits by nature and provider is still a container', () => {
+    expect(isContainerType('aws', catalog)).toBe(true);
+    expect(resolveRFVisualType('aws', catalog)).toBe('container');
+  });
+
+  it('an Electron node draws like a Swift node, and as a box only once it is exploded', () => {
+    const node = (id: string, type: string, technology: string, parentId?: string): Node =>
+      ({ id, type, label: id, technology, ports: [], artifacts: [], status: 'draft', metadata: {}, ...(parentId ? { parentId } : {}) } as unknown as Node);
+    const graph = { nodes: { app: node('app', 'desktop-app', 'electron'), ios: node('ios', 'mobile-app', 'swift-ios') }, edges: {}, contracts: {}, artifacts: {} } as unknown as Graph;
+    expect(mapNodeToRFNode(graph.nodes.app, graph, 'nested', catalog).type).toBe(mapNodeToRFNode(graph.nodes.ios, graph, 'nested', catalog).type);
+    expect(isBoxNode(graph.nodes.app, graph, catalog)).toBe(false);
+    graph.nodes.renderer = node('renderer', 'part-page', 'react', 'app');
+    expect(isExplodedNode(graph.nodes.app, graph, catalog)).toBe(true);
   });
 });

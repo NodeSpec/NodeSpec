@@ -3,8 +3,9 @@ import type { TestCase, TestCaseRepository } from '../../persistence/supabase/te
 
 // WS4: the UI-side generateTestCases/regenerateTestCases lane is gone — test
 // plans are drafted and reported over MCP (get_test_plan / report_test_results).
-// The `generate-test-cases-v4` edge function itself is untouched (D-series
-// decides its fate); this service keeps only the read/CRUD paths.
+// D-series has since DELETED the `generate-test-cases-v4` edge function this
+// note used to defer on; nothing generates test cases in-app any more, and this
+// service keeps only the read/CRUD paths.
 //
 // E2: the maintenance lanes (rename / retire / reassign) mirror the
 // update_test_case MCP tool's semantics EXACTLY — one doctrine, two entry
@@ -33,11 +34,34 @@ export function releaseCriteriaBoundToCase(
   return { changed, criteria: next };
 }
 
+/** The selector for one criterion: its stable id when it has one (v3l), else
+ *  its exact text — the same two identities the server's ops accept. */
+function selectorFor(criterion: Record<string, unknown> | undefined): Record<string, string> | null {
+  if (!criterion) return null;
+  if (typeof criterion.id === 'string' && criterion.id.length > 0) return { criterion_id: criterion.id };
+  if (typeof criterion.text === 'string' && criterion.text.length > 0) return { criterion_text: criterion.text };
+  return null;
+}
+
 export class TestCaseService {
   constructor(
     private testCaseRepo: TestCaseRepository,
     private supabase?: SupabaseClient,
   ) {}
+
+  /** R2: every criteria write from the app goes through the ONE locked writer,
+   *  as operations. The app calls the MEMBER wrapper (v3s), which re-states the
+   *  two policies a SECURITY DEFINER function would otherwise bypass —
+   *  contributor membership and the classification rule — so a seat reaches
+   *  exactly what RLS would have allowed it to write directly, and no more. */
+  private async applyCriteriaOps(requirementRowId: string, ops: Array<Record<string, unknown>>): Promise<void> {
+    if (!this.supabase || ops.length === 0) return;
+    const { error } = await this.supabase.rpc('apply_criteria_ops_as_member', {
+      p_requirement_id: requirementRowId,
+      p_ops: ops,
+    });
+    if (error) throw new Error(`Could not update the acceptance criteria: ${error.message}`);
+  }
 
   async getTestCasesByRequirementIds(requirementIds: string[]): Promise<TestCase[]> {
     return this.testCaseRepo.getTestCasesByRequirementIds(requirementIds);
@@ -65,13 +89,13 @@ export class TestCaseService {
         .maybeSingle();
 
       if (req?.acceptance_criteria && Array.isArray(req.acceptance_criteria)) {
-        const criteria = [...req.acceptance_criteria];
-        if (criterionIndex >= 0 && criterionIndex < criteria.length) {
-          criteria[criterionIndex] = { ...criteria[criterionIndex], testId: tc.id };
-          await this.supabase
-            .from('specification_requirements')
-            .update({ acceptance_criteria: criteria, updated_at: new Date().toISOString() })
-            .eq('id', requirementId);
+        const criteria = req.acceptance_criteria as Array<Record<string, unknown>>;
+        // The caller names a POSITION; the writer selects by IDENTITY, because a
+        // position is not stable under a concurrent edit that reorders the list.
+        const selector = criterionIndex >= 0 && criterionIndex < criteria.length
+          ? selectorFor(criteria[criterionIndex]) : null;
+        if (selector) {
+          await this.applyCriteriaOps(requirementId, [{ op: 'bind', ...selector, value: tc.id }]);
         }
       }
     }
@@ -185,10 +209,12 @@ export class TestCaseService {
       .maybeSingle();
     const release = releaseCriteriaBoundToCase(req?.acceptance_criteria, caseId, at, reason);
     if (!release.changed) return;
-    await this.supabase
-      .from('specification_requirements')
-      .update({ acceptance_criteria: release.criteria, updated_at: at })
-      .eq('id', requirementRowId);
+    // mark_stale before unbind: the mark selects by the testId the criterion
+    // still carries, so stripping the binding first would leave it unmarked.
+    await this.applyCriteriaOps(requirementRowId, [
+      { op: 'mark_stale', test_id: caseId, value: { at, reason } },
+      { op: 'unbind', test_id: caseId },
+    ]);
   }
 
   async deleteTestCase(testCaseId: string): Promise<void> {
@@ -205,14 +231,9 @@ export class TestCaseService {
             .eq('id', tc.requirementId)
             .maybeSingle();
 
-          if (req?.acceptance_criteria && Array.isArray(req.acceptance_criteria)) {
-            const criteria = req.acceptance_criteria.map((c: any) =>
-              c.testId === testCaseId ? { ...c, testId: undefined } : c
-            );
-            await this.supabase
-              .from('specification_requirements')
-              .update({ acceptance_criteria: criteria, updated_at: new Date().toISOString() })
-              .eq('id', tc.requirementId);
+          const bound = (req?.acceptance_criteria as Array<Record<string, unknown>> | undefined) ?? [];
+          if (bound.some((c) => c.testId === testCaseId)) {
+            await this.applyCriteriaOps(tc.requirementId, [{ op: 'unbind', test_id: testCaseId }]);
           }
         }
       }
@@ -228,16 +249,12 @@ export class TestCaseService {
         .eq('id', requirementId)
         .maybeSingle();
 
-      if (req?.acceptance_criteria && Array.isArray(req.acceptance_criteria)) {
-        const hasTestIds = req.acceptance_criteria.some((c: any) => c.testId);
-        if (hasTestIds) {
-          const criteria = req.acceptance_criteria.map((c: any) => ({ ...c, testId: undefined }));
-          await this.supabase
-            .from('specification_requirements')
-            .update({ acceptance_criteria: criteria, updated_at: new Date().toISOString() })
-            .eq('id', requirementId);
-        }
-      }
+      const all = (req?.acceptance_criteria as Array<Record<string, unknown>> | undefined) ?? [];
+      // One unbind op per bound case — never a blanket array replacement, which
+      // is what let this path erase a met flip that landed a moment earlier.
+      const unbinds = [...new Set(all.map((c) => c.testId).filter((t): t is string => typeof t === 'string'))]
+        .map((testId) => ({ op: 'unbind', test_id: testId }));
+      await this.applyCriteriaOps(requirementId, unbinds);
     }
     return this.testCaseRepo.deleteTestCasesByRequirementId(requirementId);
   }

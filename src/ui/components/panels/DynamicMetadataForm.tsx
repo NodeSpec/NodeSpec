@@ -5,9 +5,27 @@
 // schema-driven. Renders any catalog `metadata_schema` (technology first, role as
 // fallback) — enum / boolean / number / text — and emits one value per change; the
 // caller decides where values live (node.metadata.config) and how patches are built.
+// AF.3: a stored value outside the options, and a multiselect stored as one string, show
+// as they are stored.
 import { memo } from 'react';
 import { useTheme } from '../../theme/ThemeContext.js';
 import type { MetadataFieldSchema } from '@nodespec/core/node-types.js';
+
+/** AF.3 (owner 2026-09-28): what a node stored is the person's own word, and the packet
+ *  carries it. A stored value that is not one of the options shows as its own choice until
+ *  the person picks another, so the inspector never shows something the packet does not say. */
+export function choicesWithStored(options: ReadonlyArray<string | number>, stored: readonly string[]): string[] {
+  const opts = options.map(String);
+  return [...opts, ...stored.filter((s) => s !== '' && !opts.includes(s))];
+}
+
+/** A multiselect's stored value as its items: an array, or the comma-separated string the
+ *  old free-text box saved (Desktop Application's platforms before AF.2). */
+export function storedItems(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value === 'string') return value.split(',').map((s) => s.trim()).filter(Boolean);
+  return [];
+}
 
 interface DynamicMetadataFormProps {
   schema: Record<string, MetadataFieldSchema>;
@@ -44,15 +62,16 @@ function DynamicMetadataFormComponent({ schema, values, onUpdate }: DynamicMetad
         // enum check silently degraded every one of those dropdowns to a text input.
         // The reader is tolerant; N8.3's filing gate normalizes the data shape.
         if (field.options && field.options.length > 0 && field.type !== 'multiselect' && field.type !== 'boolean' && field.type !== 'number') {
+          const shown = String(currentValue ?? field.default ?? '');
           return (
             <div key={key}>
               <div style={{ fontSize: '11px', color: c.textMuted, marginBottom: '4px' }}>{field.label}</div>
               <select
                 style={{ ...inputStyles, cursor: 'pointer' }}
-                value={String(currentValue ?? field.default ?? '')}
+                value={shown}
                 onChange={(e) => onUpdate(key, e.target.value)}
               >
-                {(field.options as string[]).map(opt => (
+                {choicesWithStored(field.options, [shown]).map(opt => (
                   <option key={opt} value={opt}>{opt}</option>
                 ))}
               </select>
@@ -66,12 +85,12 @@ function DynamicMetadataFormComponent({ schema, values, onUpdate }: DynamicMetad
         // N8.1b: multiselect — "which parts of this service do you use" (Stripe API
         // areas et al.). Value is string[]; selections drive packet reference content.
         if (field.type === 'multiselect' && field.options) {
-          const selected = Array.isArray(currentValue) ? (currentValue as string[]) : [];
+          const selected = storedItems(currentValue);
           return (
             <div key={key}>
               <div style={{ fontSize: '11px', color: c.textMuted, marginBottom: '4px' }}>{field.label}</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                {(field.options as string[]).map(opt => (
+                {choicesWithStored(field.options, selected).map(opt => (
                   <label key={opt} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: c.text, cursor: 'pointer' }}>
                     <input
                       type="checkbox"

@@ -10,7 +10,8 @@ import {
 import type { Theme } from '../../theme/index.js';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { InterfaceIcon } from '../common/index.js';
-import type { EdgeVisibility, ArchitectureLayerMode } from '../../adapters/graph-to-reactflow.js';
+import type { EdgeVisibility, ArchitectureLayerMode, ImportEdgeEvidence } from '../../adapters/graph-to-reactflow.js';
+import { ACCESS_TONES, REFERENCE_DASH, REFERENCE_TONES, accessText, referenceText, type Access, type Reference } from '../../adapters/data-shape.js';
 import type { ContractKind, InteractionKind, EdgeCriticality, EdgeDirection } from '@nodespec/core/shared/enums.js';
 
 // ─── Visual Encoding Maps ───────────────────────────────────────────────────
@@ -18,11 +19,30 @@ import type { ContractKind, InteractionKind, EdgeCriticality, EdgeDirection } fr
 // each carried a private copy; the legend's dash copy had drifted to a subset).
 import { CONTRACT_KIND_EDGE_COLORS, INTERACTION_KIND_DASH } from '../panels/inspector/kind-maps.js';
 
+/** AA.2: an edge crossing into the active change's scope. */
+const SCOPE_CROSSING_COLOR = '#3b82f6';
+
 const CRITICALITY_WIDTH: Record<EdgeCriticality, number> = {
   required: 2.2,
   optional: 1.4,
   fallback: 1,
 };
+
+// RI-6: an imported edge grows with its evidence — log-scaled so one
+// resolved file pair reads as a hairline and hundreds as a trunk, never a
+// line that swallows the canvas. Exported for the source-contract test.
+export function importEvidenceWidthBoost(count: number | undefined): number {
+  if (!count || count <= 1) return 0;
+  return Math.min(2.5, Math.log2(count) * 0.6);
+}
+
+/** Hover line: "12 imports · a/x.ts → b/y.ts" (first sample, trimmed). */
+export function formatImportEvidence(ev: ImportEdgeEvidence): string {
+  const noun = ev.kind === 'manifest' ? 'workspace dep' : ev.kind === 'http-client' || ev.kind === 'http-route' ? 'call' : 'import';
+  const head = `${ev.count} ${noun}${ev.count === 1 ? '' : 's'}`;
+  const sample = ev.samples[0];
+  return sample ? `${head} · ${sample.length > 72 ? '…' + sample.slice(-70) : sample}` : head;
+}
 
 // ─── EdgeLabel ──────────────────────────────────────────────────────────────
 
@@ -36,6 +56,7 @@ const EdgeLabel = memo(({
   theme,
   muted,
   hidden,
+  evidence,
 }: {
   label: string;
   x: number;
@@ -46,6 +67,8 @@ const EdgeLabel = memo(({
   theme: Theme;
   muted?: boolean;
   hidden?: boolean;
+  /** RI-6: repo-import evidence, rendered as a second line under the label. */
+  evidence?: ImportEdgeEvidence;
 }) => {
   const labelStyle: CSSProperties = {
     position: 'absolute',
@@ -76,6 +99,7 @@ const EdgeLabel = memo(({
     gap: '4px',
     opacity: hidden ? 0 : muted ? 0.45 : 1,
     backdropFilter: 'blur(8px)',
+    ...(evidence ? { flexDirection: 'column' as const, alignItems: 'flex-start' as const, gap: '2px' } : {}),
   };
 
   const knownInterfaces = ['rest', 'graphql', 'grpc', 'websocket', 'mqtt', 'sse', 'amqp', 'kafka', 'http', 'redis', 'sql', 'nats', 'sqs', 'dependency'];
@@ -88,18 +112,29 @@ const EdgeLabel = memo(({
 
   return (
     <div style={labelStyle} className="nodrag nopan">
-      <span
-        style={{
-          width: '6px',
-          height: '6px',
-          borderRadius: '50%',
-          backgroundColor: statusColor,
-          flexShrink: 0,
-        }}
-        title={contractStatus === 'complete' ? 'Implemented' : 'Not yet implemented'}
-      />
-      {isKnownInterface && <InterfaceIcon interfaceType={labelLower.split(' ')[0]} size={14} />}
-      {label}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+        <span
+          style={{
+            width: '6px',
+            height: '6px',
+            borderRadius: '50%',
+            backgroundColor: statusColor,
+            flexShrink: 0,
+          }}
+          title={contractStatus === 'complete' ? 'Implemented' : 'Not yet implemented'}
+        />
+        {isKnownInterface && <InterfaceIcon interfaceType={labelLower.split(' ')[0]} size={14} />}
+        {label}
+      </div>
+      {evidence && (
+        <div
+          data-testid="import-edge-evidence"
+          title={evidence.samples.join('\n')}
+          style={{ fontSize: '10px', fontWeight: 400, color: theme.colors.textMuted, fontFamily: 'ui-monospace, monospace', maxWidth: '360px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+        >
+          {formatImportEvidence(evidence)}
+        </div>
+      )}
     </div>
   );
 });
@@ -140,6 +175,13 @@ export const CustomEdge = memo((props: EdgeProps) => {
   const contract = (data && typeof data === 'object' && 'contract' in data ? data.contract : null) as { kind?: ContractKind; interactionKind?: InteractionKind } | null;
   const direction = (data && typeof data === 'object' && 'direction' in data ? data.direction : undefined) as EdgeDirection | undefined;
   const criticality = (data && typeof data === 'object' && 'criticality' in data ? data.criticality : undefined) as EdgeCriticality | undefined;
+  const importEvidence = (data && typeof data === 'object' && 'importEvidence' in data ? data.importEvidence : undefined) as ImportEdgeEvidence | undefined;
+  // AA.2: a change's scope on the canvas: edges crossing into it highlight, the rest fade.
+  const scopeState = (data && typeof data === 'object' && 'scopeState' in data ? data.scopeState : undefined) as 'in' | 'crossing' | 'out' | undefined;
+  // AA.3b: an edge landing on a database group reads, writes or both; an edge between
+  // two groups is a foreign key (solid) or a reference kept in code (dashed).
+  const access = (data && typeof data === 'object' && 'access' in data ? data.access : undefined) as Access | undefined;
+  const reference = (data && typeof data === 'object' && 'reference' in data ? data.reference : undefined) as Reference | undefined;
 
   const isIntraContainer = layerMode === 'nested' && edgeVisibility === 'intra-container';
   const isCrossContainer = layerMode === 'nested' && edgeVisibility === 'cross-container';
@@ -251,8 +293,9 @@ export const CustomEdge = memo((props: EdgeProps) => {
     return theme.colors.border;
   }, [hasError, hovered, isSelfFocused, isCrossContainer, isIntraContainer, isNodeRelated, theme, kindColor]);
 
-  // Width from criticality (with hover/focus overrides)
-  const baseWidth = criticality ? CRITICALITY_WIDTH[criticality] : 1.8;
+  // Width from criticality (with hover/focus overrides); imported edges
+  // additionally carry their evidence weight (RI-6).
+  const baseWidth = (criticality ? CRITICALITY_WIDTH[criticality] : 1.8) + importEvidenceWidthBoost(importEvidence?.count);
   const strokeWidth = (hovered || isSelfFocused)
     ? Math.max(baseWidth, 2.5)
     : isNodeRelated
@@ -261,9 +304,12 @@ export const CustomEdge = memo((props: EdgeProps) => {
 
   // Dash from interactionKind (with error/container overrides)
   const interactionDash = interactionKind ? INTERACTION_KIND_DASH[interactionKind] : undefined;
+  const referenceColor = reference ? REFERENCE_TONES[reference][theme.mode] : null;
   const strokeDasharray = hasError
     ? undefined
-    : isCrossContainer
+    : reference
+      ? REFERENCE_DASH[reference]
+      : isCrossContainer
       ? '6,4'
       : isIntraContainer
         ? '4,4'
@@ -275,7 +321,7 @@ export const CustomEdge = memo((props: EdgeProps) => {
       ? 0.55
       : 1;
 
-  const resolvedOpacity = isDimmed ? 0.08 : baseOpacity;
+  const resolvedOpacity = isDimmed ? 0.08 : scopeState === 'out' ? Math.min(baseOpacity, 0.15) : baseOpacity;
 
   // Marker end for bidirectional edges
   const resolvedMarkerEnd = direction === 'bidirectional' ? undefined : markerEnd;
@@ -283,8 +329,10 @@ export const CustomEdge = memo((props: EdgeProps) => {
 
   const edgeStyle: CSSProperties = {
     ...(style || {}),
-    stroke: getStrokeColor(),
-    strokeWidth,
+    stroke: scopeState === 'crossing' && !hasError && !hovered && !isSelfFocused
+      ? SCOPE_CROSSING_COLOR
+      : referenceColor && !hasError ? referenceColor : getStrokeColor(),
+    strokeWidth: scopeState === 'crossing' ? Math.max(strokeWidth, 2.5) : strokeWidth,
     strokeDasharray,
     transition: 'stroke 0.25s ease, stroke-width 0.25s ease, opacity 0.25s ease, filter 0.25s ease',
     opacity: resolvedOpacity,
@@ -338,7 +386,23 @@ export const CustomEdge = memo((props: EdgeProps) => {
         style={edgeStyle}
       />
 
-      {label && typeof label === 'string' && (
+      {(access || reference) && !hasError && (
+        <EdgeLabelRenderer>
+          <DataEdgeChip
+            text={access ? accessText(access) : referenceText(reference!)}
+            title={typeof label === 'string' ? label : undefined}
+            x={labelX}
+            y={labelY}
+            tone={access
+              ? ACCESS_TONES[access][theme.mode]
+              : { bg: theme.colors.surface, fg: referenceColor!, line: referenceColor! }}
+            dashed={reference === 'code'}
+            dimmed={isDimmed || scopeState === 'out'}
+          />
+        </EdgeLabelRenderer>
+      )}
+
+      {label && typeof label === 'string' && !((access || reference) && !hasError) && (
         <EdgeLabelRenderer>
           <EdgeLabel
             label={label}
@@ -350,6 +414,7 @@ export const CustomEdge = memo((props: EdgeProps) => {
             theme={theme}
             muted={showLabelMuted}
             hidden={!showLabel && !hasError}
+            evidence={importEvidence}
           />
         </EdgeLabelRenderer>
       )}
@@ -358,3 +423,33 @@ export const CustomEdge = memo((props: EdgeProps) => {
 });
 
 CustomEdge.displayName = 'CustomEdge';
+
+/** AA.3b: the always-visible chip on a data edge (read, write, read and write, foreign key, reference kept in code). */
+function DataEdgeChip({ text, title, x, y, tone, dashed, dimmed }: {
+  text: string; title?: string; x: number; y: number;
+  tone: { bg: string; fg: string; line: string }; dashed: boolean; dimmed: boolean;
+}) {
+  return (
+    <div
+      data-testid="data-edge-chip"
+      title={title}
+      style={{
+        position: 'absolute',
+        transform: `translate(-50%, -50%) translate(${x}px, ${y}px)`,
+        padding: '3px 9px',
+        borderRadius: 999,
+        fontSize: 11,
+        fontWeight: 600,
+        background: tone.bg,
+        color: tone.fg,
+        border: `1px ${dashed ? 'dashed' : 'solid'} ${tone.line}`,
+        whiteSpace: 'nowrap',
+        pointerEvents: 'none',
+        opacity: dimmed ? 0.2 : 1,
+        zIndex: 8,
+      }}
+    >
+      {text}
+    </div>
+  );
+}

@@ -5,13 +5,19 @@
 //   npm run bench:oss -- --only=unchanged-push
 //   npm run bench:oss -- --list       print scenarios by functional area (offline)
 //   npm run bench:oss -- --dry-run    validate config/env parsing only (offline)
+//   npm run bench:oss -- --preflight  check the stack, the keys and the sandbox, run nothing
+//
+// The preflight, the run loop, the statuses (PASS, FAIL, SKIP, ERROR), the
+// report (scripts/bench/out/bench-report.json) and the exit codes (0, 1 a
+// product check failed, 3 the harness or the stack) are harness.mjs's.
 //
 // Live end-to-end regression against YOUR running NodeSpec stack (the local
 // dev stack or the deploy/community compose stack) and a dedicated throwaway
 // GitHub sandbox repo, which is FORCE-RESET BEFORE EVERY SCENARIO. Setup:
 // scripts/bench/README.md. The harness refuses non-local URLs by design.
-import { loadEnv, assertServiceKey, signIn, github, Scenario } from './lib.mjs';
+import { loadEnv, signIn, github } from './lib.mjs';
 import { cleanupPreviousRuns } from './fixtures.mjs';
+import { preflight, reportPreflight, runScenarios, summarize, writeReport } from './harness.mjs';
 import gitopsCore from './scenarios/gitops-core.mjs';
 import mergeBranches from './scenarios/merge-branches.mjs';
 import specCriteria from './scenarios/spec-criteria.mjs';
@@ -28,8 +34,14 @@ import boardLoop from './scenarios/board-loop.mjs';
 import evidenceUpstream from './scenarios/evidence-upstream.mjs';
 import testCrud from './scenarios/test-crud.mjs';
 import dogfoodFixes from './scenarios/dogfood-fixes.mjs';
+import v3WorkLoop from './scenarios/v3-work-loop.mjs';
+import v3SchemaGuards from './scenarios/v3-schema-guards.mjs';
+import v3Router from './scenarios/v3-router.mjs';
+import v3AgentLane from './scenarios/v3-agent-lane.mjs';
+import ae5RateLimit from './scenarios/ae5-rate-limit.mjs';
+import ae6ExpandRequest from './scenarios/ae6-expand-request.mjs';
 
-const ALL = [...gitopsCore, ...mergeBranches, ...specCriteria, ...webhookMcp, ...c4TestPlan, ...r6SpecPlane, ...statusLeads, ...workLoopTicks, ...directCommitSync, ...bindingsEdgeCases, ...proposalSessions, ...prCommitMode, ...boardLoop, ...evidenceUpstream, ...testCrud, ...dogfoodFixes];
+const ALL = [...gitopsCore, ...mergeBranches, ...specCriteria, ...webhookMcp, ...c4TestPlan, ...r6SpecPlane, ...statusLeads, ...workLoopTicks, ...directCommitSync, ...bindingsEdgeCases, ...proposalSessions, ...prCommitMode, ...boardLoop, ...evidenceUpstream, ...testCrud, ...dogfoodFixes, ...v3WorkLoop, ...v3SchemaGuards, ...v3Router, ...v3AgentLane, ...ae6ExpandRequest, ...ae5RateLimit];
 
 // Scenarios grouped by the FUNCTIONALITY they prove — the community view of
 // the suite. Every imported scenario must appear in exactly one category
@@ -45,11 +57,11 @@ const CATEGORIES = [
   },
   {
     title: 'Architecture proposals over MCP',
-    scenarios: ['proposal-sessions', 'patch-key-refusal'],
+    scenarios: ['proposal-sessions', 'patch-key-refusal', 'ae6-expand-request'],
   },
   {
     title: 'Requirements & the specification plane',
-    scenarios: ['req-sections', 'spec-import-lead', 'r6-vision-lane', 'r6-relations-coupling', 'r6-canvas-data'],
+    scenarios: ['req-sections', 'spec-import-lead', 'spec-import-staged', 'r6-vision-lane', 'r6-relations-coupling', 'r6-canvas-data'],
   },
   {
     title: 'Acceptance evidence & the work loop',
@@ -62,6 +74,10 @@ const CATEGORIES = [
   {
     title: 'File bindings & task packets',
     scenarios: ['direct-commit-sync', 'bindings-edge-cases', 'suppress-guidance'],
+  },
+  {
+    title: 'Agent work loop — checkouts & V3 schema guards',
+    scenarios: ['checkout-loop', 'v3-schema-guards', 'v3-router', 'v3-agent-lane', 'ae5-rate-limit'],
   },
 ];
 
@@ -115,54 +131,35 @@ if (toRun.length === 0) {
 }
 
 const env = loadEnv();
-await assertServiceKey(env);
-const session = await signIn(env);
-console.log(`Signed in as ${env.BENCH_USER} against ${env.SUPABASE_URL}`);
+const startedAt = new Date().toISOString();
+const gh = github(env);
+console.log(`Preflight against ${env.SUPABASE_URL} and ${env.BENCH_REPO}`);
+const checked = await preflight(env, { github: gh });
+if (reportPreflight(checked)) process.exit(3);
+console.log(`  ok: the database matches this checkout (newest migration ${checked.info.newestMigration ?? 'unknown'}), ` +
+  `the functions answer, ${env.BENCH_USER} signs in, the MCP key and the sandbox work.`);
+if (args.has('preflight')) process.exit(0);
+
+try {
+  const cleaned = await cleanupPreviousRuns(env);
+  console.log(`  cleared ${cleaned.removed} project(s) of earlier runs${cleaned.problems.length ? `; could not clear: ${cleaned.problems.join('; ')}` : ''}`);
+} catch (err) {
+  console.log(`  warning: earlier runs' projects could not be cleared (${err?.message ?? err}); scenarios make their own, so the run goes on.`);
+}
 console.log(`Sandbox repo: ${env.BENCH_REPO} (force-reset before every scenario)\n`);
 
-await cleanupPreviousRuns(env);
-const gh = github(env);
-
-const results = [];
 let currentCategory = null;
-for (const sc of toRun) {
-  const cat = categoryOf.get(sc.name);
-  if (cat !== currentCategory) {
-    currentCategory = cat;
-    console.log(`\n══ ${cat}`);
-  }
-  console.log(`━━ ${sc.name}`);
-  let scenario;
-  try {
-    await gh.resetSandbox('main');
-    const out = await sc.run(env, session);
-    scenario = out.s;
-  } catch (err) {
-    scenario = new Scenario(sc.name, sc.boxes);
-    scenario.check('scenario ran to completion', false, err?.stack ?? String(err));
-  }
-  results.push({ name: sc.name, category: cat, scenario });
-  console.log('');
-}
+const results = await runScenarios(toRun, {
+  env,
+  freshSession: () => signIn(env),
+  resetSandbox: () => gh.resetSandbox('main'),
+  onHeader: (sc) => {
+    const cat = categoryOf.get(sc.name);
+    if (cat !== currentCategory) { currentCategory = cat; console.log(`\n══ ${cat}`); }
+  },
+});
 
-console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-let failedScenarios = 0;
-let lastCategory = null;
-for (const r of results) {
-  if (r.category !== lastCategory) {
-    lastCategory = r.category;
-    console.log(`  ${r.category}`);
-  }
-  const failed = r.scenario.failed.length;
-  const total = r.scenario.checks.length;
-  const mark = failed === 0 ? 'PASS' : 'FAIL';
-  if (failed > 0) failedScenarios++;
-  console.log(`    [${mark}] ${r.name.padEnd(24)} ${total - failed}/${total} checks`);
-}
-console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-if (failedScenarios > 0) {
-  console.log(`\n${failedScenarios} scenario(s) failed — each failure above is a live bug report. ` +
-    'Re-run one with -- --only=<name>.');
-  process.exit(1);
-}
-console.log('\nAll scenarios passed.');
+const code = summarize(results, { groupOf: (name) => categoryOf.get(name) });
+const reportPath = writeReport(results, { env, startedAt, runner: 'bench:oss' });
+console.log(`\nReport: ${reportPath}`);
+process.exit(code);

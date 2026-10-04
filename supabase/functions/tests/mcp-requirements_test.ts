@@ -7,7 +7,6 @@ import {
   handleCreateRequirement,
   handleUpdateRequirement,
   handleDeleteRequirement,
-  handleSetRequirementLock,
   handleListRequirements,
   handleMapRequirement,
   computeRequirementCoupling,
@@ -361,19 +360,16 @@ Deno.test('delete_requirement: force cascades mappings then deletes', async () =
   assertEquals(sb.callsTo('specification_requirements', 'delete').length, 1);
 });
 
-// ── set_requirement_lock ─────────────────────────────────────────────────────────────
-
-Deno.test('set_requirement_lock: toggles locked and messages accordingly', async () => {
+Deno.test('map_requirement: a locked requirement refuses in the one lock sentence, before the branch lookup', async () => {
   const sb = new FakeSupabase();
   sb.script('projects', 'select', projectRow());
   sb.script('project_specifications', 'select', { data: { id: 'spec-1' }, error: null });
-  sb.script('specification_requirements', 'select', { data: { id: 'r1', requirement_id: 'REQ-001', name: 'n', locked: false }, error: null });
-  sb.script('specification_requirements', 'update', { data: null, error: null });
-  const r = await handleSetRequirementLock(sb as never, WRITE, { project_id: PROJECT.id, requirement_id: 'REQ-001', locked: true });
-  assertEquals(r.success, true);
-  assertEquals((r.data as { locked: boolean }).locked, true);
-  const upd = sb.callsTo('specification_requirements', 'update')[0].payload as Record<string, unknown>;
-  assertEquals(upd.locked, true);
+  sb.script('specification_requirements', 'select', { data: { id: 'r1', requirement_id: 'REQ-001', name: 'n', locked: true }, error: null });
+  const r = await handleMapRequirement(sb as never, WRITE, { project_id: PROJECT.id, requirement_id: 'REQ-001', node_ids: ['n1'] });
+  assertEquals(r.success, false);
+  assertEquals(r.error, 'REQ-001 is locked. Unlock it in the app (the lock toggle on its rail under Work), then retry. No tool unlocks.');
+  assertEquals(sb.callsTo('branches').length, 0, 'refused before the branch lookup');
+  assertEquals(sb.callsTo('specification_mappings').length, 0);
 });
 
 // ── list_requirements ────────────────────────────────────────────────────────────────
@@ -777,4 +773,43 @@ Deno.test('R6 list_requirements: relation whose counterpart is NOT in the return
   assertEquals(row.relations, { from: [], to: [] });
   assertEquals(row.coupling, []);
   assertEquals(sb.callsTo('graph_snapshots', 'select').length, 0, 'no snapshot read without a main branch');
+});
+
+Deno.test('v3u list_requirements: every criterion arrives WITH its v3l id — written, derived, or normalized from a legacy string', async () => {
+  // The criterion checkout lane (checkout_task level: criterion) and the
+  // apply_criteria_ops selectors both take the v3l identity. Before v3u the
+  // list served acceptance_criteria RAW, so a pre-v3l row offered no id at
+  // all and the error text's "use the id from list_requirements" was a dead
+  // end. The list now identifies every criterion on the way out.
+  const sb = new FakeSupabase();
+  sb.script('projects', 'select', { data: PROJECT, error: null });
+  sb.script('project_specifications', 'select', { data: { id: 'spec-1', phase_status: 'ready', vision: 'v' }, error: null });
+  sb.script('specification_requirements', 'select', {
+    data: [{
+      id: 'row-1', requirement_id: 'REQ-001', name: 'A', description: 'a', category: 'functional', status: 'pending',
+      acceptance_criteria: [
+        { id: 'ab12cd34', text: 'written id survives', met: false },
+        { text: 'derived id appears', met: true, testId: 'tc-1' },
+        'legacy string normalizes',
+      ],
+      locked: false, section_id: null, architecture_trace: null, confirmed: null, created_at: 't', updated_at: 't',
+    }],
+    error: null,
+  });
+  sb.script('specification_sections', 'select', { data: [], error: null });
+  sb.script('specification_mappings', 'select', { data: [], error: null });
+  sb.script('requirement_relations', 'select', { data: [], error: null });
+  sb.script('agent_checkouts', 'select', { data: [], error: null });
+  sb.script('branches', 'select', { data: [], error: null });
+
+  const { criterionIdOf } = await import('../_shared/criterion-identity.ts');
+  const r = await handleListRequirements(sb as never, READ, { project_id: PROJECT.id });
+  assertEquals(r.success, true);
+  const [row] = (r.data as { requirements: Array<{ acceptanceCriteria: Array<Record<string, unknown>> }> }).requirements;
+  const [written, derived, legacy] = row.acceptanceCriteria;
+  assertEquals(written.id, 'ab12cd34');
+  assertEquals(derived.id, criterionIdOf({ text: 'derived id appears' }));
+  assert(String(derived.id).startsWith('h'), 'pre-v3l rows answer to the text hash');
+  assertEquals(derived.testId, 'tc-1'); // the other keys survive identification
+  assertEquals(legacy, { text: 'legacy string normalizes', id: criterionIdOf({ text: 'legacy string normalizes' }) });
 });

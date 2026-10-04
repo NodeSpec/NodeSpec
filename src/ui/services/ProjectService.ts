@@ -1,7 +1,6 @@
 import type { Graph } from '@nodespec/core/types.js';
 import type { Project, PersistedBranch, PersistedSnapshot } from '../../persistence/types.js';
 import type { PersistenceService } from './PersistenceService.js';
-import { createEmptyGraph } from '@nodespec/core/utils.js';
 
 export interface ProjectWithBranch {
   project: Project;
@@ -9,16 +8,50 @@ export interface ProjectWithBranch {
   graph: Graph;
 }
 
+/** True while project_delete_step (migration 20260906140000) is removing the project. */
+export function isDeleting(project: Pick<Project, 'metadata'>): boolean {
+  return project.metadata?.deleting === true;
+}
+
 export class ProjectService {
   constructor(private persistence: PersistenceService) {}
 
   async listProjects(userId: string): Promise<Project[]> {
     const repo = this.persistence.getProjectRepository();
+    // 7.0: owned plus the seats — a member opens a shared project from the same list.
+    const result = await repo.listForUser(userId);
+    if (!result.success) {
+      throw new Error(result.error.message);
+    }
+    // A project mid-delete (metadata.deleting — the first delete slice marks
+    // it; the client may have gone away before the last) is not a project
+    // to open. It is hidden here and finished by resumePendingDeletes.
+    return result.data.filter((p) => !isDeleting(p));
+  }
+
+  /** Projects whose delete was interrupted (marked, not gone). */
+  async listPendingDeletes(userId: string): Promise<Project[]> {
+    const repo = this.persistence.getProjectRepository();
     const result = await repo.listByOwner(userId);
     if (!result.success) {
       throw new Error(result.error.message);
     }
-    return result.data;
+    return result.data.filter(isDeleting);
+  }
+
+  /** Finishes every interrupted delete for the user. Failures are returned,
+   * never thrown — the list must still load. */
+  async resumePendingDeletes(userId: string): Promise<{ resumed: number; failed: string[] }> {
+    const pending = await this.listPendingDeletes(userId);
+    const failed: string[] = [];
+    for (const project of pending) {
+      try {
+        await this.deleteProject(project.id);
+      } catch (err) {
+        failed.push(`${project.name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return { resumed: pending.length - failed.length, failed };
   }
 
   async getProject(projectId: string): Promise<Project> {
@@ -33,47 +66,9 @@ export class ProjectService {
     return result.data;
   }
 
-  async createProject(name: string, userId: string): Promise<ProjectWithBranch> {
-    const projectRepo = this.persistence.getProjectRepository();
-    const branchRepo = this.persistence.getBranchRepository();
-    const graphRepo = this.persistence.getGraphRepository();
-
-    const projectResult = await projectRepo.create(name, userId);
-    if (!projectResult.success) {
-      throw new Error(projectResult.error.message);
-    }
-    const project = projectResult.data;
-
-    const branchResult = await branchRepo.create(project.id, 'main', userId, undefined, undefined, true);
-    if (!branchResult.success) {
-      throw new Error(branchResult.error.message);
-    }
-    const branch = branchResult.data;
-
-    const emptyGraph = createEmptyGraph();
-
-    const snapshotResult = await graphRepo.saveSnapshot(project.id, branch.id, emptyGraph, 0);
-    if (!snapshotResult.success) {
-      throw new Error(snapshotResult.error.message);
-    }
-
-    const updateResult = await branchRepo.update(branch.id, {
-      baseSnapshotId: snapshotResult.data.id,
-    });
-    if (!updateResult.success) {
-      throw new Error(updateResult.error.message);
-    }
-
-    return {
-      project,
-      branch: updateResult.data,
-      graph: emptyGraph,
-    };
-  }
-
-  async deleteProject(projectId: string): Promise<void> {
+  async deleteProject(projectId: string, onProgress?: (rowsDeleted: number) => void): Promise<void> {
     const repo = this.persistence.getProjectRepository();
-    const result = await repo.delete(projectId);
+    const result = await repo.delete(projectId, onProgress);
     if (!result.success) {
       throw new Error(result.error.message);
     }
@@ -105,29 +100,6 @@ export class ProjectService {
     }
     if (!result.data) {
       throw new Error('Branch not found');
-    }
-    return result.data;
-  }
-
-  async getBranchByName(projectId: string, branchName: string): Promise<PersistedBranch | null> {
-    const repo = this.persistence.getBranchRepository();
-    const result = await repo.getByName(projectId, branchName);
-    if (!result.success) {
-      throw new Error(result.error.message);
-    }
-    return result.data;
-  }
-
-  async createBranch(
-    projectId: string,
-    branchName: string,
-    userId: string,
-    baseSnapshotId?: string
-  ): Promise<PersistedBranch> {
-    const repo = this.persistence.getBranchRepository();
-    const result = await repo.create(projectId, branchName, userId, baseSnapshotId);
-    if (!result.success) {
-      throw new Error(result.error.message);
     }
     return result.data;
   }

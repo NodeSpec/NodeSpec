@@ -10,6 +10,7 @@
 // the ImportReviewPanel.
 import { useEffect, useRef } from 'react';
 import type { AIProposal } from '@nodespec/core/ai-proposal.js';
+import { isSpecPlaneProposal } from '../utils/proposal-plane.js';
 
 const POLL_MS = 30_000;
 
@@ -24,10 +25,15 @@ export interface ProposalAutoApproveArgs {
   onFailed: (proposal: AIProposal, message: string) => void;
 }
 
-/** Import-lane drafts land in the review panel by design — never auto-approve. */
+/** Import-lane drafts land in the review panel by design — never auto-approve.
+ *  8.1: spec-plane proposals resolve server-side in the approvals queue (and
+ *  promotion is a human act, R6): this canvas driver never touches them.
+ *  V3 AD.2b: a load of git's model (and the adopt at connect) replaces design
+ *  on the canvas; nothing loads without a person, so neither is approved here. */
 export function isAutoApprovable(proposal: AIProposal): boolean {
   const meta = (proposal.metadata ?? {}) as Record<string, unknown>;
-  return !('finalization' in meta);
+  if (meta.source === 'git-load' || meta.source === 'git-adopt') return false;
+  return !('finalization' in meta) && !isSpecPlaneProposal(proposal);
 }
 
 export function useProposalAutoApprove(args: ProposalAutoApproveArgs) {

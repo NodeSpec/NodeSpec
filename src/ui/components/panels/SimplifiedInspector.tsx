@@ -6,10 +6,92 @@ import { getNodeTypeById } from '@nodespec/core/node-types.js';
 import type { MetadataFieldSchema } from '@nodespec/core/node-types.js';
 import { DynamicMetadataForm } from './DynamicMetadataForm.js';
 import { useCatalog } from '../../hooks/useCatalog.js';
-import { deriveNodeNature, CUSTOM_NATURE } from '../../utils/node-nature.js';
-import { ConnectionPointsEditor } from './inspector/ConnectionPointsEditor.js';
 import { ConnectionDetails } from './inspector/ConnectionDetails.js';
 import { resolveConfigChoice } from '@nodespec/core/config-choice.js';
+import { hasRepoImportCanvas } from '../../config/edition.js';
+
+// ─── RI-6: Repository summary for imported nodes ───────────────────────────
+
+interface RepoSummary {
+  fileCount: number;
+  languageMix: Array<{ language: string; count: number }>;
+  hubPaths: string[];
+  directoryPaths: string[];
+  summary: string | null;
+}
+
+/** node.metadata as the import synthesizer stamps it, or null when the node
+ * was not imported (or the edition has no import canvas). */
+export function readRepoSummary(metadata: Record<string, unknown> | undefined): RepoSummary | null {
+  if (!hasRepoImportCanvas || !metadata || metadata.importedFromRepo !== true) return null;
+  const mix = (metadata.languageMix && typeof metadata.languageMix === 'object') ? metadata.languageMix as Record<string, unknown> : {};
+  const languageMix = Object.entries(mix)
+    .filter((e): e is [string, number] => typeof e[1] === 'number')
+    .map(([language, count]) => ({ language, count }))
+    .sort((a, b) => b.count - a.count);
+  const strings = (v: unknown): string[] => Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : [];
+  return {
+    fileCount: typeof metadata.fileCount === 'number' ? metadata.fileCount : 0,
+    languageMix,
+    hubPaths: strings(metadata.hubPaths),
+    directoryPaths: strings(metadata.directoryPaths),
+    summary: typeof metadata.summary === 'string' && metadata.summary.length > 0 ? metadata.summary : null,
+  };
+}
+
+function RepositorySection({ node, graph }: { node: Node; graph: Graph }) {
+  const { theme } = useTheme();
+  const c = theme.colors;
+  const repo = readRepoSummary(node.metadata as Record<string, unknown> | undefined);
+  if (!repo) return null;
+  const totalLang = repo.languageMix.reduce((n, l) => n + l.count, 0) || 1;
+  const artifactByPath = new Map<string, string>();
+  for (const aid of node.artifacts ?? []) {
+    const art = graph.artifacts[aid];
+    if (art) artifactByPath.set(art.path, aid);
+  }
+  const rowStyle: React.CSSProperties = { fontSize: '12px', color: c.text, marginBottom: '6px' };
+  const mutedStyle: React.CSSProperties = { fontSize: '11px', color: c.textSecondary };
+  return (
+    <InspectorSection title="Repository" defaultOpen={true}>
+      <div style={{ padding: '16px', borderBottom: `1px solid ${c.border}` }} data-testid="repo-summary">
+        <div style={rowStyle}>
+          <strong>{repo.fileCount.toLocaleString()}</strong> files bound to this component
+          {repo.hubPaths.length > 0 && (
+            <span style={mutedStyle}> · {repo.hubPaths.length} hub file{repo.hubPaths.length === 1 ? '' : 's'} carried as artifacts</span>
+          )}
+        </div>
+        {repo.languageMix.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '8px' }}>
+            {repo.languageMix.slice(0, 6).map((l) => (
+              <span key={l.language} style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', border: `1px solid ${c.border}`, color: c.textSecondary }}>
+                {l.language} {Math.round((l.count / totalLang) * 100)}%
+              </span>
+            ))}
+          </div>
+        )}
+        {repo.directoryPaths.length > 0 && (
+          <div style={{ ...mutedStyle, marginBottom: '8px', fontFamily: 'ui-monospace, monospace' }}>
+            {repo.directoryPaths.slice(0, 4).join(', ')}{repo.directoryPaths.length > 4 ? ` +${repo.directoryPaths.length - 4}` : ''}
+          </div>
+        )}
+        {repo.hubPaths.length > 0 && (
+          <div style={{ marginBottom: '8px' }}>
+            <div style={{ ...mutedStyle, marginBottom: '4px' }}>Hub files (most depended-on)</div>
+            {repo.hubPaths.map((p) => (
+              <div key={p} style={{ fontSize: '11px', fontFamily: 'ui-monospace, monospace', color: artifactByPath.has(p) ? c.primary : c.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={artifactByPath.has(p) ? 'Open in the Files tab' : p}>
+                {p}
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={mutedStyle}>
+          {repo.summary ?? 'No summary yet — summaries arrive with the indexing pass.'}
+        </div>
+      </div>
+    </InspectorSection>
+  );
+}
 
 // ─── Collapsible Section Header ─────────────────────────────────────────────
 
@@ -71,7 +153,6 @@ interface SimplifiedInspectorProps {
   selectedEdgeId: string | null;
   graph: Graph;
   onPatchGenerated: (patch: PatchOperation) => void;
-  onPatchesGenerated?: (patches: PatchOperation[]) => void;
 }
 
 // N8.6(B): content-only, always. The standalone fixed-position shell (own frame,
@@ -83,7 +164,6 @@ export function SimplifiedInspector({
   selectedEdgeId,
   graph,
   onPatchGenerated,
-  onPatchesGenerated,
 }: SimplifiedInspectorProps) {
   const selectedNode = selectedNodeId ? graph.nodes[selectedNodeId] : null;
   const selectedEdge = selectedEdgeId ? graph.edges[selectedEdgeId] : null;
@@ -95,7 +175,7 @@ export function SimplifiedInspector({
   return (
     <>
       {selectedNode && (
-        <NodeDetails node={selectedNode} graph={graph} onPatchGenerated={onPatchGenerated} onPatchesGenerated={onPatchesGenerated} />
+        <NodeDetails node={selectedNode} graph={graph} onPatchGenerated={onPatchGenerated} />
       )}
       {selectedEdge && <ConnectionDetails edge={selectedEdge} graph={graph} onPatchGenerated={onPatchGenerated} />}
     </>
@@ -118,12 +198,10 @@ function NodeDetails({
   node,
   graph,
   onPatchGenerated,
-  onPatchesGenerated,
 }: {
   node: Node;
   graph: Graph;
   onPatchGenerated: (patch: PatchOperation) => void;
-  onPatchesGenerated?: (patches: PatchOperation[]) => void;
 }) {
   const { theme } = useTheme();
   const c = theme.colors;
@@ -219,11 +297,12 @@ function NodeDetails({
       {/* N5.5 (owner: "extremely simplify"): the Details body carries ONLY fields with a
           real backend destination — name (label: anchor+packets+MCP), rationale
           (packets+MCP), technology (everything), Configuration (metadata.config →
-          packets+export+fingerprint, made live in this task), ports (anchor+MCP,
-          collapsed). Cut per audit: description (dead), kind paragraph (display-only),
+          packets+export+fingerprint, made live in this task). Cut per audit: description (dead), kind paragraph (display-only),
           ContainerMetadataEditor (dead), PlacementKindEditor (anchor-only; re-drag
           corrects placement), setup checklist / staleness / code-structure / library
-          views (display-only or dead-to-AI). Files live in the Files tab. */}
+          views (display-only or dead-to-AI), and (AG.13) the Connection Points
+          section: ports came out of the model; the rail's Connects to lists a
+          node's connections. Files live in the Files tab. */}
       <InspectorSection title="Identity" defaultOpen={true}>
         <div style={sectionStyles}>
           <div style={labelStyles}>Name</div>
@@ -330,11 +409,6 @@ function NodeDetails({
               <div style={{ fontSize: '12px', color: c.text }}>
                 {boundTech ? (boundTech.displayName || boundTech.name) : `${customName} (custom)`}
               </div>
-              <div style={{ marginTop: '6px', fontSize: '11px', color: c.textSecondary }}>
-                {customName && !node.technology
-                  ? CUSTOM_NATURE.line
-                  : deriveNodeNature(roleForTech, boundTech).line}
-              </div>
             </div>
           );
         })()}
@@ -435,9 +509,8 @@ function NodeDetails({
         })()}
       </InspectorSection>
 
-      <InspectorSection title="Connections" defaultOpen={false}>
-        <ConnectionPointsEditor node={node} graph={graph} onPatchGenerated={onPatchGenerated} onPatchesGenerated={onPatchesGenerated} />
-      </InspectorSection>
+      {/* RI-6: imported nodes carry their repository summary (hosted + enterprise). */}
+      <RepositorySection node={node} graph={graph} />
     </>
   );
 }

@@ -35,17 +35,18 @@ describe('branch-aware content fetch (owner: "nothing happens when i click compa
 
   it('Load-from-repo reads the ACTIVE branch\'s ref', () => {
     const source = read('ui/components/GraphEditor.tsx');
-    expect(source).toContain('gitService.fetchFileContent(integration.id, [path], branchName ?? undefined)');
+    // Item 16: the open branch as the database names it now (openBranchName,
+    // driven in item16-project-branch.test.ts), so a connect rename is followed.
+    expect(source).toContain('gitService.fetchFileContent(integration.id, [path], openName ?? undefined)');
   });
 });
 
 describe('inspector auto-hydration (owner: "user should not have to click Load from Repo")', () => {
-  it('a body-less binding hydrates itself when opened, once per artifact', () => {
+  it('a body-less binding hydrates itself when opened; opening it again is the retry (AB.2: no button)', () => {
     const source = read('ui/components/panels/ArtifactWorkbenchPanel.tsx');
-    expect(source).toContain('autoHydrateAttemptedRef');
-    expect(source).toContain('void onLoadFromRepo(activeArtifact.id);');
-    // the manual button survives as the retry path
-    expect(source).toContain('Load from repo');
+    expect(source).toContain('onLoadFromRepo(id)');
+    expect(source).toContain('Open it again to retry.');
+    expect(source).not.toContain('Load from repo');
   });
 });
 
@@ -57,7 +58,7 @@ describe('detection latency (owner: "wait 1 minute or switch branches; refresh d
     expect(source).toContain('initialFreshnessRanRef');
     // Owner spike 2026-08-23: the fallback is the RESOLVED primary branch,
     // never the literal 'main' — the trunk may be renamed at connect.
-    expect(source).toContain("checkBranchFreshness(branchName || primaryBranchNameRef.current)");
+    expect(source).toContain("checkBranchFreshness(openName || primaryBranchNameRef.current)");
   });
 
   it('a visible tab background-sweeps every minute (server throttle dedupes)', () => {
@@ -119,23 +120,25 @@ describe('git setup UX', () => {
     expect(source).toContain("'PRIVATE-TOKEN': accessToken");
   });
 
-  it('the setup form offers Browse repositories + Detect branches, manual entry preserved', () => {
+  it('the setup form is token-first, and selecting still only fills fields (owner 2026-09-21)', () => {
+    // The behaviour is driven in src/tests/git-setup-form.test.tsx; these two
+    // lines hold the doctrine the rewrite must not lose.
     const source = read('ui/components/panels/GitIntegrationModal.tsx');
-    expect(source).toContain('Browse repositories');
-    expect(source).toContain('Detect branches');
-    expect(source).toContain('handleRepoSelect');
+    expect(source).toContain('the token is the only thing a person types');
     // selecting a repo only FILLS FORM FIELDS — no writes, no baselines (brownfield-safe)
-    expect(source).toContain('Selecting a repo also has ZERO side effects beyond filling the form fields');
+    expect(source).toContain('selecting only fills these fields (no writes, no baselines');
     // manual fallback stays
     expect(source).toContain('placeholder="username or organization"');
   });
 
-  it('the Branches button annotates main with its bound git ref, display-only', () => {
-    const bm = read('ui/components/panels/BranchManager.tsx');
+  it('the branch chip annotates main with its bound git ref, display-only', () => {
+    // V3 1.2 (2026-09-19): the Branches button became a chip; the rule is
+    // the same and branch-chip.test.tsx proves it by rendering.
+    const chip = read('ui/components/panels/BranchChip.tsx');
     // Owner spike 2026-08-23: primacy reads from the flag; the alias shows
     // only when the (legacy, unrenamed) trunk name differs from its ref.
-    expect(bm).toContain("isPrimaryBranch(currentBranch) && gitDefaultBranch && gitDefaultBranch !== currentBranch");
-    expect(bm).toContain('→ {mainRefLabel}');
+    expect(chip).toContain("isPrimaryBranch(currentBranch) && gitDefaultBranch && gitDefaultBranch !== currentBranch");
+    expect(chip).toContain('→ {mainRefLabel}');
     const ge = read('ui/components/GraphEditor.tsx');
     expect(ge).toContain('setGitDefaultBranch(data?.default_branch ?? null)');
   });
@@ -152,11 +155,18 @@ describe('git setup UX', () => {
     expect(exportModal).not.toContain('Push\n                        </button>');
   });
 
-  it('the Branches dropdown no longer shows a per-branch change count', () => {
-    const bm = read('ui/components/panels/BranchManager.tsx');
-    expect(bm).not.toContain('branch.patchCount');
-    // main keeps its 'default' marker
-    expect(bm).toContain(">default</span>");
+  it('V3 1.2: the branch header is one chip; the dropdown, its count, create, switch, delete and Merge to Main are gone', () => {
+    const chip = read('ui/components/panels/BranchChip.tsx');
+    expect(chip).not.toContain('patchCount');
+    expect(chip).not.toContain('onClick');
+    const tb = read('ui/components/panels/TopBar.tsx');
+    for (const gone of ['BranchManager', 'onSwitchBranch', 'onCreateBranch', 'onDeleteBranch', 'onMergeBranch', 'Merge to Main']) {
+      expect(tb, gone).not.toContain(gone);
+    }
+    const ge = read('ui/components/GraphEditor.tsx');
+    for (const gone of ['handleCreateBranch', 'handleDeleteBranch', 'handleRequestMerge', 'runMerge', 'mergeDialog']) {
+      expect(ge, gone).not.toContain(gone);
+    }
   });
 });
 

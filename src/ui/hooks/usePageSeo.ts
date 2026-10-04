@@ -1,8 +1,6 @@
 import { useEffect } from 'react';
-
-const SITE_NAME = 'NodeSpec';
-const BASE_URL = 'https://nodespec.io';
-const DEFAULT_IMAGE = `${BASE_URL}/og-card.png`;
+import { isHostedEdition } from '../config/edition.js';
+import { SITE_NAME, BASE_URL, DEFAULT_IMAGE, DEFAULT_IMAGE_SIZE } from '../../seo/page-head.js';
 
 export { SITE_NAME, BASE_URL, DEFAULT_IMAGE };
 
@@ -36,6 +34,29 @@ export function setJsonLd(id: string, data: object) {
     document.head.appendChild(el);
   }
   el.textContent = JSON.stringify(data);
+}
+
+export function removeMeta(name: string, property = false) {
+  const attr = property ? 'property' : 'name';
+  document.querySelector(`meta[${attr}="${name}"]`)?.remove();
+}
+
+/** Structured data the prerender or the blog's edge function served with the page.
+ *  A page that writes its own replaces it, so a crawler that runs the script reads one
+ *  version of the page, not two (AJ.2). */
+export function removeServedJsonLd() {
+  document.querySelectorAll('script[type="application/ld+json"]:not([id])').forEach((el) => el.remove());
+}
+
+/** The image size is declared only when it is known: the default card's real one. */
+export function setImageSize(image: string) {
+  if (image === DEFAULT_IMAGE) {
+    setMeta('og:image:width', String(DEFAULT_IMAGE_SIZE.width), true);
+    setMeta('og:image:height', String(DEFAULT_IMAGE_SIZE.height), true);
+  } else {
+    removeMeta('og:image:width', true);
+    removeMeta('og:image:height', true);
+  }
 }
 
 export function removeJsonLd(id: string) {
@@ -82,7 +103,8 @@ export function usePageSeo(props: PageSeoProps) {
     if (keywords) {
       setMeta('keywords', keywords);
     }
-    setMeta('robots', noIndex ? 'noindex, nofollow' : 'index, follow');
+    // Only the managed site is for search engines (AJ.2): a self-hosted install says noindex.
+    setMeta('robots', noIndex || !isHostedEdition ? 'noindex, nofollow' : 'index, follow');
 
     setCanonical(canonicalUrl);
 
@@ -91,8 +113,7 @@ export function usePageSeo(props: PageSeoProps) {
     setMeta('og:description', description, true);
     setMeta('og:url', canonicalUrl, true);
     setMeta('og:image', image, true);
-    setMeta('og:image:width', '1200', true);
-    setMeta('og:image:height', '630', true);
+    setImageSize(image);
     setMeta('og:site_name', SITE_NAME, true);
     setMeta('og:locale', 'en_US', true);
 
@@ -103,6 +124,7 @@ export function usePageSeo(props: PageSeoProps) {
     setMeta('twitter:site', '@nodespec');
 
     const jsonLdIds: string[] = [];
+    if (jsonLd?.length || breadcrumbs?.length) removeServedJsonLd();
 
     if (breadcrumbs && breadcrumbs.length > 0) {
       const bcId = 'page-breadcrumb-schema';

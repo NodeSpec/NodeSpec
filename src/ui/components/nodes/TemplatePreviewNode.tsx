@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import { Handle, Position } from '@xyflow/react';
+import { LeafHandles } from './LeafHandles.js';
 import type { RFNodeData } from '../../adapters/graph-to-reactflow.js';
 import { getTechnologyLogo, getTechnologyColors, getTechnologyDisplayName } from '../../utils/technology-logo-map.js';
 
@@ -13,9 +13,6 @@ function TemplatePreviewNodeComponent({ data }: TemplatePreviewNodeProps) {
   const borderColor = (data.color as string) || techColors?.primary || '#94a3b8';
   const techName = getTechnologyDisplayName(data.technology);
   const tooltipLabel = techName ? `${data.label} (${techName})` : data.label;
-
-  const inputPorts = data.ports.filter(p => p.direction === 'in');
-  const outputPorts = data.ports.filter(p => p.direction === 'out');
 
   return (
     <div
@@ -33,73 +30,17 @@ function TemplatePreviewNodeComponent({ data }: TemplatePreviewNodeProps) {
         position: 'relative',
       }}
     >
-      {inputPorts.map((port) => (
-        <Handle
-          key={port.id}
-          type="target"
-          position={Position.Left}
-          id={port.id}
-          style={{
-            width: '8px',
-            height: '8px',
-            backgroundColor: '#ffffff',
-            border: `2px solid ${borderColor}`,
-            top: '50%',
-            left: '-4px',
-          }}
-        />
-      ))}
-
-      {outputPorts.map((port) => (
-        <Handle
-          key={port.id}
-          type="source"
-          position={Position.Right}
-          id={port.id}
-          style={{
-            width: '8px',
-            height: '8px',
-            backgroundColor: '#ffffff',
-            border: `2px solid ${borderColor}`,
-            top: '50%',
-            right: '-4px',
-          }}
-        />
-      ))}
-
-      {inputPorts.length === 0 && (
-        <Handle
-          type="target"
-          position={Position.Left}
-          id="target-default"
-          style={{
-            width: '8px',
-            height: '8px',
-            backgroundColor: '#ffffff',
-            border: `2px solid ${borderColor}`,
-            top: '50%',
-            left: '-4px',
-            opacity: 0,
-          }}
-        />
-      )}
-
-      {outputPorts.length === 0 && (
-        <Handle
-          type="source"
-          position={Position.Right}
-          id="source-default"
-          style={{
-            width: '8px',
-            height: '8px',
-            backgroundColor: '#ffffff',
-            border: `2px solid ${borderColor}`,
-            top: '50%',
-            right: '-4px',
-            opacity: 0,
-          }}
-        />
-      )}
+      <LeafHandles
+        style={{
+          width: '8px',
+          height: '8px',
+          backgroundColor: '#ffffff',
+          border: `2px solid ${borderColor}`,
+          top: '50%',
+        }}
+        targetStyle={{ left: '-4px' }}
+        sourceStyle={{ right: '-4px' }}
+      />
 
       {iconSrc ? (
         <img

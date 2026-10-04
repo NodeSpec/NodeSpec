@@ -31,7 +31,6 @@ export interface AgentStreamCallbacks {
   onNodeUpdated?: (node: { id: string; label: string; changes: string[] }) => void;
   onEdgeCreated?: (edge: { id: string; sourceLabel: string; targetLabel: string; contractName: string }) => void;
   onContractCreated?: (contract: { id: string; name: string; kind: string }) => void;
-  onPortAdded?: (port: { nodeId: string; nodeLabel: string; portName: string; direction: string }) => void;
   onNodeRemoved?: (node: { id: string; label: string }) => void;
   onEdgeRemoved?: (edge: { id: string }) => void;
   onPatchGenerated?: (patch: unknown) => void;
@@ -196,9 +195,6 @@ export class AgentService {
               break;
             case 'contract_created':
               callbacks.onContractCreated?.(d as unknown as { id: string; name: string; kind: string });
-              break;
-            case 'port_added':
-              callbacks.onPortAdded?.(d as unknown as { nodeId: string; nodeLabel: string; portName: string; direction: string });
               break;
             case 'node_removed':
               callbacks.onNodeRemoved?.(d as unknown as { id: string; label: string });

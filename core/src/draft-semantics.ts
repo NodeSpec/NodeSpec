@@ -1,8 +1,8 @@
-import type { Graph, Node, Contract, Artifact, Port, EntityStatus } from './types.js';
+import type { Graph, Node, Contract, Artifact, EntityStatus } from './types.js';
 import { getNodeCompletenessRequirements, type NodeTemplate } from './templates.js';
 
 export interface ValidationWarning {
-  entityType: 'node' | 'port' | 'contract' | 'artifact';
+  entityType: 'node' | 'contract' | 'artifact';
   entityId: string;
   field: string;
   message: string;
@@ -24,20 +24,6 @@ export function validateCompleteness(graph: Graph): ValidationWarning[] {
           entityId: nodeId,
           field: req.field,
           message: req.description,
-        });
-      }
-    }
-
-    const ports = node.ports ?? [];
-    for (const port of ports) {
-      if (port.status === 'complete') continue;
-
-      if (!port.name || port.name === 'Unnamed Port') {
-        warnings.push({
-          entityType: 'port',
-          entityId: port.id,
-          field: 'name',
-          message: 'Port must have a meaningful name',
         });
       }
     }
@@ -132,67 +118,26 @@ export function isCompleteEntity(entity: { status?: EntityStatus }): boolean {
 
 export interface ScaffoldedNode {
   node: Node;
-  ports: Port[];
-  contracts: Contract[];
 }
 
+// AG.13 (owner 2026-09-28): a scaffolded node carries no ports and no stub
+// contracts. A contract is born when an edge is drawn, from the edge's target
+// (inferConnectContract); stubs pinned to ports were never used by any edge.
 export function scaffoldNodeFromTemplate(
   template: NodeTemplate,
   nodeId: string
 ): ScaffoldedNode {
-  const ports: Port[] = template.defaultPorts.map((portTemplate, index) => ({
-    id: generateScaffoldPortId(nodeId, portTemplate.direction, index),
-    name: portTemplate.name,
-    direction: portTemplate.direction,
-    required: portTemplate.required,
-    schemaRef: portTemplate.schemaRef,
-    status: 'draft' as EntityStatus,
-  }));
-
-  const contracts: Contract[] = template.defaultContracts.map((contractTemplate, index) => ({
-    id: generateScaffoldContractId(nodeId, index),
-    kind: contractTemplate.kind,
-    name: `Stub: ${contractTemplate.name}`,
-    schema: {},
-    metadata: { templateSource: template.id },
-    status: 'draft' as EntityStatus,
-    ...(contractTemplate.interactionKind && { interactionKind: contractTemplate.interactionKind }),
-    ...(contractTemplate.transport && { transport: contractTemplate.transport }),
-    ...(contractTemplate.specFormat && { specFormat: contractTemplate.specFormat }),
-  }));
-
-  ports.forEach((port, index) => {
-    const matchingContract = template.defaultContracts[index];
-    if (matchingContract && contracts[index] && port.direction === matchingContract.portDirection) {
-      port.contractId = contracts[index].id;
-    }
-  });
-
   const node: Node = {
     id: nodeId,
     type: template.nodeType,
     label: `New ${template.name}`,
-    ports,
     data: { ...template.defaultData },
     artifacts: [],
     metadata: { templateId: template.id },
     status: 'draft' as EntityStatus,
   };
 
-  return { node, ports, contracts };
-}
-
-function generateScaffoldPortId(nodeId: string, direction: 'in' | 'out', index: number): string {
-  const base = nodeId.slice(0, 8);
-  const dirCode = direction === 'in' ? 'a001' : 'a002';
-  const indexHex = (index + 1).toString(16).padStart(3, '0');
-  return `${base}-${dirCode}-4${indexHex}-8001-${base.padEnd(12, '0').slice(0, 12)}`;
-}
-
-function generateScaffoldContractId(nodeId: string, index: number): string {
-  const base = nodeId.slice(0, 8);
-  const indexHex = (index + 1).toString(16).padStart(3, '0');
-  return `${base}-c${indexHex}-4001-8001-${base.padEnd(12, '0').slice(0, 12)}`;
+  return { node };
 }
 
 export function createContractStub(

@@ -10,6 +10,7 @@ import type {
 } from './types.js';
 import { deepClone, checkPrecondition, updateGraphHash, computeHash, computeContentHash, now } from './utils.js';
 import { getNodeTypeById } from './node-types.js';
+import { depthRuleRefusal } from './container-types.js';
 
 export function validateGraph(graph: Graph): ValidationResult {
   const errors: ValidationError[] = [];
@@ -307,7 +308,28 @@ export function normalizePatch(patch: any): any {
   return patch;
 }
 
-export function validatePatch(graph: Graph, patch: PatchOperation): ValidationResult {
+export interface ValidatePatchOptions {
+  /** AA.3: check the depth rule on add_node and on update_node with a parentId. On for a
+   *  new write (a local edit, a submit); off for a replay of the patch log, which applies
+   *  history as it was written: refusing there would leave a project that cannot load. */
+  placement?: boolean;
+}
+
+/** AA.3: the depth-rule error for a node placed under a parent, or null. */
+function placementError(graph: Graph, nodeId: string, childType: string | undefined, parentId: string | undefined): ValidationError | null {
+  if (!parentId || !childType) return null;
+  const parent = graph.nodes[parentId];
+  if (!parent) return null;
+  const refusal = depthRuleRefusal(parent.type, childType);
+  if (!refusal) return null;
+  return {
+    code: 'PLACEMENT_REFUSED',
+    message: `${refusal} ("${parent.label}" cannot hold node ${nodeId}.)`,
+    path: `nodes.${nodeId}.parentId`,
+  };
+}
+
+export function validatePatch(graph: Graph, patch: PatchOperation, options: ValidatePatchOptions = {}): ValidationResult {
   const errors: ValidationError[] = [];
   const warnings: ValidationWarning[] = [];
 
@@ -356,6 +378,10 @@ export function validatePatch(graph: Graph, patch: PatchOperation): ValidationRe
           path: `nodes.${validPatch.payload.id}`,
         });
       }
+      if (options.placement) {
+        const refused = placementError(graph, validPatch.payload.id, validPatch.payload.type, validPatch.payload.parentId);
+        if (refused) errors.push(refused);
+      }
       // Note: We do NOT validate artifacts array here because:
       // 1. Artifacts are added via separate add_artifact patches
       // 2. The artifacts array is built up incrementally as artifacts are added
@@ -369,6 +395,11 @@ export function validatePatch(graph: Graph, patch: PatchOperation): ValidationRe
           message: `Node ${validPatch.payload.id} does not exist`,
           path: `nodes.${validPatch.payload.id}`,
         });
+      }
+      if (options.placement && validPatch.payload.changes.parentId) {
+        const existing = graph.nodes[validPatch.payload.id];
+        const refused = placementError(graph, validPatch.payload.id, validPatch.payload.changes.type ?? existing?.type, validPatch.payload.changes.parentId);
+        if (refused) errors.push(refused);
       }
       if (validPatch.payload.changes.artifacts) {
         for (const artifactId of validPatch.payload.changes.artifacts) {
@@ -565,7 +596,14 @@ export function validatePatch(graph: Graph, patch: PatchOperation): ValidationRe
           }
         }
 
-        if (artifact.status === 'complete' && validPatch.payload.changes.status !== 'draft') {
+        // AA.3: moving a finished file to the part that owns it (explode) or back
+        // (collapse) changes where it lives, not what it is.
+        const onlyMoves = Object.keys(validPatch.payload.changes).every((k) => k === 'nodeId');
+        // AB.2: filling in the body of a file that has none (a binding loaded
+        // from the repository) is not modifying it.
+        const fillsMissingBody = !artifact.content
+          && Object.keys(validPatch.payload.changes).every((k) => k === 'content' || k === 'contentHash' || k === 'updatedAt');
+        if (artifact.status === 'complete' && validPatch.payload.changes.status !== 'draft' && !onlyMoves && !fillsMissingBody) {
           errors.push({
             code: 'ARTIFACT_IMMUTABLE',
             message: `Artifact ${validPatch.payload.id} is complete and cannot be modified. Revert to draft first.`,
@@ -1126,12 +1164,23 @@ function applyPatchToGraph(graph: Graph, patch: PatchOperation): void {
       graph.edges[patch.payload.id] = { ...patch.payload, metadata: patch.payload.metadata ? { ...patch.payload.metadata } : {} };
       break;
 
-    case 'update_edge':
-      graph.edges[patch.payload.id] = {
-        ...graph.edges[patch.payload.id],
-        ...patch.payload.changes,
-      };
+    case 'update_edge': {
+      const before = graph.edges[patch.payload.id];
+      const changes = patch.payload.changes;
+      const next = { ...before, ...changes };
+      // AA.0: a port id belongs to its node. An endpoint moved to another node
+      // (split_node, an agent's update_edge) keeps its port only when the
+      // change names one on the new node; otherwise the old node's port would
+      // dangle ("Missing source port" on the canvas).
+      for (const [end, portKey] of [['source', 'sourcePortId'], ['target', 'targetPortId']] as const) {
+        if (!changes[end] || changes[end] === before?.[end] || portKey in changes) continue;
+        const portId = next[portKey];
+        const ports = graph.nodes[next[end]]?.ports ?? [];
+        if (portId && !ports.some((p) => p.id === portId)) delete next[portKey];
+      }
+      graph.edges[patch.payload.id] = next;
       break;
+    }
 
     case 'remove_edge':
     case 'delete_edge': {

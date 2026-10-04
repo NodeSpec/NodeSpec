@@ -1,28 +1,34 @@
 import { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import type { PatchOperation, ActorType } from '@nodespec/core/types.js';
+import type { PatchOperation, ActorType, Graph } from '@nodespec/core/types.js';
 import { createUpdateArtifactPatch, createRemoveArtifactPatch } from '@nodespec/core/patch-factory.js';
 import { buildNodeAnchorSlice, serializeNodeAnchorSlice } from '@nodespec/core/anchor-slice.js';
 import { computeContentHash, now as nowIso } from '@nodespec/core/utils.js';
 import { GitService } from '../services/GitService.js';
+import { openBranchName } from '../services/project-branch.js';
 import { TabbedSidebar, Canvas } from './layout/index.js';
-import { TopBar, ProjectExplorer, ProjectOnboardingWizard } from './panels/index.js';
-import { ChangesPanel } from './panels/ChangesPanel.js';
-import { shouldAutoPushOnAccept } from './panels/repoActivity.js';
+import { TopBar, ProjectExplorer, ProjectCreatePopup } from './panels/index.js';
+import { ChangesPanel, type AgentsTab } from './panels/ChangesPanel.js';
+import { shouldAutoPushOnAccept, pushSkipNote, pushWithheldNote } from './panels/repoActivity.js';
 import { flagNodeEvidenceStale } from '../services/evidenceStale.js';
-import type { OnboardingResult, WorkflowOrigin } from './panels/index.js';
+import type { ProjectCreateResult, WorkflowOrigin } from './panels/index.js';
+import { readStagedSpecImport } from '../utils/spec-import-staging.js';
+import type { StagedSpecImport } from '../utils/spec-import-staging.js';
+import { pruneStagedExplodes, readStagedExplodes, stageExplode, withdrawExplode, type StagedExplode } from '../utils/explode-staging.js';
 import { NodeSidepane } from './panels/NodeSidepane.js';
+import { TeamPopup, useTeamBelowPlan } from './panels/TeamPopup.js';
+import type { WorkFocus, WorkTarget } from './work/work-focus.js';
+import { seenWalkthrough, surfaceTarget, type WalkthroughSurface } from './common/walkthrough.js';
 import type { SidepaneTab } from './panels/NodeSidepane.js';
-import { ToastContainer, useToast, OnboardingModal, NodeExportModal, ProjectExportModal } from './common/index.js';
+import { ToastContainer, useToast, OnboardingModal, NodeExportModal, ProjectExportModal, ProjectStartPopup, startCardShows, SpecImportStagingPopup } from './common/index.js';
 import type { BranchStore, BranchStoreState } from '../store/branch-store.js';
 import { ThemeProvider, useTheme } from '../theme/ThemeContext.js';
 import { useProject, useBranch, usePatch, useSpecification, useProposal, useTestCase } from '../context/ServiceContext.js';
 import type { ProjectSpecification } from '../services/SpecificationService.js';
 import { useSmoothRefresh } from '../hooks/useSmoothRefresh.js';
-import { useFeatureGate } from '../hooks/useFeatureGate.js';
+import { useProjectFeatureGate } from '../hooks/useProjectFeatureGate.js';
 import { useRealtimeSpecification } from '../hooks/useRealtimeSpecification.js';
 import { useRealtimeMappings } from '../hooks/useRealtimeMappings.js';
-import type { Feature } from '../hooks/useFeatureGate.js';
 import { ImportReviewPanel } from './proposal/ImportReviewPanel.js';
 import type { AIProposal, MergeResult } from '@nodespec/core/ai-proposal.js';
 import { buildNodeExportContext, buildProjectExport } from '../utils/export-context.js';
@@ -30,11 +36,20 @@ import { buildGitAcceptPatch, buildResidueBindPatches } from '../utils/git-accep
 import { getContainerTypeById } from '@nodespec/core/container-types.js';
 import type { NodeExportContext, ProjectExportData, ProjectExportSpecification } from '../utils/export-context.js';
 import type { TestSummaryByNodeId } from '../adapters/graph-to-reactflow.js';
+import { isExplodedNode } from '../adapters/graph-to-reactflow.js';
 import { getSupabaseClient } from '../../persistence/supabase/client.js';
 import { isHostedEdition } from '../config/edition.js';
 import { PublishTemplateModal } from './templates/PublishTemplateModal.js';
 import { useGitAutoSync } from '../hooks/useGitAutoSync.js';
 import { useProposalAutoApprove } from '../hooks/useProposalAutoApprove.js';
+import { useAgentPresence } from './ideation/useAgentPresence.js';
+import { nodeLeases, leasedEditRefusal } from './ideation/node-leases.js';
+import { ImportIntentPopup } from './common/ImportIntentPopup.js';
+import { ChangeScopeLine } from './common/ChangeScopeLine.js';
+import { useChangeScope } from './ideation/useChangeScope.js';
+import { canvasScope } from './ideation/change-scope-model.js';
+import { insertChange } from './ideation/useWorkflowLanes.js';
+import { isChangeIntent, type ImportIntent } from '../utils/change-intent.js';
 
 interface GraphEditorProps {
   store: BranchStore;
@@ -47,7 +62,6 @@ interface GraphEditorProps {
   branchName?: string | null;
   onSwitchProject?: (projectId: string) => void;
   onCreateProject?: (name: string, metadata?: Record<string, unknown>) => void;
-  onSwitchBranch?: (branchName: string) => void;
   onRenameProject?: (newName: string) => void;
   onDeleteCurrentProject?: () => void;
 }
@@ -63,7 +77,6 @@ function GraphEditorInner({
   branchName,
   onSwitchProject,
   onCreateProject,
-  onSwitchBranch,
   onRenameProject,
   onDeleteCurrentProject,
 }: GraphEditorProps) {
@@ -79,7 +92,8 @@ function GraphEditorInner({
   const specificationService = useSpecification();
   const proposalService = useProposal();
   const testCaseService = useTestCase();
-  const gate = useFeatureGate();
+  // Decision 1: inside a project, what it carries is its owner's plan.
+  const gate = useProjectFeatureGate(projectId);
 
   useEffect(() => {
     if (checkoutHandled.current) return;
@@ -133,16 +147,19 @@ function GraphEditorInner({
     };
   }, [projectId, refreshPendingGitCount]);
 
-  useEffect(() => {
+  // AL.21: read again when the Git window closes, so the start card says the
+  // repository it connected.
+  const loadGitIntegration = useCallback(() => {
     if (!projectId) return;
     const supabase = getSupabaseClient();
     supabase
       .from('git_integrations')
-      .select('id, default_branch, auto_sync')
+      .select('id, default_branch, auto_sync, repo_owner, repo_name')
       .eq('project_id', projectId)
       .maybeSingle()
       .then(({ data }) => {
         setHasGitIntegration(!!data);
+        setConnectedRepo(data?.repo_owner && data?.repo_name ? `${data.repo_owner}/${data.repo_name}` : null);
         // Owner 2026-07-30: display-only — the header annotates main with its
         // bound git ref (e.g. main → master) when they differ.
         setGitDefaultBranch(data?.default_branch ?? null);
@@ -150,13 +167,8 @@ function GraphEditorInner({
         setGitAutoSync(data ? { integrationId: data.id, enabled: data.auto_sync !== false } : null);
       });
   }, [projectId]);
+  useEffect(() => { loadGitIntegration(); }, [loadGitIntegration]);
 
-  // Post-cutover (owner ruling 2026-08-12): no plan-gated features remain — the
-  // Feature vocabulary stays for call-site clarity, but nothing paywalls. The
-  // only surviving scale gate is the 3-project Community cap (projectLimitReached).
-  const requireFeature = useCallback((feature: Feature): boolean => {
-    return !gate.loading && gate.can(feature);
-  }, [gate]);
   const [importProposal, setImportProposal] = useState<AIProposal | null>(null);
   const [importApplying, setImportApplying] = useState(false);
   const [importApplyingMessage, setImportApplyingMessage] = useState('');
@@ -164,55 +176,86 @@ function GraphEditorInner({
   const [currentSpecification, setCurrentSpecification] = useState<ProjectSpecification | null>(null);
   const specId = currentSpecification?.id ?? null;
   const specRealtimeData = useRealtimeSpecification(specId);
+  // M.2 (owner's report 2026-09-22): specification_requirements is in the
+  // realtime publication and this subscription is live, but Work's reads run
+  // off refreshCounter (the GRAPH refresh) and never heard it — so a lock an
+  // agent set over MCP stayed invisible in Work until something else
+  // refreshed. Every realtime batch bumps a signal Work folds into its own
+  // data version.
+  const [specSignal, setSpecSignal] = useState(0);
+  useEffect(() => { setSpecSignal((v) => v + 1); }, [specRealtimeData.requirements]);
   const specMappingsData = useRealtimeMappings(specId);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showProjectExplorer, setShowProjectExplorer] = useState(false);
   const [showProjectCreate, setShowProjectCreate] = useState(false);
-  const [pendingWorkflow, setPendingWorkflow] = useState<WorkflowOrigin | null>(null);
+  // Owner spike 2026-09-04: the start path is chosen ON the canvas after
+  // creation (ProjectStartPopup); a pasted specification is STAGED on the
+  // project for the user's AI (SpecImportStagingPopup → get_project_status).
+  const [showSpecStaging, setShowSpecStaging] = useState(false);
+  const [stagedSpec, setStagedSpec] = useState<StagedSpecImport | null>(null);
+  // AE.6: the explode requests the Expand button staged for the agent.
+  const [stagedExplodes, setStagedExplodes] = useState<StagedExplode[]>([]);
+  const [startDismissed, setStartDismissed] = useState(false);
   const [showGitModal, setShowGitModal] = useState(false);
   const [showPublishModal, setShowPublishModal] = useState(false);
   const [hasGitIntegration, setHasGitIntegration] = useState(false);
+  const [connectedRepo, setConnectedRepo] = useState<string | null>(null);
   const [gitDefaultBranch, setGitDefaultBranch] = useState<string | null>(null);
   // B2: auto-sync gate — null until the integration row loads.
   const [gitAutoSync, setGitAutoSync] = useState<{ integrationId: string; enabled: boolean } | null>(null);
-  // UX-1.1a: OPT-IN auto-approval of incoming proposals — project-level,
-  // default OFF, stored in projects.metadata.autoApproveProposals.
+  // UX-1.1a → R23: OPT-IN auto-approval of incoming canvas proposals —
+  // project-level, default OFF, stored in projects.metadata.
+  // autoApproveProposals. The ONE control is the Agents button's Autonomy
+  // settings (the architecture lane's Auto-apply writes the mirror); the
+  // editor only READS it, live via the row subscription below.
   const [autoApproveProposals, setAutoApproveProposals] = useState(false);
   const autoApproveRef = useRef(false);
   autoApproveRef.current = autoApproveProposals;
   const [pendingGitChanges, setPendingGitChanges] = useState(0);
   // N6.2(c) rev 2: permanent Changes home — header badge count + arrival toast.
   const [changesPanelOpen, setChangesPanelOpen] = useState(false);
-  // UX-1.1a: load the auto-approve setting with the project.
+  // AK: the tab another surface asks the Agents panel to open on (the
+  // header's MCP button: Connected; the walkthrough: Connected, Autonomy).
+  // Opening it any other way lets the panel pick its own tab.
+  const [agentsOpenOn, setAgentsOpenOn] = useState<{ tab: AgentsTab; at: number } | null>(null);
+  const openAgents = useCallback((tab?: AgentsTab) => {
+    setAgentsOpenOn(tab ? { tab, at: Date.now() } : null);
+    setChangesPanelOpen(true);
+  }, []);
+  // AE.4: the Team popup beside Agents (a Team plan; the TopBar draws the button).
+  const [teamOpen, setTeamOpen] = useState(false);
+  // AL.3: below Team the Team button stays while the owner still has seats
+  // to remove or hand over to; re-read when the popup closes.
+  const [teamCheck, setTeamCheck] = useState(0);
+  const teamBelowPlan = useTeamBelowPlan(projectId, gate, teamCheck);
+  // R17: opened from an agent card in the Workflow inspector — the Changes
+  // panel marks that proposal so the user lands on the thing they clicked.
+  const [changesFocusProposal, setChangesFocusProposal] = useState<string | null>(null);
+  // The Architecture rail's rows open Work on that record; Work's Lives on
+  // chips open Architecture on that node. Two doors, one state each.
+  const [workFocus, setWorkFocus] = useState<WorkFocus | null>(null);
+  // UX-1.1a → R23: read the auto-approve mirror with the project and keep
+  // it live — the writer is useAutonomySettings (the Agents overlay), which
+  // may flip it while the editor is mounted, so the driver follows the row.
   useEffect(() => {
     if (!projectId) { setAutoApproveProposals(false); return; }
     const supabase = getSupabaseClient();
+    const readFlag = (metadata: unknown) =>
+      setAutoApproveProposals((metadata as Record<string, unknown> | null)?.autoApproveProposals === true);
     supabase
       .from('projects')
       .select('metadata')
       .eq('id', projectId)
       .maybeSingle()
-      .then(({ data }) => {
-        setAutoApproveProposals((data?.metadata as Record<string, unknown> | null)?.autoApproveProposals === true);
-      });
+      .then(({ data }) => readFlag(data?.metadata ?? null));
+    const channel = supabase
+      .channel(`project-autonomy-${projectId}`)
+      .on('postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'projects', filter: `id=eq.${projectId}` },
+        (payload) => readFlag((payload.new as { metadata?: unknown } | null)?.metadata ?? null))
+      .subscribe();
+    return () => { void supabase.removeChannel(channel); };
   }, [projectId]);
-
-  const handleToggleAutoApprove = useCallback(async (enabled: boolean) => {
-    if (!projectId) return;
-    setAutoApproveProposals(enabled);
-    try {
-      const supabase = getSupabaseClient();
-      // Read-modify-write so sibling metadata keys survive the toggle.
-      const { data } = await supabase.from('projects').select('metadata').eq('id', projectId).maybeSingle();
-      await supabase
-        .from('projects')
-        .update({ metadata: { ...((data?.metadata as Record<string, unknown>) ?? {}), autoApproveProposals: enabled } })
-        .eq('id', projectId);
-    } catch {
-      setAutoApproveProposals(!enabled);
-      showError('Could not save the auto-approve setting');
-    }
-  }, [projectId, showError]);
 
   const [pendingProposalCount, setPendingProposalCount] = useState(0);
   const prevProposalCountRef = useRef(0);
@@ -234,26 +277,23 @@ function GraphEditorInner({
         // UX-1.1a: with auto-approve ON the driver is about to apply these —
         // a "come review" toast would be noise (the applied toast follows).
         if (!autoApproveRef.current) {
-          showWarning(`New change proposal${count > 1 ? 's' : ''} — open Changes (header) to review`);
+          showWarning(`New proposal${count > 1 ? 's' : ''} waiting: open Agents in the header to review`);
         }
       })();
     }
     prevProposalCountRef.current = count;
   }, [showWarning, branchId, proposalService]);
-  const [viewMode, setViewMode] = useState<'decomposition' | 'architecture' | 'specification'>('decomposition');
-  const [cachedTestSuite, setCachedTestSuite] = useState<import('../utils/export-context.js').ProjectExportTestCase[]>([]);
-  const specViewDirtyRef = useRef(false);
-  const handleSpecDirtyChange = useCallback((dirty: boolean) => {
-    specViewDirtyRef.current = dirty;
-  }, []);
-  const handleViewModeChange = useCallback((mode: 'decomposition' | 'architecture' | 'specification') => {
-    if (viewMode === 'specification' && mode !== 'specification' && specViewDirtyRef.current) {
-      showWarning('Unsaved specification edits were discarded');
-      specViewDirtyRef.current = false;
-    }
+  // V3 P3 (task 3.1): the two-view shell — Ideation | Architecture. The
+  // retired specification view's dirty-guard and test-suite cache went with
+  // it (R4); the project export assembles its own test suite on demand.
+  const [viewMode, setViewMode] = useState<'ideation' | 'architecture'>('ideation');
+  const handleViewModeChange = useCallback((mode: 'ideation' | 'architecture') => {
     setViewMode(mode);
-  }, [viewMode, showWarning]);
-  const [availableBranches, setAvailableBranches] = useState<Array<{ id: string; name: string; patchCount: number; isPrimary: boolean }>>([]);
+  }, []);
+  const [availableBranches, setAvailableBranches] = useState<Array<{ id: string; name: string; isPrimary: boolean }>>([]);
+  // Item 16: the open branch as the database names it now (connect renames
+  // the primary to the tracked git branch; the name it opened with goes stale).
+  const openName = useMemo(() => openBranchName(availableBranches, branchId, branchName), [availableBranches, branchId, branchName]);
   const [highlightedNodeIds, setHighlightedNodeIds] = useState<Set<string>>(new Set());
   // N5.5: one sidepane; the workbench is its Files tab.
   const [sidepaneTab, setSidepaneTab] = useState<SidepaneTab>('details');
@@ -283,20 +323,19 @@ function GraphEditorInner({
       }
       try {
         const supabase = getSupabaseClient();
-        const { data } = await supabase
+        const read = await supabase
           .from('user_settings')
           .select('has_seen_onboarding')
           .eq('user_id', userId)
           .maybeSingle();
-        const remoteFlag = data?.has_seen_onboarding === true;
         // Owner bug 2026-08-14: `remoteFlag || localFlag` made the walkthrough
         // per-BROWSER — any machine that ever completed it marked every NEW
         // account as seen, and then upserted that lie into the new user's
-        // user_settings. Signed-in truth is the user's own record, full stop;
-        // the localStorage key remains only as the logged-out fallback below.
-        if (!cancelled) setHasSeenOnboarding(remoteFlag);
+        // user_settings. Signed-in truth is the user's own record; this
+        // browser's flag decides only when there is no answer (seenWalkthrough).
+        if (!cancelled) setHasSeenOnboarding(seenWalkthrough(read, localFlag));
       } catch {
-        if (!cancelled) setHasSeenOnboarding(localFlag);
+        if (!cancelled) setHasSeenOnboarding(seenWalkthrough(null, localFlag));
       }
     };
     loadFlag();
@@ -319,40 +358,29 @@ function GraphEditorInner({
     if (!projectId) return;
 
     try {
-      const branchesWithCounts = await branchService.listBranchesWithPatchCounts(projectId);
-      setAvailableBranches(branchesWithCounts.map(b => ({
-        id: b.branch.id,
-        name: b.branch.name,
-        patchCount: b.patchCount,
-        isPrimary: b.branch.isPrimary,
-      })));
+      // Item 16: the rows only. This used to load every branch's whole patch
+      // log to count it, and nothing showed the count.
+      const rows = await projectService.listBranches(projectId);
+      setAvailableBranches(rows.map(b => ({ id: b.id, name: b.name, isPrimary: b.isPrimary })));
     } catch (error) {
       console.error('Failed to load branches:', error);
     }
-  }, [projectId, branchService]);
+  }, [projectId, projectService]);
 
   useEffect(() => {
     loadBranches();
   }, [loadBranches]);
 
-  useEffect(() => {
-    if (!pendingWorkflow || !projectId) return;
-
-    if (pendingWorkflow === 'code') {
-      setShowGitModal(true);
-    } else if (pendingWorkflow === 'import-spec') {
-      setViewMode('specification');
-    } else if (pendingWorkflow === 'idea') {
-    }
-    setPendingWorkflow(null);
-  }, [pendingWorkflow, projectId]);
-
   const [projectWorkflowOrigin, setProjectWorkflowOrigin] = useState<WorkflowOrigin | undefined>(undefined);
 
   useEffect(() => {
+    setStartDismissed(false);
+    setShowSpecStaging(false);
     const loadProjectMetadata = async () => {
       if (!projectId) {
         setProjectWorkflowOrigin(undefined);
+        setStagedSpec(null);
+        setStagedExplodes([]);
         return;
       }
       try {
@@ -363,12 +391,79 @@ function GraphEditorInner({
         } else {
           setProjectWorkflowOrigin(undefined);
         }
+        setStagedSpec(readStagedSpecImport(project.metadata));
+        setStagedExplodes(readStagedExplodes(project.metadata));
       } catch {
         setProjectWorkflowOrigin(undefined);
+        setStagedSpec(null);
+        setStagedExplodes([]);
       }
     };
     loadProjectMetadata();
   }, [projectId, projectService]);
+
+  // Read-modify-write on projects.metadata so sibling keys (autoApproveProposals,
+  // publishedTemplateId, …) survive a start-path or staging write.
+  const patchProjectMetadata = useCallback(async (patch: Record<string, unknown>) => {
+    if (!projectId) throw new Error('No project open');
+    const supabase = getSupabaseClient();
+    const { data, error: readError } = await supabase.from('projects').select('metadata').eq('id', projectId).maybeSingle();
+    if (readError) throw new Error(readError.message);
+    const next = { ...((data?.metadata as Record<string, unknown>) ?? {}) };
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined) delete next[k];
+      else next[k] = v;
+    }
+    const { error: writeError } = await supabase.from('projects').update({ metadata: next }).eq('id', projectId);
+    if (writeError) throw new Error(writeError.message);
+  }, [projectId]);
+
+  const stampWorkflowOrigin = useCallback((origin: WorkflowOrigin) => {
+    setProjectWorkflowOrigin(origin);
+    patchProjectMetadata({ workflowOrigin: origin }).catch((err) => {
+      console.error('Failed to record the start path:', err);
+    });
+  }, [patchProjectMetadata]);
+
+  const handleStageSpec = useCallback(async (staged: StagedSpecImport) => {
+    await patchProjectMetadata({ stagedSpecImport: staged, workflowOrigin: 'import-spec' });
+    setStagedSpec(staged);
+    setProjectWorkflowOrigin('import-spec');
+  }, [patchProjectMetadata]);
+
+  const handleClearStagedSpec = useCallback(async () => {
+    await patchProjectMetadata({ stagedSpecImport: undefined });
+    setStagedSpec(null);
+  }, [patchProjectMetadata]);
+
+  // AE.6: the Expand button stages an explode request the agent picks up
+  // over MCP (get_project_status leads with it). A write also drops requests
+  // whose node is gone; the key is removed when nothing is staged.
+  const writeStagedExplodes = useCallback(async (next: StagedExplode[]) => {
+    const kept = pruneStagedExplodes(next, storeState.derivedGraph, { dropAbsent: true });
+    await patchProjectMetadata({ stagedExplodes: kept.length > 0 ? kept : undefined });
+    setStagedExplodes(kept);
+  }, [patchProjectMetadata, storeState.derivedGraph]);
+  const handleRequestExplode = useCallback((nodeId: string) => {
+    const node = storeState.derivedGraph.nodes[nodeId];
+    if (!node) return;
+    writeStagedExplodes(stageExplode(stagedExplodes, { id: node.id, label: node.label })).catch((err) => {
+      console.error('Could not stage the expansion request:', err);
+    });
+  }, [stagedExplodes, storeState.derivedGraph.nodes, writeStagedExplodes]);
+  const handleWithdrawExplode = useCallback((nodeId: string) => {
+    writeStagedExplodes(withdrawExplode(stagedExplodes, nodeId)).catch((err) => {
+      console.error('Could not withdraw the expansion request:', err);
+    });
+  }, [stagedExplodes, writeStagedExplodes]);
+  // Once the parts land (the agent's proposal accepted), the request is done.
+  useEffect(() => {
+    if (stagedExplodes.length === 0) return;
+    const pruned = pruneStagedExplodes(stagedExplodes, storeState.derivedGraph);
+    if (pruned.length !== stagedExplodes.length) {
+      writeStagedExplodes(pruned).catch((err) => console.error('Could not drop a fulfilled expansion request:', err));
+    }
+  }, [stagedExplodes, storeState.derivedGraph, writeStagedExplodes]);
 
   useEffect(() => {
     const loadSpecification = async () => {
@@ -393,6 +488,15 @@ function GraphEditorInner({
     loadSpecification();
   }, [projectId, specificationService, refreshCounter]);
 
+  // The walkthrough takes the app to the surface a stop explains.
+  const handleWalkthroughSurface = useCallback((surface: WalkthroughSurface) => {
+    if (surface.view === 'agents') { openAgents(surface.tab); return; }
+    setChangesPanelOpen(false);
+    const target = surfaceTarget(surface, Date.now());
+    handleViewModeChange(target.view);
+    if (target.focus) setWorkFocus(target.focus);
+  }, [handleViewModeChange, openAgents]);
+
   const handleCloseOnboarding = useCallback(() => {
     setShowOnboarding(false);
     localStorage.setItem('specgraph_onboarding_seen', 'true');
@@ -409,6 +513,11 @@ function GraphEditorInner({
       setShowProjectCreate(true);
     }
   }, [userId, pendingProjectCreateAfterOnboarding]);
+  // AJ.6: the tour over the example ends by starting the account's own project.
+  const handleWalkthroughCreateProject = useCallback(() => {
+    handleCloseOnboarding();
+    setShowProjectCreate(true);
+  }, [handleCloseOnboarding]);
 
   useEffect(() => {
     return store.subscribe(setStoreState);
@@ -439,14 +548,58 @@ function GraphEditorInner({
     [showError]
   );
 
+  // AA.5 (owner 2026-09-23): "if a node is leased, then it is locked." A
+  // person's edit to a node someone else holds a fresh lease on (the node,
+  // or work inside it) is refused here, before it reaches the draft, naming
+  // the holder. Moving a node is layout and passes. The database refuses the
+  // same edit if anything gets past this (migration 20260923140000).
+  const leaseBoard = useAgentPresence(projectId);
+  const leases = useMemo(() => nodeLeases(leaseBoard.holds, userId ? `user:${userId}` : null), [leaseBoard.holds, userId]);
+  const leasesRef = useRef(leases);
+  leasesRef.current = leases;
+
+  // AA.2: the change a person is making to an imported system, on the
+  // canvas: one line names it with its proof count and shows its scope.
+  const changeBoard = useChangeScope(projectId, branchId, storeState.derivedGraph, gate.can('workflow_space'), refreshCounter + specSignal);
+  const [activeChangeId, setActiveChangeId] = useState<string | null>(null);
+  const [changeScopeOn, setChangeScopeOn] = useState(false);
+  const activeChange = changeBoard.changes.find((ch) => ch.id === activeChangeId) ?? changeBoard.changes[0] ?? null;
+  const shownScope = useMemo(
+    () => (activeChange && changeScopeOn && activeChange.scope.nodeIds.length > 0
+      ? canvasScope(activeChange, (id) => storeState.derivedGraph.nodes[id]?.parentId)
+      : null),
+    [activeChange, changeScopeOn, storeState.derivedGraph.nodes],
+  );
+  const graphForLeasesRef = useRef<Graph | null>(null);
+  graphForLeasesRef.current = storeState.derivedGraph;
   const handlePatchesGeneratedInternal = useCallback(
     (patches: PatchOperation[]) => {
+      const g = graphForLeasesRef.current;
+      const refusal = leasedEditRefusal(patches, leasesRef.current, {
+        resolve: (id) => {
+          const edge = g?.edges?.[id];
+          if (edge) return [edge.source, edge.target];
+          const artifact = g?.artifacts?.[id] as { nodeId?: string } | undefined;
+          return artifact?.nodeId ? [artifact.nodeId] : [];
+        },
+        labelOf: (nodeId) => g?.nodes?.[nodeId]?.label ?? 'This node',
+        // AA.3: an exploded node's lease covers its parts.
+        boxOf: (nodeId) => {
+          const parentId = g?.nodes?.[nodeId]?.parentId;
+          const parent = parentId ? g?.nodes?.[parentId] : undefined;
+          return parent && g && isExplodedNode(parent, g) ? parent.id : null;
+        },
+      });
+      if (refusal) {
+        showWarning(refusal);
+        return;
+      }
       const result = store.proposePatches(patches);
       if (!result.success && result.error) {
         showError(result.error);
       }
     },
-    [store, showError]
+    [store, showError, showWarning]
   );
 
   // N6.1 (owner: "add undo and redo functionality that can revert the canvas since
@@ -506,6 +659,16 @@ function GraphEditorInner({
     setWorkbenchInitialArtifactId(null);
   }, [store]);
 
+  // The door into Work from another surface (the Architecture rail's rows,
+  // the decision page's Edit first): the record becomes Work's focus, the
+  // panel and the node selection close, the view switches.
+  const openWork = useCallback((target: WorkTarget) => {
+    setWorkFocus({ ...target, at: Date.now() });
+    setChangesPanelOpen(false); setChangesFocusProposal(null);
+    handleBackgroundClick();
+    handleViewModeChange('ideation');
+  }, [handleBackgroundClick, handleViewModeChange]);
+
   // N6: SpecificationEditorPanel + its editingSpecification gate deleted — the gate
   // was never set non-null, so the panel could never render (dead mount since audit).
   const handleUpdateCurrentSpecification = useCallback(async (updated: ProjectSpecification) => {
@@ -545,23 +708,23 @@ function GraphEditorInner({
   // and until this existed there was NO way to pull a body in (import is blocked on anchored
   // repos; per-file Accept only covers post-adoption changes).
   const [gitService] = useState(() => new GitService(getSupabaseClient()));
-  const handleLoadArtifactFromRepo = useCallback(async (artifactId: string): Promise<void> => {
+  const handleLoadArtifactFromRepo = useCallback(async (artifactId: string): Promise<boolean> => {
     const artifact = storeState.derivedGraph.artifacts[artifactId];
-    if (!artifact?.path || !projectId) return;
+    if (!artifact?.path || !projectId) return false;
     try {
       const integration = await gitService.getIntegration(projectId);
       if (!integration) {
         showWarning('Connect a git repository first (Git panel) — this file\'s content lives in your repo.');
-        return;
+        return false;
       }
       const path = artifact.path.startsWith('/') ? artifact.path.slice(1) : artifact.path;
       // Owner bench 2026-07-29: fetch from the ACTIVE branch's bound ref — the
       // default-branch fetch errored whenever you worked on a feature branch.
-      const files = await gitService.fetchFileContent(integration.id, [path], branchName ?? undefined);
+      const files = await gitService.fetchFileContent(integration.id, [path], openName ?? undefined);
       const file = files.find(f => f.path === path) ?? files[0];
       if (!file || file.content === undefined) {
-        showError(`File not found in the repo at ${path} — it may not exist on the ${branchName || integration.defaultBranch} branch's ref.`);
-        return;
+        showError(`File not found in the repo at ${path}. It may not exist on the ${openName || integration.defaultBranch} branch.`);
+        return false;
       }
       const fetchedHash = computeContentHash(file.content);
       if (artifact.contentHash && artifact.contentHash !== fetchedHash) {
@@ -577,13 +740,16 @@ function GraphEditorInner({
       const result = store.proposePatches([patch]);
       if (!result.success && result.error) {
         showError(result.error);
+        return false;
       } else if (!(artifact.contentHash && artifact.contentHash !== fetchedHash)) {
         showWarning(`Loaded ${path} from the repository`);
       }
+      return true;
     } catch (error) {
       showError('Failed to load from repo: ' + (error instanceof Error ? error.message : 'Unknown error'));
+      return false;
     }
-  }, [storeState.derivedGraph.artifacts, projectId, branchName, gitService, store, showWarning, showError]);
+  }, [storeState.derivedGraph.artifacts, projectId, openName, gitService, store, showWarning, showError]);
 
   // P1-7 C2: export one node's context as a strict slice of the model anchor — the same
   // shapes and hashes that land in .nodespec/model.json, plus REQ-### references and the
@@ -637,22 +803,17 @@ function GraphEditorInner({
 
   // Owner spike 2026-08-23: the trunk is identified by the flag, never the
   // literal name 'main' — connect renames the trunk row to the bound git
-  // branch, and every merge/switch/guard lane targets THIS name.
-  const primaryBranchName = useMemo(
-    () => availableBranches.find(b => b.isPrimary)?.name ?? 'main',
+  // branch, and every merge/switch/guard lane targets THIS name. AD.4 (D15):
+  // null until the branches load; a git lane with no branch named lets the
+  // server find the primary by its flag.
+  const primaryBranchName = useMemo<string | null>(
+    () => availableBranches.find(b => b.isPrimary)?.name ?? null,
     [availableBranches],
   );
+  /** The branch the git lanes act on: the open one, else the primary. */
+  const gitBranchName: string | null = openName || primaryBranchName;
   const primaryBranchNameRef = useRef(primaryBranchName);
   primaryBranchNameRef.current = primaryBranchName;
-
-  const availableBranchesFormatted = useMemo(() => {
-    return availableBranches.map(branch => {
-      if (branch.name === activeBranch.name) {
-        return { ...branch, patchCount: activeBranch.patches.length };
-      }
-      return branch;
-    });
-  }, [availableBranches, activeBranch.name, activeBranch.patches.length]);
 
 
   const handlePatchesGenerated = useCallback(
@@ -690,7 +851,7 @@ function GraphEditorInner({
     }
 
     if (!branchId) {
-      if (!silent) showError('Branch ID is missing. Please switch to a valid branch.');
+      if (!silent) showError('This project has no branch open. Reopen the project to save.');
       return false;
     }
 
@@ -742,7 +903,7 @@ function GraphEditorInner({
       const unsavedDuringSave = livePatchesRef.current.slice(activeBranch.patches.length);
       store.commitSavedSnapshot(derivedGraph, unsavedDuringSave);
 
-      if (!silent) showWarning(`Saved ${activeBranch.patches.length} changes to ${branchName}`);
+      if (!silent) showWarning(`Saved ${activeBranch.patches.length} changes to ${openName ?? activeBranch.name}`);
       await loadBranches();
 
       specificationService.getSpecificationsByProject(projectId).then(specs => {
@@ -761,7 +922,7 @@ function GraphEditorInner({
     } finally {
       isSavingRef.current = false;
     }
-  }, [projectId, branchId, userId, branchName, activeBranch, derivedGraph, store, showWarning, showError, loadBranches, projectService, patchService, branchService, specificationService]);
+  }, [projectId, branchId, userId, openName, activeBranch, derivedGraph, store, showWarning, showError, loadBranches, projectService, patchService, branchService, specificationService]);
 
   // P1-7 C1.2: debounced autosave — a manual canvas edit is an in-memory patch until saved,
   // and git-push reads only the persisted snapshot. Every new patch resets the timer (the
@@ -805,179 +966,34 @@ function GraphEditorInner({
     return saveDraftInternal({ silent: true });
   }, [activeBranch.patches.length, saveDraftInternal]);
 
-  const handleCreateBranch = useCallback(async () => {
-    if (!projectId || !userId) {
-      showWarning('Cannot create branch: missing project information');
-      return;
-    }
 
-    if (activeBranch.patches.length > 0) {
-      showError('Please save or discard your changes before creating a new branch');
-      return;
-    }
-
-    const branchNameInput = window.prompt('Enter new branch name:');
-    if (!branchNameInput || branchNameInput.trim() === '') {
-      return;
-    }
-
-    const newBranchName = branchNameInput.trim();
-
-    if (newBranchName === 'main' || newBranchName === primaryBranchName) {
-      showError(`Cannot name branch "${newBranchName}" - reserved for the primary branch`);
-      return;
-    }
-
-    try {
-      const existing = await projectService.getBranchByName(projectId, newBranchName);
-      if (existing) {
-        showError(`Branch "${newBranchName}" already exists`);
-        return;
-      }
-
-      await branchService.createBranch(projectId, newBranchName, userId, derivedGraph, 0);
-
-      // R3-3a: a NodeSpec branch maps 1:1 to a git ref — when the project is
-      // git-connected, creating a design branch creates the REAL git branch (from
-      // the current NodeSpec branch's bound ref) and binds git_ref + baseline.
-      // Best-effort: an offline provider degrades to a local-only branch, honestly.
-      try {
-        const { GitService } = await import('../services/GitService.js');
-        const gitService = new GitService(getSupabaseClient());
-        const integration = await gitService.getIntegration(projectId);
-        if (integration) {
-          const result = await gitService.createRemoteBranch(projectId, integration.id, newBranchName, branchName || primaryBranchName);
-          showWarning(`Branch "${newBranchName}" created and bound to git ref "${result.ref}"${result.alreadyExists ? ' (ref already existed — bound to it)' : ''}`);
-        } else {
-          showWarning(`Branch "${newBranchName}" created (no git integration — local only)`);
-        }
-      } catch (gitErr) {
-        showWarning(`Branch "${newBranchName}" created locally, but the git ref could not be created: ${gitErr instanceof Error ? gitErr.message : 'provider unreachable'}. Re-try by pushing from that branch.`);
-      }
-      await loadBranches();
-
-      if (onSwitchBranch) {
-        onSwitchBranch(newBranchName);
-      }
-    } catch (error) {
-      showError('Failed to create branch: ' + (error instanceof Error ? error.message : 'Unknown error'));
-    }
-  }, [projectId, userId, branchId, branchName, primaryBranchName, derivedGraph, activeBranch.patches.length, onSwitchBranch, showWarning, showError, loadBranches, projectService, branchService]);
-
-  // R3-3b: a design merge IS a git merge, and the DEFAULT vehicle is a pull request
-  // (owner-directed: "merge must be safer and, just like a code workflow, a pull
-  // request — or at least an option; no stray path"). The old DB snapshot-copy merge
-  // (BranchService.mergeBranchToMain + store.mergeToMain) is DELETED — after R3-3a's
-  // real refs it desynced git from the canvas. Flow: save → dialog (PR primary /
-  // direct secondary) → push through THE normal lane → provider PR or merge →
-  // convergence via the R3-1 loader / drift-card machinery. Deletes nothing.
-  const [mergeDialog, setMergeDialog] = useState<null | { integrationId: string; busy: 'pr' | 'direct' | null }>(null);
-
-  const handleRequestMerge = useCallback(async () => {
-    if (!projectId || !branchId || !userId || !branchName) {
-      showWarning('Cannot merge: missing branch information');
-      return;
-    }
-
-    if (branchName === primaryBranchName) {
-      showWarning('Already on the primary branch');
-      return;
-    }
-
-    const saved = await ensureDraftSaved();
-    if (!saved) {
-      showError('Could not save your pending changes — resolve that before merging.');
-      return;
-    }
-
-    try {
-      const integration = await gitService.getIntegration(projectId);
-      if (!integration) {
-        showWarning('Merging a design branch requires a git connection — a design merge is a git merge (a pull request). Connect a repository via the Git button first.');
-        return;
-      }
-      setMergeDialog({ integrationId: integration.id, busy: null });
-    } catch (error) {
-      showError('Failed to prepare merge: ' + (error instanceof Error ? error.message : 'Unknown error'));
-    }
-  }, [projectId, branchId, userId, branchName, primaryBranchName, ensureDraftSaved, gitService, showWarning, showError]);
-
-  const runMerge = useCallback(async (mode: 'pr' | 'direct') => {
-    if (!mergeDialog || !projectId || !branchName) return;
-    const integrationId = mergeDialog.integrationId;
-    setMergeDialog({ integrationId, busy: mode });
-    try {
-      // Pre-R3-3a branches may carry no bound git ref — bind one now through the
-      // existing create-branch lane (already-exists is a bindable outcome).
-      const ref = await gitService.getBranchGitRef(projectId, branchName);
-      if (!ref) {
-        await gitService.createRemoteBranch(projectId, integrationId, branchName, primaryBranchName);
-      }
-
-      // THE normal push lane — overwrite guard and packet freshness gate run here.
-      await gitService.push(projectId, branchName, integrationId);
-
-      if (mode === 'pr') {
-        const pr = await gitService.openPullRequest(projectId, branchName, integrationId, primaryBranchName);
-        window.open(pr.prUrl, '_blank', 'noopener');
-        showWarning(pr.alreadyExists
-          ? `Pull request already open — this push updated it: ${pr.prUrl}`
-          : `Pull request opened: ${pr.prUrl}`);
-        // The branch row stays — a PR can stay open for days; the branch stays switchable.
-      } else {
-        const res = await gitService.mergeBranchDirect(projectId, branchName, integrationId, primaryBranchName);
-        if (res.alreadyMerged) {
-          showWarning(`Nothing to merge — ${primaryBranchName} already contains "${branchName}".`);
-        } else if (res.targetInSync) {
-          // User-initiated merge + undiverged target = no question to ask: load the
-          // merged model onto main through the R3-1 loader and go there.
-          await gitService.restoreModel(integrationId, primaryBranchName);
-          showWarning(`Merged "${branchName}" into ${primaryBranchName} and loaded the result onto its canvas.`);
-          await loadBranches();
-          setMergeDialog(null);
-          if (onSwitchBranch) onSwitchBranch(primaryBranchName);
-          return;
-        } else {
-          showWarning(`Merged "${branchName}" into ${primaryBranchName} in git. Its canvas has local changes — the next sync check will offer reconciliation there.`);
-        }
-      }
-      await loadBranches();
-      setMergeDialog(null);
-    } catch (error) {
-      setMergeDialog(null);
-      showError('Merge failed: ' + (error instanceof Error ? error.message : 'Unknown error'));
-    }
-  }, [mergeDialog, projectId, branchName, primaryBranchName, gitService, loadBranches, onSwitchBranch, showWarning, showError]);
 
   // R3-3c: switching to a git-bound branch checks THAT branch's ref for freshness
   // (the R3 core loop: git is the durable model store, the canvas a working copy).
   // Best-effort and fire-and-forget — switching must never fail on provider reach.
-  const checkBranchFreshness = useCallback((name: string) => {
+  const checkBranchFreshness = useCallback((named: string | null) => {
     if (!projectId) return;
     void (async () => {
       try {
         const integration = await gitService.getIntegration(projectId);
         if (!integration) return;
-        const sweep = await gitService.detectDrift(integration.id, { branchName: name, force: true });
+        const sweep = await gitService.detectDrift(integration.id, { ...(named ? { branchName: named } : {}), force: true });
+        const label = named ? `"${named}"` : 'The primary branch';
         const status = sweep?.status as string | undefined;
         if (status === 'behind_in_sync') {
-          // Working copy untouched since its baseline + the ref moved: run the R3-1
-          // loader — user-initiated switch + undiverged working copy = no question
-          // to ask (the same principle as merge convergence).
-          await gitService.restoreModel(integration.id, name);
-          await refreshGraph();
-          showWarning(`"${name}" was behind its git branch — loaded the latest model from the repository.`);
-        } else if (status === 'fast_forwarded' && sweep?.restoredModel === true) {
-          // Owner bench 2026-07-30: the merge-arrival lane (a merged NodeSpec PR
-          // coming home) restores the model SERVER-side and reports
-          // fast_forwarded. Only 'behind_in_sync' was handled here, so the DB
-          // moved while the canvas kept rendering the old model — the R3-3c
-          // auto-load step looked broken. The plain bookkeeping fast-forward
-          // (self-push-only ranges) carries no flag and still stays silent.
-          await refreshGraph();
-          showWarning(`"${name}" picked up the merged pull request — loaded the latest model from the repository.`);
+          // V3 AD.2b (D4): the working copy is untouched since its baseline and
+          // the ref moved. Nothing loads under an open editor: git's model is
+          // filed as a proposal the person accepts. An automatic load never
+          // re-anchors a rewritten history.
+          const filed = await gitService.restoreModel(integration.id, named ?? undefined, { automatic: true });
+          if (filed.status !== 'identical') {
+            showWarning(`${label} is behind its git branch: the repository's model is waiting in Proposals.`);
+          }
+        } else if (status === 'load_proposed') {
+          // A merged NodeSpec pull request came home; the sync check filed it.
+          showWarning(`${label} received a merged pull request: the repository's model is waiting in Proposals.`);
         } else if (status === 'ref_deleted') {
-          showWarning(`The git branch for "${name}" no longer exists (likely merged and deleted). Open the Git panel to archive or keep this design branch.`);
+          showWarning(`The git branch for ${named ? `"${named}"` : 'the primary branch'} no longer exists (likely merged and deleted). Open the Git panel to archive or keep this design branch.`);
         }
         // 'drift' raised the standard card — the header Git badge surfaces it.
       } catch (err) {
@@ -994,10 +1010,10 @@ function GraphEditorInner({
     if (initialFreshnessRanRef.current) return;
     if (!projectId || !hasGitIntegration) return;
     initialFreshnessRanRef.current = true;
-    checkBranchFreshness(branchName || primaryBranchNameRef.current);
+    checkBranchFreshness(openName || primaryBranchNameRef.current);
     // count refresh rides the sweep result landing in the DB
     setTimeout(() => refreshPendingGitCount(), 4000);
-  }, [projectId, hasGitIntegration, branchName, checkBranchFreshness, refreshPendingGitCount]);
+  }, [projectId, hasGitIntegration, openName, checkBranchFreshness, refreshPendingGitCount]);
 
   // …and while the tab is VISIBLE, a non-forced sweep runs each minute. The
   // server's 60s claim throttle dedupes concurrent tabs/pollers, so this costs
@@ -1005,8 +1021,8 @@ function GraphEditorInner({
   // out-of-band commit without opening the Git panel or switching branches.
   // Deliberately non-forced and no auto-restore here: background polling only
   // ever RAISES cards; loading a model stays a user-initiated act.
-  const branchNameRef = useRef(branchName);
-  branchNameRef.current = branchName;
+  const branchNameRef = useRef(openName);
+  branchNameRef.current = openName;
   useEffect(() => {
     if (!projectId || !hasGitIntegration) return;
     const timer = setInterval(() => {
@@ -1015,7 +1031,7 @@ function GraphEditorInner({
         try {
           const integration = await gitService.getIntegration(projectId);
           if (!integration) return;
-          await gitService.detectDrift(integration.id, { branchName: branchNameRef.current || primaryBranchNameRef.current });
+          await gitService.detectDrift(integration.id, { branchName: branchNameRef.current || primaryBranchNameRef.current || undefined });
           refreshPendingGitCount();
         } catch { /* background poll — never surfaces */ }
       })();
@@ -1027,39 +1043,12 @@ function GraphEditorInner({
   // branch row (and, inside deleteBranch, its patch log) goes away after a merge.
   const handleArchiveBranch = useCallback(async (name: string) => {
     if (name === primaryBranchName) throw new Error('Cannot archive the primary branch');
-    const entry = availableBranchesFormatted.find(b => b.name === name);
+    const entry = availableBranches.find(b => b.name === name);
     if (!entry) throw new Error(`Design branch "${name}" not found`);
     await branchService.deleteBranch(entry.id);
     await loadBranches();
-    if (branchName === name && onSwitchBranch) onSwitchBranch(primaryBranchName);
-  }, [availableBranchesFormatted, branchService, loadBranches, branchName, primaryBranchName, onSwitchBranch]);
+  }, [availableBranches, branchService, loadBranches, primaryBranchName]);
 
-  const handleDeleteBranch = useCallback(async (deleteBranchId: string, deleteBranchName: string) => {
-    if (!projectId) {
-      showWarning('Cannot delete branch: missing project information');
-      return;
-    }
-
-    if (deleteBranchName === primaryBranchName) {
-      showWarning('Cannot delete the primary branch');
-      return;
-    }
-
-    try {
-      await branchService.deleteBranch(deleteBranchId);
-
-      showWarning(`Successfully deleted branch "${deleteBranchName}"`);
-      await loadBranches();
-
-      if (deleteBranchId === branchId) {
-        if (onSwitchBranch) {
-          onSwitchBranch(primaryBranchName);
-        }
-      }
-    } catch (error) {
-      showError('Failed to delete branch: ' + (error instanceof Error ? error.message : 'Unknown error'));
-    }
-  }, [projectId, branchId, primaryBranchName, showWarning, showError, loadBranches, onSwitchBranch, branchService]);
 
   // R3-4b: the accept lane stamps provenance (origin + commit sha) and promotes a
   // suggested artifact to draft — see buildGitAcceptPatch for the full rationale.
@@ -1155,10 +1144,10 @@ function GraphEditorInner({
   // generator docs, flagged declarations) keeps its card; see
   // isAutoSyncEligible. Mounted BELOW both handler definitions (TDZ).
   useGitAutoSync({
-    enabled: gitAutoSync?.enabled === true && hasGitIntegration,
+    enabled: gitAutoSync?.enabled === true && hasGitIntegration && !!gitBranchName,
     projectId: projectId ?? null,
     integrationId: gitAutoSync?.integrationId ?? null,
-    branchName: branchName || 'main',
+    branchName: gitBranchName ?? '',
     gitService,
     artifactsById: derivedGraph.artifacts,
     onAcceptArtifact: handleAcceptGitChange,
@@ -1230,6 +1219,20 @@ function GraphEditorInner({
       }
     }
 
+    // AA.0: constraints come from the one store; the export proceeds without
+    // them only when they cannot be read. AC: below Indie they do not exist,
+    // so they are not read and no file or count names them.
+    const constraintsCarried = gate.can('workflow_space');
+    let exportConstraints: import('../utils/export-constraints.js').ExportConstraint[] = [];
+    if (projectId && constraintsCarried) {
+      try {
+        const { loadExportConstraints } = await import('../utils/export-constraints.js');
+        exportConstraints = await loadExportConstraints(projectId);
+      } catch {
+        // proceed without constraints
+      }
+    }
+
     let specExport: ProjectExportSpecification | undefined;
     if (spec?.vision) {
       const sectionMap = new Map(sections.map(s => [s.id, s.name]));
@@ -1245,14 +1248,41 @@ function GraphEditorInner({
           sectionName: r.sectionId ? sectionMap.get(r.sectionId) : undefined,
           acceptanceCriteria: r.acceptanceCriteria.map(ac => ({ text: ac.text, met: ac.met })),
         })),
-        constraints: spec.constraints || [],
+        ...(constraintsCarried ? { constraints: exportConstraints } : {}),
         preferences: spec.preferences || {},
       };
     }
 
     const data = buildProjectExport(derivedGraph, projectName || 'Untitled Project', testSuiteData, specExport);
     setProjectExportData(data);
-  }, [derivedGraph, projectName, specRealtimeData.requirements, specRealtimeData.sections, specRealtimeData.specification, testCaseService]);
+  }, [derivedGraph, projectId, projectName, specRealtimeData.requirements, specRealtimeData.sections, specRealtimeData.specification, testCaseService, gate]);
+
+  // AA.2: after an import is accepted, ask once what the person is here to
+  // do (workflows are Indie and above). The answer lives on the project so
+  // the agent reads it and never asks twice.
+  const [askImportIntent, setAskImportIntent] = useState(false);
+  const askImportIntentOnce = useCallback(async () => {
+    if (!projectId || !gate.can('workflow_space')) return;
+    const { data } = await getSupabaseClient().from('projects').select('metadata').eq('id', projectId).maybeSingle();
+    const answered = (data?.metadata as { importIntent?: unknown } | null)?.importIntent;
+    if (!answered) setAskImportIntent(true);
+  }, [projectId, gate]);
+
+  const handleImportIntent = useCallback(async (intent: ImportIntent, name: string | null) => {
+    if (!projectId) throw new Error('No project open');
+    const supabase = getSupabaseClient();
+    let workflowId: string | undefined;
+    if (isChangeIntent(intent)) {
+      const { data: last } = await supabase.from('workflows').select('sort_order')
+        .eq('project_id', projectId).order('sort_order', { ascending: false }).limit(1).maybeSingle();
+      const made = await insertChange(supabase, projectId, name ?? '', intent, (((last as { sort_order?: number } | null)?.sort_order) ?? -1) + 1);
+      if ('error' in made) throw new Error(made.error);
+      workflowId = made.id;
+    }
+    // AL.21: the popup stays open on what was staged and the note that sends
+    // the agent to it; nothing here starts the agent, so no toast says so.
+    await patchProjectMetadata({ importIntent: { intent, ...(workflowId ? { workflowId } : {}), at: new Date().toISOString() } });
+  }, [projectId, patchProjectMetadata]);
 
   const handleImportProposalMerge = useCallback(async (result: MergeResult, _mergedOps: PatchOperation[]) => {
     if (!branchId || !projectId || !importProposal) return;
@@ -1274,6 +1304,7 @@ function GraphEditorInner({
       setImportApplyingMessage('Refreshing canvas...');
       await refreshGraph();
       showWarning('Import applied successfully');
+      void askImportIntentOnce().catch(() => {});
 
       setImportApplyingMessage('Syncing specifications...');
       specificationService.getSpecificationsByProject(projectId).then(async (specs) => {
@@ -1283,12 +1314,11 @@ function GraphEditorInner({
         try {
           const reqs = await specificationService.getRequirementsBySpecification(spec.id);
           if (reqs.length === 0) {
-            const currentPrefs = spec.preferences || {};
-            await specificationService.updateSpecification(spec.id, {
-              preferences: { ...currentPrefs, specEnabled: false },
-            });
+            // An import that carried no requirements starts architecture-first.
+            // It used to also switch the spec "off" through a preference the
+            // retired Spec tab read; nothing turns the specification off now.
             await specificationService.setPhaseStatus(spec.id, 'architecture_first');
-            setCurrentSpecification({ ...spec, preferences: { ...currentPrefs, specEnabled: false } });
+            setCurrentSpecification(spec);
           }
         } catch {}
       }).catch(() => {});
@@ -1299,12 +1329,13 @@ function GraphEditorInner({
       setImportApplying(false);
       setImportApplyingMessage('');
     }
-  }, [branchId, projectId, importProposal, proposalService, refreshGraph, showWarning, showError, specificationService]);
+  }, [branchId, projectId, importProposal, proposalService, refreshGraph, showWarning, showError, specificationService, askImportIntentOnce]);
 
-  const handleImportProposalReject = useCallback(async () => {
+  const handleImportProposalReject = useCallback(async (reason: string) => {
     if (!importProposal) return;
     try {
-      await proposalService.updateProposalStatus(importProposal.id, 'rejected');
+      // AE.12: the reason rides the proposal; the agent reads it as reviewNote.
+      await proposalService.rejectProposal(importProposal.id, reason);
     } catch {
     }
     setImportProposal(null);
@@ -1334,9 +1365,9 @@ function GraphEditorInner({
    *     Repository panel derives from the data rather than from a flag we set.
    */
   const autoPushAfterAccept = useCallback(async (appliedPatchCount: number, title: string) => {
-    if (!projectId) return;
+    if (!projectId || !gitBranchName) return;
     try {
-      const syncState = await gitService.getBranchSyncState(projectId, branchName || 'main').catch(() => null);
+      const syncState = await gitService.getBranchSyncState(projectId, gitBranchName).catch(() => null);
       const decision = shouldAutoPushOnAccept({
         hasGitIntegration,
         lastSyncedCommit: syncState?.lastSyncedCommit ?? null,
@@ -1350,8 +1381,8 @@ function GraphEditorInner({
       }
       const integration = await gitService.getIntegration(projectId);
       if (!integration) return;
-      const result = await gitService.push(projectId, branchName || 'main', integration.id, false, title);
-      showWarning(`Change applied and committed to git (${result.commitSha.slice(0, 8)}).`);
+      const result = await gitService.push(projectId, gitBranchName, integration.id, false, title);
+      showWarning(`Change applied and committed to git (${result.commitSha.slice(0, 8)}).${pushSkipNote(result)}${pushWithheldNote(result)}`);
       refreshPendingGitCount();
     } catch (err) {
       showWarning(
@@ -1360,7 +1391,7 @@ function GraphEditorInner({
         '. Your design is ahead of git — commit from the Git panel when ready.',
       );
     }
-  }, [projectId, branchName, hasGitIntegration, gitService, showWarning, refreshPendingGitCount]);
+  }, [projectId, gitBranchName, hasGitIntegration, gitService, showWarning, refreshPendingGitCount]);
 
   const handleActiveProposalMerge = useCallback(async (result: MergeResult, _mergedOps: PatchOperation[]) => {
     if (!branchId || !projectId || !activeProposal) return;
@@ -1392,10 +1423,11 @@ function GraphEditorInner({
     }
   }, [branchId, projectId, activeProposal, proposalService, refreshGraph, showError, specificationService]);
 
-  const handleActiveProposalReject = useCallback(async () => {
+  const handleActiveProposalReject = useCallback(async (reason: string) => {
     if (!activeProposal) return;
     try {
-      await proposalService.updateProposalStatus(activeProposal.id, 'rejected');
+      // AE.12: the reason rides the proposal; the agent reads it as reviewNote.
+      await proposalService.rejectProposal(activeProposal.id, reason);
     } catch {}
     setActiveProposal(null);
   }, [activeProposal, proposalService]);
@@ -1511,39 +1543,6 @@ function GraphEditorInner({
     return () => { cancelled = true; };
   }, [specRealtimeData.requirements, specMappingsData.mappingsByRequirement, testCaseService, refreshCounter, testRefreshCounter]);
 
-  useEffect(() => {
-    if (viewMode !== 'specification') return;
-    if (!specRealtimeData.requirements.length) {
-      setCachedTestSuite([]);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        const reqIds = specRealtimeData.requirements.map(r => r.id);
-        const allTests = await testCaseService.getTestCasesByRequirementIds(reqIds);
-        if (cancelled) return;
-        const reqMap = new Map(specRealtimeData.requirements.map(r => [r.id, r]));
-        setCachedTestSuite(allTests.map(tc => {
-          const req = reqMap.get(tc.requirementId);
-          return {
-            testId: tc.testId,
-            name: tc.name,
-            testType: tc.testType,
-            framework: tc.framework,
-            status: tc.status,
-            expectedResult: tc.expectedResult,
-            requirementName: req?.name || tc.requirementId,
-            requirementId: req?.requirementId || tc.requirementId,
-          };
-        }));
-      } catch {
-        if (!cancelled) setCachedTestSuite([]);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [viewMode, specRealtimeData.requirements, testCaseService]);
-
   const editorStyles: React.CSSProperties = {
     display: 'flex',
     flexDirection: 'column',
@@ -1563,7 +1562,7 @@ function GraphEditorInner({
   return (
     <div style={editorStyles}>
       <TopBar
-        branchName={branchName || activeBranch.name}
+        branchName={openName || activeBranch.name}
         hasUnsavedChanges={activeBranch.patches.length > 0}
         onUndo={handleUndo}
         onRedo={handleRedo}
@@ -1575,30 +1574,10 @@ function GraphEditorInner({
         projectId={projectId || undefined}
         onOpenProjects={() => setShowProjectExplorer(true)}
         ensureDraftSaved={ensureDraftSaved}
-        onSwitchBranch={async (branchId, branchName) => {
-          try {
-            const persistedPatches = await patchService.loadPatches(branchId);
-            const patches = persistedPatches.map(p => p.payload);
-
-            store.switchToBranch(branchId, branchName, patches);
-            if (onSwitchBranch) {
-              onSwitchBranch(branchName);
-            }
-            // R3-3c: is this branch's working copy fresh against its git ref?
-            checkBranchFreshness(branchName);
-          } catch (error) {
-            showError('Failed to switch branch: ' + (error instanceof Error ? error.message : 'Unknown error'));
-          }
-        }}
-        onCreateBranch={handleCreateBranch}
-        onMergeBranch={handleRequestMerge}
-        onDeleteBranch={handleDeleteBranch}
-        availableBranches={availableBranchesFormatted}
-        primaryBranchName={primaryBranchName}
-        onGitIntegrationClosed={loadBranches}
+        availableBranches={availableBranches}
+        onGitIntegrationClosed={() => { loadBranches(); loadGitIntegration(); }}
         openGitIntegration={showGitModal}
         onGitIntegrationOpened={() => setShowGitModal(false)}
-        onModelRestored={refreshGraph}
         onArchiveBranch={handleArchiveBranch}
         featureGate={gate}
         onProjectRenamed={onRenameProject}
@@ -1610,8 +1589,14 @@ function GraphEditorInner({
         pendingGitChanges={pendingGitChanges}
         gitDefaultBranch={gitDefaultBranch}
         pendingProposals={pendingProposalCount}
-        onOpenChanges={() => setChangesPanelOpen(true)}
+        onOpenChanges={() => openAgents()}
+        onOpenConnected={() => openAgents('connected')}
+        onOpenTeam={() => setTeamOpen(true)}
+        teamBelowPlan={teamBelowPlan}
       />
+      {teamOpen && projectId && (
+        <TeamPopup projectId={projectId} projectName={projectName || undefined} onClose={() => { setTeamOpen(false); setTeamCheck((n) => n + 1); }} example={!!gate.example} viewOnly={!!gate.viewOnly?.('team_lanes')} belowPlan={teamBelowPlan} />
+      )}
       <div style={mainStyles}>
         <TabbedSidebar
           graph={derivedGraph}
@@ -1635,10 +1620,10 @@ function GraphEditorInner({
               display: 'flex',
               position: 'relative',
               // Owner bug 2026-09-01: a flex item's min-height is AUTO, so tall
-              // intrinsic content (the Work Board with long requirements) grew
+              // intrinsic content (proven on the since-retired Work Board) grew
               // this wrapper past the overflow-hidden ancestor — clipped, no
               // scrollbar anywhere. min-height: 0 lets the chain bound it so
-              // the board's own overflowY: auto region actually scrolls.
+              // scrollable panes (V3: the ideation modes) actually scroll.
               // Monaco/ReactFlow never exposed this (no intrinsic height).
               minHeight: 0,
               opacity: isRefreshing ? 0.5 : 1,
@@ -1648,6 +1633,17 @@ function GraphEditorInner({
           >
             <Canvas
               graph={derivedGraph}
+              leases={leases}
+              changeScope={shownScope}
+              changeLine={activeChange ? (
+                <ChangeScopeLine
+                  changes={changeBoard.changes}
+                  activeId={activeChange.id}
+                  scopeOn={!!shownScope}
+                  onPick={(id) => setActiveChangeId(id)}
+                  onToggleScope={() => setChangeScopeOn((on) => !on)}
+                />
+              ) : null}
               onPatchesGenerated={handlePatchesGenerated}
               onWarning={handleWarning}
               onError={handleError}
@@ -1663,50 +1659,94 @@ function GraphEditorInner({
               onEditSpecification={handleUpdateCurrentSpecification}
               isRefreshing={isRefreshing}
               refreshCounter={refreshCounter}
+              specSignal={specSignal}
               onNodeExport={handleNodeExport}
-              workflowOrigin={projectWorkflowOrigin}
+              onOpenFile={handleRepoFileSelect}
               criteriaByNodeId={criteriaByNodeId}
               testSummaryByNodeId={testSummaryByNodeId}
-              testRefreshCounter={testRefreshCounter}
               onExportProject={handleExportProject}
-              specRealtimeData={specRealtimeData}
-              projectName={projectName || undefined}
-              testSuiteData={cachedTestSuite}
-              onSpecDirtyChange={handleSpecDirtyChange}
+              onOpenChanges={(focusProposalId?: string) => { setChangesFocusProposal(focusProposalId ?? null); openAgents(); }}
               branchId={branchId}
-              onSpecImportComplete={() => {
-                setViewMode('decomposition');
-                refreshGraph();
-              }}
+              onOpenArchitecture={(nodeId) => { handleViewModeChange('architecture'); handleNodeSelect(nodeId); }}
+              workFocus={workFocus}
             />
           </div>
+          {/* Owner spike 2026-09-04: the in-canvas start card and the staging
+              window float over the canvas — no overlay, nothing blocked. */}
+          {startCardShows({
+            projectId, walkthroughOpen: showOnboarding, creatingProject: showProjectCreate, stagingSpec: showSpecStaging,
+            dismissed: startDismissed, loading: specRealtimeData.loading, vision: specRealtimeData.specification?.vision,
+            requirements: specRealtimeData.requirements.length, nodes: Object.keys(derivedGraph.nodes).length,
+          }) && (
+            <ProjectStartPopup
+              projectName={projectName || ''}
+              stagedSpec={stagedSpec}
+              workflowOrigin={projectWorkflowOrigin}
+              onStartNew={() => stampWorkflowOrigin('idea')}
+              onImportSpecification={() => setShowSpecStaging(true)}
+              onDismiss={() => setStartDismissed(true)}
+              canImportRepository={!gate.loading && gate.can('repo_import') && !gate.viewOnly?.('repo_import')}
+              connectedRepository={connectedRepo}
+              onImportRepository={() => stampWorkflowOrigin('code')}
+              onConnectRepository={() => setShowGitModal(true)}
+            />
+          )}
+          {projectId && askImportIntent && !showSpecStaging && (
+            <ImportIntentPopup
+              projectName={projectName || ''}
+              onAnswer={handleImportIntent}
+              onClose={() => setAskImportIntent(false)}
+            />
+          )}
+          {projectId && showSpecStaging && (
+            <SpecImportStagingPopup
+              projectName={projectName || ''}
+              staged={stagedSpec}
+              onStage={handleStageSpec}
+              onClear={handleClearStagedSpec}
+              onClose={() => setShowSpecStaging(false)}
+            />
+          )}
+          {showProjectCreate && onCreateProject && (
+            <ProjectCreatePopup
+              onConfirm={({ name }: ProjectCreateResult) => {
+                setShowProjectCreate(false);
+                onCreateProject(name, {});
+              }}
+              onClose={() => setShowProjectCreate(false)}
+            />
+          )}
           {/* N6.2(c) rev 2: the permanent Changes home — always mounted (polls for
               the header badge), renders the docked two-tab sheet only when opened. */}
           {projectId && (
             <ChangesPanel
               isOpen={changesPanelOpen && !activeProposal && !importProposal}
-              onClose={() => setChangesPanelOpen(false)}
+              onClose={() => { setChangesPanelOpen(false); setChangesFocusProposal(null); }}
               projectId={projectId}
               branchId={branchId ?? null}
-              branchName={branchName || 'main'}
+              branchName={gitBranchName ?? undefined}
               hasGitIntegration={hasGitIntegration}
               graph={derivedGraph}
               refreshCounter={refreshCounter}
-              autoApprove={{ enabled: autoApproveProposals, onToggle: handleToggleAutoApprove }}
               onReviewProposal={handleReviewProposal}
               onPendingCountChange={handlePendingCountChange}
               onOpenGitPanel={() => setShowGitModal(true)}
-              onModelRestored={refreshGraph}
+              focusProposalId={changesFocusProposal}
+              onSpecDecided={() => { void refreshGraph(); }}
+              onOpenArchitecture={(nodeId) => { setChangesPanelOpen(false); setChangesFocusProposal(null); handleViewModeChange('architecture'); if (nodeId) handleNodeSelect(nodeId); }}
+              onOpenWork={openWork}
+              openOn={agentsOpenOn}
             />
           )}
         </div>
         {projectId && (
           <NodeSidepane
+            projectId={projectId}
+            branchId={branchId}
             selectedNodeId={selectedNodeId}
             selectedEdgeId={selectedEdgeId}
             graph={derivedGraph}
             onPatchGenerated={handlePatchGenerated}
-            onPatchesGenerated={handlePatchesGenerated}
             tab={sidepaneTab}
             onTabChange={(t) => {
               setSidepaneTab(t);
@@ -1714,81 +1754,30 @@ function GraphEditorInner({
             }}
             focusArtifactId={workbenchInitialArtifactId}
             onLoadFromRepo={handleLoadArtifactFromRepo}
+            onOpenWork={openWork}
+            onOpenChanges={() => openAgents()}
+            stagedExplodes={stagedExplodes}
+            onRequestExplode={handleRequestExplode}
+            onWithdrawExplode={handleWithdrawExplode}
           />
         )}
       </div>
       <ToastContainer messages={messages} onDismiss={dismissToast} />
-      {/* R3-3b merge dialog: PR is the default vehicle; direct merge is the explicit
-          secondary. Modal is right here — it is a blocking decision, not a review. */}
-      {mergeDialog && (
-        <div style={{
-          position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.45)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10005,
-        }}>
-          <div style={{
-            width: 'min(440px, 92vw)', backgroundColor: '#ffffff', borderRadius: '12px',
-            boxShadow: '0 16px 48px rgba(0,0,0,0.3)', padding: '20px', color: '#111827',
-          }}>
-            <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: '8px' }}>
-              Merge "{branchName}" into main
-            </div>
-            <div style={{ fontSize: '12.5px', color: '#4b5563', lineHeight: 1.55, marginBottom: '16px' }}>
-              A design merge is a git merge. Your branch's latest state will be committed to its
-              git ref first, then:
-            </div>
-            <button
-              disabled={mergeDialog.busy !== null}
-              onClick={() => runMerge('pr')}
-              style={{
-                width: '100%', padding: '10px 14px', marginBottom: '8px', textAlign: 'left',
-                backgroundColor: '#2563eb', color: '#fff', border: 'none', borderRadius: '8px',
-                cursor: mergeDialog.busy ? 'wait' : 'pointer', opacity: mergeDialog.busy && mergeDialog.busy !== 'pr' ? 0.5 : 1,
-              }}
-            >
-              <div style={{ fontSize: '13px', fontWeight: 600 }}>
-                {mergeDialog.busy === 'pr' ? 'Opening pull request…' : 'Open Pull Request (recommended)'}
-              </div>
-              <div style={{ fontSize: '11.5px', opacity: 0.85, marginTop: '2px' }}>
-                Review the design change where code review happens — main updates when the PR merges.
-              </div>
-            </button>
-            <button
-              disabled={mergeDialog.busy !== null}
-              onClick={() => runMerge('direct')}
-              style={{
-                width: '100%', padding: '10px 14px', marginBottom: '12px', textAlign: 'left',
-                backgroundColor: '#ffffff', color: '#111827', border: '1px solid #d1d5db', borderRadius: '8px',
-                cursor: mergeDialog.busy ? 'wait' : 'pointer', opacity: mergeDialog.busy && mergeDialog.busy !== 'direct' ? 0.5 : 1,
-              }}
-            >
-              <div style={{ fontSize: '13px', fontWeight: 600 }}>
-                {mergeDialog.busy === 'direct' ? 'Merging…' : 'Merge directly (no PR)'}
-              </div>
-              <div style={{ fontSize: '11.5px', color: '#6b7280', marginTop: '2px' }}>
-                Creates a real merge commit in git immediately. A conflict is resolved in git, never here.
-              </div>
-            </button>
-            <button
-              disabled={mergeDialog.busy !== null}
-              onClick={() => setMergeDialog(null)}
-              style={{
-                width: '100%', padding: '8px', backgroundColor: 'transparent', color: '#6b7280',
-                border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12.5px',
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
+      {showOnboarding && (
+        <OnboardingModal
+          onClose={handleCloseOnboarding}
+          firstRun={hasSeenOnboarding === false}
+          featureGate={gate}
+          onSurface={handleWalkthroughSurface}
+          onCreateProject={onCreateProject ? handleWalkthroughCreateProject : undefined}
+        />
       )}
-      {showOnboarding && <OnboardingModal onClose={handleCloseOnboarding} gateOnMcp={hasSeenOnboarding === false} />}
       {/* Owner UX ruling 2026-08-12: import review is a ChangesPanel-style side
           panel — summary card + bulk apply, theme-aware, canvas stays visible. */}
       {importProposal && (
         <ImportReviewPanel
           proposal={importProposal}
           graph={storeState.derivedGraph}
-          targetBranch={{ id: branchId || '', name: branchName || 'main', baseSnapshotId: '', patches: [], createdAt: '' }}
           onMerge={handleImportProposalMerge}
           onReject={handleImportProposalReject}
           onClose={() => setImportProposal(null)}
@@ -1864,30 +1853,20 @@ function GraphEditorInner({
             onSwitchProject?.(id);
           }}
           onCreateProject={() => {
-            if (requireFeature('unlimited_projects')) {
-              setShowProjectExplorer(false);
-              if (hasSeenOnboarding === false) {
-                setPendingProjectCreateAfterOnboarding(true);
-                setShowOnboarding(true);
-              } else {
-                setShowProjectCreate(true);
-              }
+            // The dialog calls this only under the plan's project cap
+            // (owner 2026-09-28: free on a self-hosted build, capped on the
+            // managed site's Free plan); the database refuses past it too.
+            setShowProjectExplorer(false);
+            if (hasSeenOnboarding === false) {
+              setPendingProjectCreateAfterOnboarding(true);
+              setShowOnboarding(true);
+            } else {
+              setShowProjectCreate(true);
             }
           }}
           onDeleteCurrentProject={onDeleteCurrentProject}
           onClose={() => setShowProjectExplorer(false)}
           featureGate={gate}
-        />
-      )}
-      {showProjectCreate && onCreateProject && (
-        <ProjectOnboardingWizard
-          onConfirm={({ name, workflowOrigin }: OnboardingResult) => {
-            setShowProjectCreate(false);
-            const metadata = { workflowOrigin };
-            onCreateProject(name, metadata);
-            setPendingWorkflow(workflowOrigin);
-          }}
-          onClose={() => setShowProjectCreate(false)}
         />
       )}
       {nodeExportContext && (
@@ -1902,7 +1881,6 @@ function GraphEditorInner({
         <ProjectExportModal
           data={projectExportData}
           onClose={() => setProjectExportData(null)}
-          featureGate={gate}
           hasGitIntegration={hasGitIntegration}
           onPushToGit={() => { setProjectExportData(null); setShowGitModal(true); }}
           onPublishToMarketplace={isHostedEdition && projectId

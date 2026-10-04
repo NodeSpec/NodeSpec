@@ -73,7 +73,7 @@ function role(id: string, over: Record<string, unknown> = {}) {
     rfVisualType: 'service', paletteCategory: 'Services', paletteCategoryLabel: 'Services',
     nature: 'build', interfaceKind: 'service', provider: null, capabilityTags: [],
     isContainer: false, containerLayer: null, containerStyle: null, canContain: [],
-    metadataSchema: null, defaultPorts: [], suggestedContracts: [], sortOrder: 1,
+    metadataSchema: null, suggestedContracts: [], sortOrder: 1,
     deprecated: false, defaultTechnology: null,
     ...over,
   };

@@ -8,6 +8,9 @@
 // handle id binds to the first handle of the right type, while port-bound edges
 // keep anchoring to their id'd port handles. isConnectable=false keeps users from
 // dragging new connections out of an invisible dot.
+// AG.13 (owner 2026-09-28): ports came out of the model. Leaves now draw
+// LeafHandles; these remain where nothing may be connected by hand: containers
+// (AG.14, an edge ends on the node inside) and a data store's table groups.
 import { Handle, Position } from '@xyflow/react';
 
 const baseStyle: React.CSSProperties = {

@@ -1,38 +1,19 @@
-import type { Port, ContractKind, InteractionKind, TransportKind, SpecFormat, EntityStatus, Node } from './types.js';
+import type { EntityStatus, Node } from './types.js';
 import { getNodeTypeDomains, type DomainNodeType } from './node-types.js';
 import type { ProgrammingLanguage, NodeDomainMetadata, WebServiceMetadata, FrontendMetadata, AuthServiceMetadata, CacheMetadata, DatabaseMetadata, ManagedServiceMetadata } from './node-metadata.js';
 import { getNodeTypeById } from './node-types.js';
 import { generateLanguageSpecificArtifacts, mergeArtifactPlaceholders, type LanguageTemplateContext } from './language-templates.js';
 import { generateContainerArtifacts, type ContainerArtifactContext } from './container-artifact-templates.js';
 import { getContainerTypeById } from './container-types.js';
-import { resolveContractFields } from './interaction-resolution.js';
 
 export interface NodeTemplate {
   id: string;
   name: string;
   description: string;
   nodeType: string;
-  defaultPorts: PortTemplate[];
-  defaultContracts: ContractTemplate[];
   artifactPlaceholders: ArtifactPlaceholder[];
   defaultData?: Record<string, unknown>;
   accentColor: string;
-}
-
-export interface PortTemplate {
-  name: string;
-  direction: 'in' | 'out';
-  required?: boolean;
-  schemaRef?: string;
-}
-
-export interface ContractTemplate {
-  kind: ContractKind;
-  name: string;
-  portDirection: 'in' | 'out';
-  interactionKind?: InteractionKind;
-  transport?: TransportKind;
-  specFormat?: SpecFormat;
 }
 
 export interface ArtifactPlaceholder {
@@ -1049,43 +1030,6 @@ function generateArtifactPlaceholders(nodeType: DomainNodeType): ArtifactPlaceho
   }
 }
 
-function generateContractTemplates(nodeType: DomainNodeType): ContractTemplate[] {
-  if (!nodeType.suggestedContracts || nodeType.suggestedContracts.length === 0) {
-    return [];
-  }
-
-  const contracts: ContractTemplate[] = [];
-  const hasInPort = nodeType.defaultPorts?.some(p => p.direction === 'in');
-  const hasOutPort = nodeType.defaultPorts?.some(p => p.direction === 'out');
-
-  for (const rawKind of nodeType.suggestedContracts) {
-    const resolved = resolveContractFields(rawKind);
-
-    if (hasInPort) {
-      contracts.push({
-        kind: resolved.kind,
-        name: `${resolved.kind.toUpperCase()} In`,
-        portDirection: 'in',
-        interactionKind: resolved.interactionKind,
-        transport: resolved.transport,
-        specFormat: resolved.specFormat,
-      });
-    }
-    if (hasOutPort && contracts.length === 0) {
-      contracts.push({
-        kind: resolved.kind,
-        name: `${resolved.kind.toUpperCase()} Out`,
-        portDirection: 'out',
-        interactionKind: resolved.interactionKind,
-        transport: resolved.transport,
-        specFormat: resolved.specFormat,
-      });
-    }
-  }
-
-  return contracts;
-}
-
 function generateTemplatesFromNodeTypes(): NodeTemplate[] {
   const templates: NodeTemplate[] = [];
 
@@ -1097,8 +1041,6 @@ function generateTemplatesFromNodeTypes(): NodeTemplate[] {
         description: nodeType.description,
         nodeType: nodeType.id,
         accentColor: nodeType.color,
-        defaultPorts: nodeType.defaultPorts || [],
-        defaultContracts: generateContractTemplates(nodeType),
         artifactPlaceholders: generateArtifactPlaceholders(nodeType),
         defaultData: {
           domain: nodeType.domain,
@@ -1173,7 +1115,7 @@ export interface CompletenessRequirement {
 }
 
 export function getNodeCompletenessRequirements(
-  node: { type: string; label: string; ports?: Port[]; artifacts?: string[]; data?: Record<string, unknown>; status?: EntityStatus },
+  node: { type: string; label: string; artifacts?: string[]; data?: Record<string, unknown>; status?: EntityStatus },
   artifactCount: number
 ): CompletenessRequirement[] {
   const requirements: CompletenessRequirement[] = [];
@@ -1187,31 +1129,6 @@ export function getNodeCompletenessRequirements(
   const template = getTemplateByNodeType(node.type);
 
   if (template) {
-    const requiredInPorts = template.defaultPorts.filter(p => p.direction === 'in' && p.required);
-    const requiredOutPorts = template.defaultPorts.filter(p => p.direction === 'out' && p.required);
-
-    const nodePorts = node.ports ?? [];
-    const hasRequiredInPorts = requiredInPorts.length === 0 ||
-      nodePorts.some(p => p.direction === 'in');
-    const hasRequiredOutPorts = requiredOutPorts.length === 0 ||
-      nodePorts.some(p => p.direction === 'out');
-
-    if (requiredInPorts.length > 0) {
-      requirements.push({
-        field: 'ports.in',
-        description: 'Required input port must be configured',
-        isMet: hasRequiredInPorts,
-      });
-    }
-
-    if (requiredOutPorts.length > 0) {
-      requirements.push({
-        field: 'ports.out',
-        description: 'Required output port must be configured',
-        isMet: hasRequiredOutPorts,
-      });
-    }
-
     const minArtifacts = Math.min(1, template.artifactPlaceholders.length);
     requirements.push({
       field: 'artifacts',
@@ -1224,7 +1141,7 @@ export function getNodeCompletenessRequirements(
 }
 
 export function isNodeComplete(
-  node: { type: string; label: string; ports?: Port[]; artifacts?: string[]; data?: Record<string, unknown>; status?: EntityStatus },
+  node: { type: string; label: string; artifacts?: string[]; data?: Record<string, unknown>; status?: EntityStatus },
   artifactCount: number
 ): boolean {
   const requirements = getNodeCompletenessRequirements(node, artifactCount);

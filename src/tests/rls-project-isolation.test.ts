@@ -394,7 +394,6 @@ describe('RLS Project Isolation', () => {
         'specification_sections',
         'project_specifications',
         'branches',
-        'code_structures',
         'test_cases',
       ];
 
@@ -414,9 +413,6 @@ describe('RLS Project Isolation', () => {
         'specification_requirements',
         'specification_sections',
         'specification_mappings',
-        'code_structures',
-        'conversation_history',
-        'generation_events',
         'git_sync_log',
       ];
 
@@ -424,8 +420,11 @@ describe('RLS Project Isolation', () => {
       // (20260625145327_drop_specification_features.sql removed the whole
       // Features domain, including its project-scoped INSERT policy); 12 since
       // N11(a) dropped architecture_generation_results, detected_dependencies
-      // and recent_changes with their policies (20260809170000).
-      expect(tablesWithProjectScope.length).toBe(12);
+      // and recent_changes with their policies (20260809170000); 10 since
+      // V3(a) dropped code_structures and conversation_history
+      // (20260913150000); 9 since AH.2 dropped generation_events
+      // (20260929120000).
+      expect(tablesWithProjectScope.length).toBe(9);
     });
 
     it('service_role should bypass RLS for edge function operations', () => {
@@ -435,10 +434,6 @@ describe('RLS Project Isolation', () => {
         'graph_snapshots',
         'artifacts',
         'branches',
-        'generation_events',
-        'token_usage',
-        'conversation_history',
-        'code_structures',
         'project_specifications',
         'specification_requirements',
         'specification_sections',
@@ -456,8 +451,11 @@ describe('RLS Project Isolation', () => {
       // The RLS audit migration (20260219034141) created 25 service-role
       // policies; specification_features was later dropped along with its
       // policies (20260625145327), leaving 24; N11(a) dropped the three dead
-      // tables' policies with their tables (20260809170000), leaving 21.
-      expect(tablesNeedingServiceRole.length).toBe(21);
+      // tables' policies with their tables (20260809170000), leaving 21;
+      // V3(a) dropped conversation_history and code_structures with theirs
+      // (20260913150000), leaving 19; AH.2 dropped generation_events and
+      // token_usage (20260929120000), leaving 17.
+      expect(tablesNeedingServiceRole.length).toBe(17);
     });
   });
 });

@@ -4,8 +4,6 @@ import './fixtures/legacy-node-type-fixture.js';
 import { describe, it, expect } from 'vitest';
 import {
   buildUpdateNodePatch,
-  buildAddPortPatch,
-  buildConnectPortsPatch,
   buildAddNodePatch,
   buildRemoveNodePatch,
   buildRemoveEdgePatch,
@@ -16,8 +14,6 @@ import {
 import { PatchOperationSchema } from '@nodespec/core/schemas.js';
 import type {
   UpdateNodePatch,
-  AddPortPatch,
-  ConnectPortsPatch,
   AddNodePatch,
   RemoveNodePatch,
   RemoveEdgePatch,
@@ -27,8 +23,6 @@ import type {
 
 const VALID_NODE_ID = '11111111-1111-4111-8111-111111111111';
 const VALID_NODE_ID_2 = '22222222-2222-4222-8222-222222222222';
-const VALID_PORT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-const VALID_PORT_ID_2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const VALID_CONTRACT_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const VALID_EDGE_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 
@@ -102,146 +96,6 @@ describe('Patch Builders', () => {
     });
   });
 
-  describe('buildAddPortPatch', () => {
-    it('should create a valid add_port patch', () => {
-      const patch = buildAddPortPatch({
-        nodeId: VALID_NODE_ID,
-        port: {
-          name: 'data-in',
-          direction: 'in',
-        },
-        actor: 'human',
-        summary: 'Add input port',
-      }) as AddPortPatch;
-
-      expect(patch.type).toBe('add_port');
-      expect(patch.payload.nodeId).toBe(VALID_NODE_ID);
-      expect(patch.payload.port.name).toBe('data-in');
-      expect(patch.payload.port.direction).toBe('in');
-      expect(patch.payload.port.id).toBeDefined();
-
-      const validation = PatchOperationSchema.safeParse(patch);
-      expect(validation.success).toBe(true);
-    });
-
-    it('should use provided port id', () => {
-      const patch = buildAddPortPatch({
-        nodeId: VALID_NODE_ID,
-        port: {
-          id: VALID_PORT_ID,
-          name: 'custom-port',
-          direction: 'out',
-        },
-        actor: 'human',
-        summary: 'Add port',
-      }) as AddPortPatch;
-
-      expect(patch.payload.port.id).toBe(VALID_PORT_ID);
-    });
-
-    it('should reject invalid direction', () => {
-      expect(() =>
-        buildAddPortPatch({
-          nodeId: VALID_NODE_ID,
-          port: {
-            name: 'test',
-            direction: 'invalid' as 'in',
-          },
-          actor: 'human',
-          summary: 'Test',
-        })
-      ).toThrow(PatchBuilderError);
-    });
-
-    it('should reject empty port name', () => {
-      expect(() =>
-        buildAddPortPatch({
-          nodeId: VALID_NODE_ID,
-          port: {
-            name: '',
-            direction: 'in',
-          },
-          actor: 'human',
-          summary: 'Test',
-        })
-      ).toThrow(PatchBuilderError);
-    });
-  });
-
-  describe('buildConnectPortsPatch', () => {
-    it('should create a valid connect_ports patch with new contract', () => {
-      const patch = buildConnectPortsPatch({
-        sourceNodeId: VALID_NODE_ID,
-        sourcePortId: VALID_PORT_ID,
-        targetNodeId: VALID_NODE_ID_2,
-        targetPortId: VALID_PORT_ID_2,
-        contract: {
-          kind: 'sql',
-          name: 'Test Connection',
-        },
-        label: 'Connection Label',
-        actor: 'human',
-        summary: 'Connect nodes',
-      }) as ConnectPortsPatch;
-
-      expect(patch.type).toBe('connect_ports');
-      expect(patch.payload.sourceNodeId).toBe(VALID_NODE_ID);
-      expect(patch.payload.sourcePortId).toBe(VALID_PORT_ID);
-      expect(patch.payload.targetNodeId).toBe(VALID_NODE_ID_2);
-      expect(patch.payload.targetPortId).toBe(VALID_PORT_ID_2);
-      expect(patch.payload.contract).toBeDefined();
-      expect(patch.payload.contract?.name).toBe('Test Connection');
-
-      const validation = PatchOperationSchema.safeParse(patch);
-      expect(validation.success).toBe(true);
-    });
-
-    it('should create patch with existing contract reference', () => {
-      const patch = buildConnectPortsPatch({
-        sourceNodeId: VALID_NODE_ID,
-        sourcePortId: VALID_PORT_ID,
-        targetNodeId: VALID_NODE_ID_2,
-        targetPortId: VALID_PORT_ID_2,
-        existingContractId: VALID_CONTRACT_ID,
-        actor: 'human',
-        summary: 'Connect using existing contract',
-      }) as ConnectPortsPatch;
-
-      expect(patch.payload.contractId).toBe(VALID_CONTRACT_ID);
-      expect(patch.payload.contract).toBeUndefined();
-
-      const validation = PatchOperationSchema.safeParse(patch);
-      expect(validation.success).toBe(true);
-    });
-
-    it('should reject missing contract info', () => {
-      expect(() =>
-        buildConnectPortsPatch({
-          sourceNodeId: VALID_NODE_ID,
-          sourcePortId: VALID_PORT_ID,
-          targetNodeId: VALID_NODE_ID_2,
-          targetPortId: VALID_PORT_ID_2,
-          actor: 'human',
-          summary: 'Test',
-        })
-      ).toThrow(PatchBuilderError);
-    });
-
-    it('should reject invalid port IDs', () => {
-      expect(() =>
-        buildConnectPortsPatch({
-          sourceNodeId: VALID_NODE_ID,
-          sourcePortId: 'invalid',
-          targetNodeId: VALID_NODE_ID_2,
-          targetPortId: VALID_PORT_ID_2,
-          existingContractId: VALID_CONTRACT_ID,
-          actor: 'human',
-          summary: 'Test',
-        })
-      ).toThrow(PatchBuilderError);
-    });
-  });
-
   describe('buildAddNodePatch', () => {
     it('should create a valid add_node patch', () => {
       const patch = buildAddNodePatch({
@@ -289,61 +143,15 @@ describe('Patch Builders', () => {
       ).toThrow(PatchBuilderError);
     });
 
-    it('should auto-populate ports from template for known node types', () => {
+    it('writes no ports, whatever the node type (AG.13)', () => {
       const patch = buildAddNodePatch({
-        node: {
-          type: 'web.rest-api',
-          label: 'My API',
-        },
+        node: { type: 'web.rest-api', label: 'My API' },
         actor: 'human',
         summary: 'Add REST API node',
       }) as AddNodePatch;
 
-      expect(patch.payload.ports).toBeDefined();
-      expect(patch.payload.ports!.length).toBe(2);
-      expect(patch.payload.ports!.find((p: any) => p.name === 'HTTP In')).toBeDefined();
-      expect(patch.payload.ports!.find((p: any) => p.name === 'HTTP Out')).toBeDefined();
-      expect(patch.payload.ports!.find((p: any) => p.name === 'HTTP In')!.direction).toBe('in');
-      expect(patch.payload.ports!.find((p: any) => p.name === 'HTTP Out')!.direction).toBe('out');
-
-      const validation = PatchOperationSchema.safeParse(patch);
-      expect(validation.success).toBe(true);
-    });
-
-    it('should preserve explicit ports when provided', () => {
-      const customPort = {
-        id: VALID_PORT_ID,
-        name: 'Custom Input',
-        direction: 'in' as const,
-      };
-
-      const patch = buildAddNodePatch({
-        node: {
-          type: 'web.rest-api',
-          label: 'My API',
-          ports: [customPort],
-        },
-        actor: 'human',
-        summary: 'Add REST API node with custom ports',
-      }) as AddNodePatch;
-
-      expect(patch.payload.ports).toBeDefined();
-      expect(patch.payload.ports!.length).toBe(1);
-      expect(patch.payload.ports![0].name).toBe('Custom Input');
-      expect(patch.payload.ports![0].id).toBe(VALID_PORT_ID);
-    });
-
-    it('should not add ports for unknown node types without explicit ports', () => {
-      const patch = buildAddNodePatch({
-        node: {
-          type: 'totally.unknown-thing',
-          label: 'Mystery Node',
-        },
-        actor: 'human',
-        summary: 'Add unknown node',
-      }) as AddNodePatch;
-
-      expect(patch.payload.ports).toBeUndefined();
+      expect(patch.payload).not.toHaveProperty('ports');
+      expect(PatchOperationSchema.safeParse(patch).success).toBe(true);
     });
   });
 
@@ -445,21 +253,15 @@ describe('Patch Builders', () => {
       expect(validation.success).toBe(true);
     });
 
-    it('should include port IDs when provided', () => {
+    it('writes no port ids (AG.13)', () => {
       const patch = buildAddEdgePatch({
-        edge: {
-          source: VALID_NODE_ID,
-          target: VALID_NODE_ID_2,
-          sourcePortId: VALID_PORT_ID,
-          targetPortId: VALID_PORT_ID_2,
-          contractId: VALID_CONTRACT_ID,
-        },
+        edge: { source: VALID_NODE_ID, target: VALID_NODE_ID_2, contractId: VALID_CONTRACT_ID },
         actor: 'human',
-        summary: 'Add edge with ports',
+        summary: 'Add edge',
       }) as AddEdgePatch;
 
-      expect(patch.payload.sourcePortId).toBe(VALID_PORT_ID);
-      expect(patch.payload.targetPortId).toBe(VALID_PORT_ID_2);
+      expect(patch.payload).not.toHaveProperty('sourcePortId');
+      expect(patch.payload).not.toHaveProperty('targetPortId');
     });
   });
 
@@ -471,29 +273,6 @@ describe('Patch Builders', () => {
           buildUpdateNodePatch({
             nodeId: VALID_NODE_ID,
             updates: { label: 'Test' },
-            actor: 'human',
-            summary: 'Test',
-          }),
-      },
-      {
-        name: 'add_port',
-        builder: () =>
-          buildAddPortPatch({
-            nodeId: VALID_NODE_ID,
-            port: { name: 'test', direction: 'in' },
-            actor: 'human',
-            summary: 'Test',
-          }),
-      },
-      {
-        name: 'connect_ports',
-        builder: () =>
-          buildConnectPortsPatch({
-            sourceNodeId: VALID_NODE_ID,
-            sourcePortId: VALID_PORT_ID,
-            targetNodeId: VALID_NODE_ID_2,
-            targetPortId: VALID_PORT_ID_2,
-            contract: { kind: 'sql', name: 'Test' },
             actor: 'human',
             summary: 'Test',
           }),

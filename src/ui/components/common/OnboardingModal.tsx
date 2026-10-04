@@ -1,364 +1,282 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { useTheme } from '../../theme/ThemeContext.js';
-import { MCPConnectStep } from './MCPConnectStep.js';
+import { useMcpConnection } from '../../hooks/useMcpConnection.js';
+import { buildEdition } from '../../config/edition.js';
+import { connectLaneFor } from './agent-connect.js';
+import { mcpServerUrl } from '../../services/agent-connections.js';
+import type { FeatureGate } from '../../hooks/useFeatureGate.js';
 import type { ThemeColors } from '../../theme/index.js';
 import {
-  GitBranch, ChevronRight, FileUp, ListChecks, Network, Bot,
-  Lightbulb, FileText, Code, FlaskConical, GitCommitHorizontal, MousePointerClick,
+  ChevronRight, ListChecks, Network, Lightbulb, FileText, Code, FlaskConical, GitCommitHorizontal,
 } from 'lucide-react';
+import {
+  walkthroughStops, placeCard, WALKTHROUGH_LOOP,
+  type Rect, type WalkthroughItem, type WalkthroughSurface,
+} from './walkthrough.js';
 
-// Owner walkthrough ruling 2026-08-13 (amended 2026-08-29): five steps, MCP
-// connection FIRST but never a gate — the 2026-08-11 hold-until-connected
-// behavior trapped users who wanted to look around first, so every step now
-// navigates freely and connecting stays encouraged, not enforced.
-//   1. Connect your AI (skippable; the header spotlight shows where it lives)
-//   2. Connect a repository (recommended) — or document export + git later
-//   3. The loop: vision → requirements → architecture → tasks → code →
-//      tests → git provenance
-//   4. Build it your way: by hand on the canvas, or through your AI over MCP
-//   5. Know your header — each header control spotlighted and explained
-// The spotlight is a true CUTOUT: the dimming layer is a giant box-shadow
-// around the ring, so the highlighted control stays at full brightness
-// instead of fading behind the backdrop (owner bug 2026-08-29).
+// The walkthrough (owner 2026-09-30, over the 2026-08-13 five-step modal):
+// one tour of the whole product in the order a project runs. The welcome,
+// the AI connection and the start are cards in the middle of the window;
+// every other stop switches the app to the surface it explains (Work and its
+// tabs, Architecture) and spotlights the real control, with the card beside
+// it. The stops come from walkthrough.ts, filtered by the project's plan, so
+// nothing a plan does not carry is ever described. Connecting stays first
+// and never blocks (owner 2026-08-29). The spotlight is a cutout: the dim is
+// the ring's giant shadow, so the control itself stays at full brightness.
+//
+// AK.2 (owner 2026-10-01): connecting one agent and setting what it may do
+// come right after the welcome, in the Agents panel itself (Connected, then
+// Autonomy). Those stops are interactive: clicks reach the panel, the card
+// says when the agent has called, and typing in the panel never moves the
+// tour.
 
 interface OnboardingModalProps {
   onClose: () => void;
-  /** First-run mode: nudges copy (final CTA) — no step ever blocks. */
-  gateOnMcp?: boolean;
+  /** A new account's first run: the last button starts the project. */
+  firstRun?: boolean;
+  /** The project's plan (decision 1). Absent or loading: only what every plan carries. */
+  featureGate?: FeatureGate;
+  /** Switch the app to the surface a stop explains. */
+  onSurface?: (surface: WalkthroughSurface) => void;
+  /** AJ.6: over the account's example, the last button starts the account's
+   *  own project (skipping, Escape and the close button only close). */
+  onCreateProject?: () => void;
 }
 
-// Header tour targets (step 5). Anchored by [data-tour] attributes on the
-// live TopBar controls; items whose control is absent in this build (edition
-// gating, no repo connected) are filtered out at runtime.
-const HEADER_TOUR_ITEMS: Array<{ key: string; title: string; text: string }> = [
-  { key: 'mcp', title: 'MCP connection', text: 'Live status of your AI’s link — "MCP connected" the moment it works. Click it for connection instructions.' },
-  { key: 'skills', title: 'Skills', text: 'Instructions your AI reads to learn the NodeSpec workflow. Copy one into your assistant, or download it as a .md file.' },
-  { key: 'templates', title: 'Browse Templates', text: 'Start a project from a published architecture instead of a blank canvas.' },
-  { key: 'changes', title: 'Changes', text: 'Proposals from your AI wait here for your review — nothing applies itself.' },
-  { key: 'git', title: 'Git', text: 'Connect a repository: accepted changes commit with provenance, and outside commits surface as reviewable drift.' },
-  { key: 'notifications', title: 'Notifications', text: 'Proposal activity, test results, and sync events as they happen.' },
-  { key: 'account', title: 'Account', text: 'Your plan, profile, and integrations.' },
-  { key: 'help', title: 'Help', text: 'Terminology, guides — and this walkthrough, any time you want it back.' },
-];
+const CENTRED = new Set(['welcome', 'finish']);
+const CARD_WIDTH = 380;
+const LOOP_ICONS = [Lightbulb, ListChecks, Network, FileText, Code, FlaskConical, GitCommitHorizontal];
+const LOOP_TINTS = ['#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899', '#14b8a6', '#64748b'];
 
-export function OnboardingModal({ onClose, gateOnMcp = false }: OnboardingModalProps) {
+const anchorEl = (anchor: string) => document.querySelector(`[data-tour="${anchor}"]`);
+
+function rectOf(el: Element | null): Rect | null {
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 || r.height > 0 ? { top: r.top, left: r.left, width: r.width, height: r.height } : null;
+}
+
+export function OnboardingModal({ onClose, firstRun = false, featureGate, onSurface, onCreateProject }: OnboardingModalProps) {
   const { theme } = useTheme();
   const c = theme.colors;
   const isDark = theme.mode === 'dark';
-  const [currentStep, setCurrentStep] = useState(0);
-  const [mcpConnected, setMcpConnected] = useState(false);
-  // Header tour (step 5): which header control is currently spotlighted, and
-  // which controls exist in this build (edition gating trims some).
-  const [tourKey, setTourKey] = useState<string | null>(null);
-  const [tourItems, setTourItems] = useState<typeof HEADER_TOUR_ITEMS>([]);
-  const TOUR_STEP = 4;
+  const ready = !!featureGate && !featureGate.loading;
+  const can = (f: Parameters<FeatureGate['can']>[0]) => ready && featureGate!.can(f);
+  const example = ready && !!featureGate!.example;
+  const viewOnly = (f: Parameters<FeatureGate['can']>[0]) => example && !!featureGate!.viewOnly?.(f);
+  const stops = useMemo(
+    () => walkthroughStops({
+      workflows: can('workflow_space'), plan: can('priority_board'), repoImport: can('repo_import'), team: can('team_lanes'),
+      example,
+      viewOnly: { workflows: viewOnly('workflow_space'), plan: viewOnly('priority_board'), repoImport: viewOnly('repo_import'), team: viewOnly('team_lanes') },
+      connect: connectLaneFor(buildEdition, mcpServerUrl()),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ready, featureGate],
+  );
+  const [index, setIndex] = useState(0);
+  const stop = stops[Math.min(index, stops.length - 1)];
+  const last = index >= stops.length - 1;
+  // The connect stop says when the agent has called: the header's own
+  // evidence (has_mcp_connection), asked often while the person connects.
+  const mcp = useMcpConnection();
+  const mcpConnected = mcp.state === 'connected';
   useEffect(() => {
-    if (currentStep !== TOUR_STEP) { setTourKey(null); return; }
-    const available = HEADER_TOUR_ITEMS.filter((item) =>
-      document.querySelector(`[data-tour="${item.key}"]`));
-    setTourItems(available);
-    setTourKey(available[0]?.key ?? null);
-  }, [currentStep]);
+    if (stop.id !== 'connect' || mcpConnected) return;
+    const t = window.setInterval(mcp.refresh, 5000);
+    return () => window.clearInterval(t);
+  }, [stop.id, mcpConnected, mcp.refresh]);
 
-  // Header callout (owner 2026-08-14): while the MCP step or the header tour
-  // shows, spotlight the live header control so the user knows where the
-  // thing LIVES after the walkthrough closes. Measured from the real element;
-  // absent anchor (unexpected) simply renders no callout.
-  const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
+  // A list stop spotlights one of its controls at a time; controls this
+  // build does not draw drop out.
+  const [items, setItems] = useState<WalkthroughItem[]>([]);
+  const [itemAnchor, setItemAnchor] = useState<string | null>(null);
   useEffect(() => {
-    const selector = currentStep === 0
-      ? '#nodespec-mcp-header-anchor'
-      : currentStep === TOUR_STEP && tourKey
-        ? `[data-tour="${tourKey}"]`
-        : null;
-    if (!selector) { setAnchorRect(null); return; }
+    if (!stop.items) { setItems([]); setItemAnchor(null); return; }
+    const present = stop.items.filter((i) => anchorEl(i.anchor));
+    setItems(present);
+    setItemAnchor(present[0]?.anchor ?? null);
+  }, [stop]);
+
+  // Take the app to the stop's surface before spotlighting it.
+  const surfaceKey = stop.surface ? JSON.stringify(stop.surface) : '';
+  useEffect(() => {
+    if (stop.surface) onSurface?.(stop.surface);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stop.id, surfaceKey]);
+
+  // The anchor is measured until it settles: a surface the stop just opened
+  // (a lazily loaded tab) draws after this renders.
+  const anchor = stop.items ? itemAnchor : stop.anchor ?? null;
+  const [anchorRect, setAnchorRect] = useState<Rect | null>(null);
+  useEffect(() => {
+    if (!anchor) { setAnchorRect(null); return; }
     const measure = () => {
-      const el = document.querySelector(selector);
-      setAnchorRect(el ? el.getBoundingClientRect() : null);
+      const next = rectOf(anchorEl(anchor));
+      setAnchorRect((prev) => (prev && next && prev.top === next.top && prev.left === next.left && prev.width === next.width && prev.height === next.height ? prev : next));
     };
     measure();
+    const timer = window.setInterval(measure, 300);
     window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
-  }, [currentStep, tourKey]);
+    return () => { window.clearInterval(timer); window.removeEventListener('resize', measure); };
+  }, [anchor]);
 
-  const steps = [
-    {
-      title: 'Connect Your AI',
-      subtitle: 'One connection powers everything that follows',
-      content: <MCPConnectStep isDark={isDark} c={c as unknown as Record<string, string>} onConnectedChange={setMcpConnected} />,
-    },
-    {
-      title: 'Connect a Repository',
-      subtitle: 'Recommended — or export documents and add git later',
-      content: <StepRepoConnection isDark={isDark} c={c} />,
-    },
-    {
-      title: 'From Vision to Verified Code',
-      subtitle: 'The loop every project runs',
-      content: <StepTheLoop isDark={isDark} c={c} />,
-    },
-    {
-      title: 'Build It Your Way',
-      subtitle: 'By hand on the canvas, or through your AI',
-      content: <StepBuildYourWay isDark={isDark} c={c} />,
-    },
-    {
-      title: 'Know Your Header',
-      subtitle: 'Every control, spotlighted where it lives',
-      content: (
-        <StepHeaderTour
-          c={c}
-          items={tourItems}
-          activeKey={tourKey}
-          onSelect={setTourKey}
-        />
-      ),
-    },
-  ];
-
-  const step = steps[currentStep];
-  // No gate (owner amendment 2026-08-29): the old hold-until-connected
-  // behavior trapped first-run users behind the MCP step. Navigation is
-  // always free; connecting stays step 1 and stays encouraged.
-
+  // Over the example the last button is the account's own project.
+  const createsProject = example && !!onCreateProject;
+  const next = useCallback(() => {
+    if (!last) { setIndex((i) => i + 1); return; }
+    if (createsProject) onCreateProject!(); else onClose();
+  }, [last, onClose, createsProject, onCreateProject]);
+  const back = useCallback(() => setIndex((i) => Math.max(0, i - 1)), []);
   useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
+    const onKey = (e: KeyboardEvent) => {
+      // Typing in a panel the tour left open (a key's name) is not navigation.
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       if (e.key === 'Escape') onClose();
+      else if (e.key === 'ArrowRight') next();
+      else if (e.key === 'ArrowLeft') back();
     };
-    window.addEventListener('keydown', handleEscape);
-    return () => window.removeEventListener('keydown', handleEscape);
-  }, [onClose]);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose, next, back]);
 
-  const handleNext = () => {
-    if (currentStep < steps.length - 1) {
-      setCurrentStep(currentStep + 1);
-    } else {
-      onClose();
-    }
-  };
+  const centred = CENTRED.has(stop.id);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [cardHeight, setCardHeight] = useState(260);
+  useLayoutEffect(() => {
+    if (cardRef.current) setCardHeight(cardRef.current.offsetHeight || 260);
+  }, [stop.id, items.length, anchorRect]);
+  const viewport = { width: window.innerWidth, height: window.innerHeight };
+  const phone = viewport.width < 640;
+  const place = centred ? null : placeCard(anchorRect, { width: CARD_WIDTH, height: cardHeight }, viewport);
 
-  const handlePrev = () => {
-    if (currentStep > 0) {
-      setCurrentStep(currentStep - 1);
-    }
-  };
+  // A control stop dims the rest; a surface stop only rings its surface.
+  const dim = !anchorRect ? 0 : stop.focus === 'surface' ? 0 : 0.55;
+  const buttonLabel = last ? (createsProject ? 'Create your own project' : firstRun ? 'Start my project' : 'Done') : stop.id === 'connect' && !mcpConnected ? 'Connect later' : 'Next';
+
+  const body = (
+    <>
+      {stop.body.map((p) => (
+        <p key={p} style={{ fontSize: centred ? '13.5px' : '13px', color: c.textSecondary, lineHeight: 1.65, margin: '0 0 10px' }}>{p}</p>
+      ))}
+      {stop.id === 'welcome' && <Loop isDark={isDark} c={c} />}
+      {stop.id === 'connect' && (
+        <div
+          data-testid="walkthrough-connect-status"
+          data-connected={mcpConnected ? 'true' : 'false'}
+          style={{
+            fontSize: '12.5px', fontWeight: 600, padding: '8px 12px', borderRadius: '8px',
+            border: `1px solid ${mcpConnected ? '#15803d' : c.border}`,
+            backgroundColor: mcpConnected ? 'rgba(21,128,61,0.1)' : 'transparent',
+            color: mcpConnected ? '#15803d' : c.textMuted,
+          }}
+        >
+          {mcpConnected ? 'Your agent has called NodeSpec. Next, set what it may do.' : 'Waiting for your agent\'s first call.'}
+        </div>
+      )}
+      {stop.items && <ItemList c={c} items={items} active={itemAnchor} onSelect={setItemAnchor} />}
+    </>
+  );
 
   return (
     <div
+      data-testid="walkthrough"
       style={{
-        position: 'fixed',
-        top: 0, left: 0, right: 0, bottom: 0,
-        // While a header control is spotlighted, the dimming moves into the
-        // ring's giant box-shadow CUTOUT below, so the control itself stays
-        // at full brightness instead of fading behind this backdrop
-        // (owner bug 2026-08-29). The blur is off then for the same reason.
-        backgroundColor: anchorRect ? 'transparent' : 'rgba(0, 0, 0, 0.6)',
-        backdropFilter: anchorRect ? undefined : 'blur(4px)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 10000,
+        position: 'fixed', inset: 0, zIndex: 10000,
+        // Clicks never fall through to the app mid-tour, and never close it
+        // by accident, except on a stop that asks the person to act there.
+        pointerEvents: stop.interactive ? 'none' : undefined,
+        backgroundColor: !anchorRect && centred ? 'rgba(0, 0, 0, 0.6)' : 'transparent',
+        backdropFilter: !anchorRect && centred ? 'blur(4px)' : undefined,
+        display: centred ? 'flex' : 'block', alignItems: 'center', justifyContent: 'center',
         animation: 'onboardFadeIn 0.2s ease-out',
       }}
-      onClick={onClose}
     >
       {anchorRect && (
-        <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 1 }}>
-          {/* spotlight ring; its outer 9999px shadow IS the dimming layer,
-              leaving a clear window over the live control. On the connect
-              step the modal is the main content, so the dim stays LIGHT and
-              the pulse settles after three beats (owner 2026-09-02: the
-              infinite pulse at 0.6 dim was overwhelming and darkened the
-              popup); the header tour keeps the stronger focus dim. */}
-          <div style={{
-            position: 'fixed',
-            top: anchorRect.top - 6,
-            left: anchorRect.left - 6,
-            width: anchorRect.width + 12,
-            height: anchorRect.height + 12,
-            borderRadius: '12px',
-            border: `2px solid ${c.primary}`,
-            boxShadow: `0 0 0 4px ${c.primary}40, 0 0 18px ${c.primary}80, 0 0 0 9999px rgba(0, 0, 0, ${currentStep === 0 ? 0.28 : 0.6})`,
-            animation: currentStep === 0
-              ? 'onboardPulse 2s ease-in-out 3'
-              : 'onboardPulse 1.6s ease-in-out infinite',
-          }} />
-          {/* label under the ring */}
-          <div style={{
-            position: 'fixed',
-            top: anchorRect.bottom + 14,
-            left: Math.max(12, anchorRect.right - 260),
-            width: '260px',
-            backgroundColor: c.surface,
-            border: `1px solid ${c.primary}`,
-            borderRadius: '10px',
-            padding: '10px 12px',
-            boxShadow: '0 10px 30px rgba(0,0,0,0.3)',
-          }}>
-            <div style={{ fontSize: '12px', fontWeight: 700, color: c.text, marginBottom: '3px' }}>
-              {currentStep === 0
-                ? 'Your connection lives here'
-                : HEADER_TOUR_ITEMS.find((i) => i.key === tourKey)?.title}
-            </div>
-            <div style={{ fontSize: '11.5px', color: c.textMuted, lineHeight: 1.5 }}>
-              {currentStep === 0
-                ? 'This turns to "MCP connected" the moment your AI links up — check it any time. The Skills button beside it holds instructions you can copy or download for your AI.'
-                : HEADER_TOUR_ITEMS.find((i) => i.key === tourKey)?.text}
-            </div>
-          </div>
-        </div>
+        <div
+          data-testid="walkthrough-spotlight"
+          data-anchor={anchor ?? ''}
+          style={{
+            position: 'fixed', pointerEvents: 'none', zIndex: 1,
+            top: anchorRect.top - 6, left: anchorRect.left - 6, width: anchorRect.width + 12, height: anchorRect.height + 12,
+            borderRadius: '12px', border: `2px solid ${c.primary}`,
+            boxShadow: `0 0 0 4px ${c.primary}40, 0 0 18px ${c.primary}80${dim ? `, 0 0 0 9999px rgba(0, 0, 0, ${dim})` : ''}`,
+            animation: stop.focus === 'surface' ? undefined : stop.id === 'connect' ? 'onboardPulse 2s ease-in-out 3' : 'onboardPulse 1.6s ease-in-out infinite',
+          }}
+        />
       )}
       <div
+        ref={cardRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="walkthrough-title"
+        data-testid="walkthrough-card"
+        data-stop={stop.id}
         style={{
-          backgroundColor: c.surface,
-          border: `1px solid ${c.border}`,
-          borderRadius: '16px',
-          boxShadow: isDark
-            ? '0 24px 48px rgba(0, 0, 0, 0.6)'
-            : '0 24px 48px rgba(0, 0, 0, 0.2)',
-          width: '90%',
-          maxWidth: '680px',
-          maxHeight: '88vh',
-          display: 'flex',
-          flexDirection: 'column',
-          animation: 'onboardSlideUp 0.3s ease-out',
-          position: 'relative',
-          // Above the spotlight's dimming shadow (zIndex 1): the walkthrough
-          // card itself must never be darkened by its own spotlight.
-          zIndex: 2,
-          overflow: 'hidden',
+          backgroundColor: c.surface, border: `1px solid ${c.border}`, borderRadius: centred ? '16px' : '12px',
+          boxShadow: isDark ? '0 24px 48px rgba(0, 0, 0, 0.6)' : '0 24px 48px rgba(0, 0, 0, 0.2)',
+          display: 'flex', flexDirection: 'column', overflow: 'hidden', zIndex: 2, pointerEvents: 'auto',
+          ...(centred
+            ? { position: 'relative', width: phone ? 'calc(100% - 24px)' : '90%', maxWidth: '680px', maxHeight: '88vh', animation: 'onboardSlideUp 0.3s ease-out' }
+            : { position: 'fixed', top: place!.top, left: place!.left, width: place!.width, maxHeight: `calc(100vh - 32px)` }),
         }}
-        onClick={(e) => e.stopPropagation()}
       >
-        <div style={{
-          padding: '24px 28px 0',
-          display: 'flex',
-          alignItems: 'flex-start',
-          justifyContent: 'space-between',
-        }}>
+        <div style={{ padding: centred && !phone ? '24px 28px 0' : '16px 18px 0', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px' }}>
           <div>
-            <div style={{
-              fontSize: '11px',
-              fontWeight: 600,
-              textTransform: 'uppercase',
-              letterSpacing: '0.06em',
-              color: c.primary,
-              marginBottom: '6px',
-            }}>
-              Step {currentStep + 1} of {steps.length}
+            <div style={{ fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: c.primary, marginBottom: '6px' }}>
+              {stop.chapter} · {index + 1} of {stops.length}
             </div>
-            <div style={{
-              fontSize: '22px',
-              fontWeight: 700,
-              color: c.text,
-              lineHeight: 1.2,
-            }}>
-              {step.title}
-            </div>
-            <div style={{
-              fontSize: '14px',
-              color: c.textMuted,
-              marginTop: '4px',
-            }}>
-              {step.subtitle}
+            <div id="walkthrough-title" style={{ fontSize: centred ? '22px' : '17px', fontWeight: 700, color: c.text, lineHeight: 1.2 }}>
+              {stop.title}
             </div>
           </div>
           <button
-            style={{
-              background: 'none',
-              border: 'none',
-              fontSize: '20px',
-              color: c.textMuted,
-              cursor: 'pointer',
-              padding: '4px 8px',
-              marginTop: '-4px',
-            }}
+            aria-label="Close the walkthrough"
+            style={{ background: 'none', border: 'none', fontSize: '20px', color: c.textMuted, cursor: 'pointer', padding: '4px 8px', marginTop: '-4px' }}
             onClick={onClose}
-            onMouseEnter={(e) => { e.currentTarget.style.color = c.text; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = c.textMuted; }}
           >
             x
           </button>
         </div>
 
-        <div style={{
-          padding: '20px 28px',
-          overflowY: 'auto',
-          flex: 1,
-        }}>
-          {step.content}
+        <div style={{ padding: centred && !phone ? '16px 28px 20px' : '12px 18px 14px', overflowY: 'auto', flex: 1 }}>
+          {body}
         </div>
 
-        <div style={{
-          padding: '16px 28px 20px',
-          borderTop: `1px solid ${c.border}`,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-        }}>
-          <div style={{ display: 'flex', gap: '6px' }}>
-            {steps.map((_, index) => (
-              <div
-                key={index}
-                style={{
-                  width: index === currentStep ? '24px' : '8px',
-                  height: '8px',
-                  borderRadius: '4px',
-                  backgroundColor: index === currentStep ? c.primary : c.border,
-                  transition: 'all 0.3s ease',
-                  cursor: 'pointer',
-                }}
-                onClick={() => setCurrentStep(index)}
-              />
-            ))}
-          </div>
-
-          <div style={{ display: 'flex', gap: '10px' }}>
-            {currentStep > 0 && (
+        <div style={{ padding: centred && !phone ? '16px 28px 20px' : '12px 18px 14px', borderTop: `1px solid ${c.border}`, display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {centred && !phone && (
+              <div style={{ display: 'flex', gap: '5px' }} aria-hidden="true">
+                {stops.map((s, i) => (
+                  <div key={s.id} style={{ width: i === index ? '20px' : '7px', height: '7px', borderRadius: '4px', backgroundColor: i === index ? c.primary : c.border, transition: 'all 0.3s ease' }} />
+                ))}
+              </div>
+            )}
+            {!last && (
               <button
-                style={{
-                  padding: '10px 20px',
-                  backgroundColor: 'transparent',
-                  border: `1px solid ${c.border}`,
-                  borderRadius: '8px',
-                  color: c.text,
-                  fontSize: '13px',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  transition: 'all 0.15s ease',
-                }}
-                onClick={handlePrev}
-                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = c.surfaceHover; }}
-                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                style={{ background: 'none', border: 'none', color: c.textMuted, fontSize: '12.5px', cursor: 'pointer', padding: 0 }}
+                onClick={onClose}
+              >
+                Skip tour
+              </button>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            {index > 0 && (
+              <button
+                style={{ padding: '9px 16px', backgroundColor: 'transparent', border: `1px solid ${c.border}`, borderRadius: '8px', color: c.text, fontSize: '13px', fontWeight: 600, cursor: 'pointer' }}
+                onClick={back}
               >
                 Back
               </button>
             )}
             <button
-              style={{
-                padding: '10px 24px',
-                backgroundColor: c.primary,
-                border: 'none',
-                borderRadius: '8px',
-                color: '#ffffff',
-                fontSize: '13px',
-                fontWeight: 600,
-                cursor: 'pointer',
-                transition: 'all 0.15s ease',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-              }}
-              onClick={handleNext}
-              onMouseEnter={(e) => { e.currentTarget.style.opacity = '0.9'; }}
-              onMouseLeave={(e) => { e.currentTarget.style.opacity = '1'; }}
+              style={{ padding: '9px 20px', backgroundColor: c.primary, border: 'none', borderRadius: '8px', color: '#ffffff', fontSize: '13px', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
+              onClick={next}
             >
-              {currentStep === steps.length - 1
-                ? (gateOnMcp ? 'Create Your First Project' : 'Get Started')
-                : currentStep === 0 && gateOnMcp && !mcpConnected
-                  ? 'Connect later — Next'
-                  : 'Next'}
-              {currentStep < steps.length - 1 && <ChevronRight size={14} />}
+              {buttonLabel}
+              {!last && <ChevronRight size={14} />}
             </button>
           </div>
         </div>
@@ -366,247 +284,63 @@ export function OnboardingModal({ onClose, gateOnMcp = false }: OnboardingModalP
 
       <style>
         {`
-          @keyframes onboardFadeIn {
-            from { opacity: 0; }
-            to { opacity: 1; }
-          }
-          @keyframes onboardSlideUp {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
-          }
-          @keyframes onboardPulse {
-            0%, 100% { transform: scale(1); opacity: 1; }
-            50% { transform: scale(1.06); opacity: 0.75; }
-          }
+          @keyframes onboardFadeIn { from { opacity: 0; } to { opacity: 1; } }
+          @keyframes onboardSlideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+          @keyframes onboardPulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.06); opacity: 0.75; } }
         `}
       </style>
     </div>
   );
 }
 
-interface StepProps {
-  isDark: boolean;
-  c: ThemeColors;
-}
-
-function PathCard({ icon, tint, title, who, next, badge, isDark, c }: {
-  icon: React.ReactNode;
-  tint: string;
-  title: string;
-  who: string;
-  next: string;
-  badge?: string;
-  isDark: boolean;
-  c: ThemeColors;
-}) {
+/** The loop every project runs, stage by stage. */
+function Loop({ isDark, c }: { isDark: boolean; c: ThemeColors }) {
   return (
-    <div style={{
-      display: 'flex', gap: '14px', alignItems: 'flex-start',
-      padding: '14px 16px',
-      border: `1.5px solid ${badge ? tint + '66' : c.border}`,
-      borderRadius: '12px',
-      backgroundColor: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.015)',
-    }}>
-      <div style={{
-        width: '44px', height: '44px', borderRadius: '10px',
-        backgroundColor: tint + (isDark ? '20' : '15'),
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        flexShrink: 0,
-      }}>
-        {icon}
-      </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-          <span style={{ fontSize: '14px', fontWeight: 600, color: c.text }}>{title}</span>
-          {badge && (
-            <span style={{
-              fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em',
-              color: tint, backgroundColor: tint + (isDark ? '22' : '18'),
-              padding: '2px 7px', borderRadius: '99px',
-            }}>
-              {badge}
-            </span>
-          )}
-        </div>
-        <div style={{ fontSize: '12px', color: c.textSecondary, lineHeight: 1.5, marginBottom: '6px' }}>
-          {who}
-        </div>
-        <div style={{ fontSize: '12px', color: c.textMuted, lineHeight: 1.5 }}>
-          {next}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Step 2: repo connection ──────────────────────────────────────────────────
-
-function StepRepoConnection({ isDark, c }: StepProps) {
-  return (
-    <div>
-      <div style={{ fontSize: '13px', color: c.textSecondary, lineHeight: 1.7, marginBottom: '16px' }}>
-        NodeSpec is git-native: your architecture, task documents, and test plans can live in your
-        repository as reviewable files — not only in this app. Two ways to get there:
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-        <PathCard
-          isDark={isDark} c={c}
-          icon={<GitBranch size={22} color="#10b981" />}
-          tint="#10b981"
-          badge="Recommended"
-          title="Connect a repository"
-          who="Open the Git panel in the header and connect your GitHub repo."
-          next="The model and per-node task documents commit to a .nodespec/ folder alongside your code. Accepted changes push automatically, commits made outside NodeSpec surface as reviewable change cards, and importing an existing codebase becomes one instruction to your AI."
-        />
-        <PathCard
-          isDark={isDark} c={c}
-          icon={<FileUp size={22} color="#3b82f6" />}
-          tint="#3b82f6"
-          title="No repo yet? Export documents"
-          who="Everything still works without git — you just move the documents yourself."
-          next="Export any node's context from the canvas and hand it to your tools. When the project is ready for a repository, set one up from the same Git panel and the documents start flowing automatically."
-        />
-      </div>
-      <div style={{
-        fontSize: '12px', color: c.textMuted, lineHeight: 1.6, marginTop: '12px',
-        backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
-        borderRadius: '8px', padding: '10px 12px',
-        border: `1px solid ${isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)'}`,
-      }}>
-        Already have code? After connecting the repo, tell your AI to import it — NodeSpec analyzes
-        the codebase and proposes the architecture as one reviewable proposal.
-      </div>
-    </div>
-  );
-}
-
-// ── Step 3: the loop ─────────────────────────────────────────────────────────
-
-function StepTheLoop({ isDark, c }: StepProps) {
-  const stages = [
-    { icon: <Lightbulb size={15} />, tint: '#f59e0b', label: 'Vision', text: 'Your product intent, in your words. Everything downstream traces back to it.' },
-    { icon: <ListChecks size={15} />, tint: '#10b981', label: 'Requirements', text: 'What must exist, each with acceptance criteria that define done. Criteria start unmet.' },
-    { icon: <Network size={15} />, tint: '#3b82f6', label: 'Architecture', text: 'Components, connections, and typed contracts on the canvas — every requirement maps to the nodes serving it.' },
-    { icon: <FileText size={15} />, tint: '#8b5cf6', label: 'Task documents', text: 'Each node gets a written brief: its role, its interfaces, its files, and the criteria it serves.' },
-    { icon: <Code size={15} />, tint: '#ec4899', label: 'Code', text: 'Your AI builds from the brief in your own editor — scoped context, never a repo-wide guess.' },
-    { icon: <FlaskConical size={15} />, tint: '#14b8a6', label: 'Tests', text: 'Test plans derive from the criteria. Reported results are the only thing that flips a criterion to met.' },
-    { icon: <GitCommitHorizontal size={15} />, tint: '#64748b', label: 'Git provenance', text: 'With a repo connected: every accepted change commits, drift is detected, and the evidence trail lives in your history.' },
-  ];
-  return (
-    <div>
-      <div style={{ fontSize: '13px', color: c.textSecondary, lineHeight: 1.7, marginBottom: '14px' }}>
-        Every project runs the same loop, and each stage feeds the next — so nothing is claimed
-        that was not defined, and nothing is done that was not proven.
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column' }}>
-        {stages.map((s, i) => (
+    <div style={{ display: 'flex', flexDirection: 'column', marginTop: '4px' }}>
+      {WALKTHROUGH_LOOP.map((s, i) => {
+        const Icon = LOOP_ICONS[i] ?? Lightbulb;
+        const tint = LOOP_TINTS[i] ?? c.primary;
+        return (
           <div key={s.label} style={{ display: 'flex', gap: '12px' }}>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-              <div style={{
-                width: '30px', height: '30px', borderRadius: '8px', flexShrink: 0,
-                backgroundColor: s.tint + (isDark ? '22' : '16'),
-                color: s.tint,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}>
-                {s.icon}
+              <div style={{ width: '28px', height: '28px', borderRadius: '8px', flexShrink: 0, backgroundColor: tint + (isDark ? '22' : '16'), color: tint, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Icon size={14} />
               </div>
-              {i < stages.length - 1 && (
-                <div style={{ width: '2px', flex: 1, minHeight: '10px', backgroundColor: c.border }} />
-              )}
+              {i < WALKTHROUGH_LOOP.length - 1 && <div style={{ width: '2px', flex: 1, minHeight: '8px', backgroundColor: c.border }} />}
             </div>
-            <div style={{ paddingBottom: i < stages.length - 1 ? '12px' : 0 }}>
-              <div style={{ fontSize: '13px', fontWeight: 600, color: c.text, lineHeight: '30px' }}>{s.label}</div>
+            <div style={{ paddingBottom: i < WALKTHROUGH_LOOP.length - 1 ? '10px' : 0 }}>
+              <div style={{ fontSize: '13px', fontWeight: 600, color: c.text, lineHeight: '28px' }}>{s.label}</div>
               <div style={{ fontSize: '12px', color: c.textMuted, lineHeight: 1.5, marginTop: '-4px' }}>{s.text}</div>
             </div>
           </div>
-        ))}
-      </div>
+        );
+      })}
     </div>
   );
 }
 
-// ── Step 4: build it your way ────────────────────────────────────────────────
-
-function StepBuildYourWay({ isDark, c }: StepProps) {
+/** A list of controls; the one clicked lights up where it lives. */
+function ItemList({ c, items, active, onSelect }: { c: ThemeColors; items: WalkthroughItem[]; active: string | null; onSelect: (anchor: string) => void }) {
   return (
-    <div>
-      <div style={{ fontSize: '13px', color: c.textSecondary, lineHeight: 1.7, marginBottom: '16px' }}>
-        Both hands on the wheel, whenever you want them. Everything your AI can do, you can also do
-        directly — and both roads produce the same governed, versioned model.
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-        <PathCard
-          isDark={isDark} c={c}
-          icon={<MousePointerClick size={22} color="#3b82f6" />}
-          tint="#3b82f6"
-          title="Work by hand"
-          who="Direct manipulation, no AI required."
-          next="Add requirements in the Specification panel. Drag components from the palette onto the canvas, connect them by drawing edges — every connection gets a typed contract — and click any node for its actions."
-        />
-        <PathCard
-          isDark={isDark} c={c}
-          icon={<Bot size={22} color="#8b5cf6" />}
-          tint="#8b5cf6"
-          title="Work through your AI"
-          who="The assistant you just connected can drive the whole loop over MCP."
-          next="Describe what you want — requirements, architecture, an imported repo — and your AI proposes it. Every change lands as a proposal you review and apply; nothing writes to your model directly."
-        />
-      </div>
-      <div style={{
-        fontSize: '12px', color: c.textMuted, lineHeight: 1.6, marginTop: '12px',
-        backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
-        borderRadius: '8px', padding: '10px 12px',
-        border: `1px solid ${isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)'}`,
-      }}>
-        Reopen this walkthrough anytime from the ? menu in the header. The Skills button next to it
-        carries instructions you can copy — or download as .md files — so your AI knows the
-        NodeSpec workflow.
-      </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+      {items.map((item) => {
+        const on = item.anchor === active;
+        return (
+          <button
+            key={item.anchor}
+            aria-pressed={on}
+            onClick={() => onSelect(item.anchor)}
+            style={{
+              display: 'block', width: '100%', textAlign: 'left', cursor: 'pointer', padding: '9px 11px', borderRadius: '9px',
+              border: `1.5px solid ${on ? c.primary : c.border}`, backgroundColor: on ? `${c.primary}14` : 'transparent',
+            }}
+          >
+            <div style={{ fontSize: '13px', fontWeight: 600, color: on ? c.primary : c.text }}>{item.title}</div>
+            <div style={{ fontSize: '12px', color: c.textMuted, lineHeight: 1.5, marginTop: '2px' }}>{item.text}</div>
+          </button>
+        );
+      })}
     </div>
   );
 }
 
-// ── Step 5: header tour ──────────────────────────────────────────────────────
-// Click a row, and the matching header control lights up under the spotlight
-// cutout — the same highlight the MCP step uses, one control at a time.
-
-function StepHeaderTour({ c, items, activeKey, onSelect }: {
-  c: ThemeColors;
-  items: Array<{ key: string; title: string; text: string }>;
-  activeKey: string | null;
-  onSelect: (key: string) => void;
-}) {
-  return (
-    <div>
-      <div style={{ fontSize: '13px', color: c.textSecondary, lineHeight: 1.7, marginBottom: '14px' }}>
-        One last lap: everything in the header, explained. Click any row and the real control
-        lights up above — so you know exactly where each one lives when you need it.
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-        {items.map((item) => {
-          const active = item.key === activeKey;
-          return (
-            <button
-              key={item.key}
-              onClick={() => onSelect(item.key)}
-              style={{
-                display: 'block', width: '100%', textAlign: 'left', cursor: 'pointer',
-                padding: '10px 12px', borderRadius: '9px',
-                border: `1.5px solid ${active ? c.primary : c.border}`,
-                backgroundColor: active ? `${c.primary}14` : 'transparent',
-                transition: 'all 0.15s ease',
-              }}
-            >
-              <div style={{ fontSize: '13px', fontWeight: 600, color: active ? c.primary : c.text }}>
-                {item.title}
-              </div>
-              <div style={{ fontSize: '12px', color: c.textMuted, lineHeight: 1.5, marginTop: '2px' }}>
-                {item.text}
-              </div>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}

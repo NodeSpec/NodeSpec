@@ -350,7 +350,7 @@ export async function buildBoardModel(supabase: any, projectId: string, args: {
       : Promise.resolve({ data: [] }),
     supabase.from("task_items").select("node_id, task_key, done").eq("project_id", projectId),
     reqRowIds.length > 0
-      ? supabase.from("requirement_relations").select("from_requirement_id, to_requirement_id, relation_type").in("from_requirement_id", reqRowIds)
+      ? supabase.from("specification_requirement_relations").select("from_requirement_id, to_requirement_id, relation_type").in("from_requirement_id", reqRowIds)
       : Promise.resolve({ data: [] }),
   ]);
 
@@ -443,12 +443,13 @@ export async function buildBoardModel(supabase: any, projectId: string, args: {
 }
 
 function computeArchivedRowIdsFromRows(
-  rows: Array<{ id: string; status?: string | null; acceptance_criteria?: unknown }>,
+  rows: Array<{ id: string; status?: string | null; acceptance_criteria?: unknown; archived_at?: string | null }>,
   criteriaOf: (raw: unknown) => Array<{ met?: boolean }>,
   relations: Array<{ from_requirement_id: string; to_requirement_id: string; relation_type: string }>,
 ): Set<string> {
   return computeArchivedRowIds(
-    rows.map((r) => ({ id: r.id, status: r.status ?? "pending", acceptanceCriteria: criteriaOf(r.acceptance_criteria) })),
+    // 9.8 (v3y): the explicit archive rides beside the lineage rule.
+    rows.map((r) => ({ id: r.id, status: r.status ?? "pending", acceptanceCriteria: criteriaOf(r.acceptance_criteria), archivedAt: r.archived_at ?? null })),
     relations.map((rel) => ({
       fromRequirementId: rel.from_requirement_id,
       toRequirementId: rel.to_requirement_id,

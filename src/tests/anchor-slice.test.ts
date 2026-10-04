@@ -21,7 +21,17 @@ const fixture = JSON.parse(
     'utf-8',
   ),
 );
-const anchor = JSON.parse(fixture.anchorJson);
+// V3 AD.2: version 2 anchors carry configuration and schema bodies beside the
+// architecture; the slice is the architecture, so compare without them.
+const DETAILS = ['config', 'configSource', 'configHash', 'schema'];
+const withoutDetails = <T extends Record<string, unknown>>(e: T) =>
+  Object.fromEntries(Object.entries(e).filter(([k]) => !DETAILS.includes(k)));
+const rawAnchor = JSON.parse(fixture.anchorJson);
+const anchor = {
+  ...rawAnchor,
+  nodes: rawAnchor.nodes.map(withoutDetails),
+  contracts: rawAnchor.contracts.map(withoutDetails),
+};
 const graph = fixture.graph as Graph;
 
 const N2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';

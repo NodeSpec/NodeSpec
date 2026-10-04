@@ -1,4 +1,4 @@
-// S1-3: the `projects` tool bucket (non-heavy) — list_projects, list_branches,
+// S1-3: the `projects` tool bucket (non-heavy) — list_projects,
 // get_project_status, create_project. Moved verbatim from index.ts (no logic change),
 // along with their internal helpers (computeNextAction for status; computeGraphHash +
 // GRAPH_SCHEMA_VERSION + createEmptyGraphForProject for create). The assembly-heavy
@@ -6,8 +6,9 @@
 // later heavy chunk. Structural supabase param + type-only SupabaseClient so it's
 // offline-testable.
 import type { SupabaseClient } from "jsr:@supabase/supabase-js@2";
-import { getEffectiveTier } from "../../_shared/deployment.ts";
+import { getEffectiveTier, getProjectTier, isExampleMetadata, ownersCarryingSeats } from "../../_shared/deployment.ts";
 import { HOSTED_COMMUNITY_PROJECT_LIMIT } from "../../_shared/tiers.ts";
+import { featureAllowed } from "../../_shared/feature-rules.ts";
 // D4: the test-budget gauge is ONE shared function across every surface that
 // shows it (this status response, report_test_results, the Work Board).
 import { assessTestBudget, formatTestBudgetNudge } from "../../_shared/derive-status.ts";
@@ -15,8 +16,10 @@ import { assessTestBudget, formatTestBudgetNudge } from "../../_shared/derive-st
 // MCP/git-driven projects — the phase is DERIVED from live progress now.
 import { deriveProjectPhase } from "../../_shared/project-phase.ts";
 import { getPrimaryBranch } from "../../_shared/primary-branch.ts";
+import { liveStagedExplodes, loadPendingProposals, readStagedExplodes, stagedExplodeLead, type LiveStagedExplode } from "../../_shared/staged-explodes.ts";
+import { importIntentLead, loadImportIntentState, readImportIntent, type ImportIntentState } from "../../_shared/staged-import-intent.ts";
 import type { AuthResult, MCPResponse } from "../shared.ts";
-import { checkScope, resolveProjectByName } from "../shared.ts";
+import { checkScope, resolveProjectByName, isProjectRole, type ProjectRole } from "../shared.ts";
 
 function computeNextAction(phaseStatus: string, reqCount: number, archNodeCount: number, testCount: number, hasVision: boolean): string {
   switch (phaseStatus) {
@@ -26,7 +29,7 @@ function computeNextAction(phaseStatus: string, reqCount: number, archNodeCount:
       // requirements into a vacuum. No phase enum; the directive carries it.
       if (reqCount === 0 && !hasVision) return 'This project has no vision and no requirements. FIRST ask the USER for their vision — in their words, what this project is and why — and record it with update_vision. THEN draft requirements with create_requirement (or the user can draft them in the app) before designing architecture.';
       if (reqCount === 0) return 'No requirements yet. Create them with create_requirement (or the user can draft them in the app) before designing architecture.';
-      return `Project has ${reqCount} requirement${reqCount !== 1 ? 's' : ''} ready for review. Refine them with update_requirement and lock finalized ones with set_requirement_lock. When the user is satisfied, design the architecture yourself and submit it with propose_patches (create contracts first, then nodes, then edges referencing them), then link nodes to the requirements they implement with map_requirement.`;
+      return `Project has ${reqCount} requirement${reqCount !== 1 ? 's' : ''} ready for review. Refine them with update_requirement; the user confirms and locks them in the app. When the user is satisfied, design the architecture yourself and submit it with propose_patches (create contracts first, then nodes, then edges referencing them), then link nodes to the requirements they implement with map_requirement.`;
     case 'requirements_confirmed':
       return 'Requirements confirmed — design the architecture now. Read the full spec with list_requirements, then propose_patches the architecture: add_contract for each interaction, add_node for each component (one node per responsibility; every requirement should map to at least one node), add_edge to wire them (edges require a contractId). After approval, use map_requirement to make each requirement traceable to its implementing nodes.';
     case 'building_architecture':
@@ -81,6 +84,7 @@ export async function handleListProjects(
   }
 
   // projects has no description column; the description lives in metadata.
+  type Row = { id: string; name: string; metadata: Record<string, unknown> | null; created_at: string; updated_at: string };
   const { data, error } = await supabase
     .from('projects')
     .select('id, name, metadata, created_at, updated_at')
@@ -91,53 +95,34 @@ export async function handleListProjects(
     return { success: false, error: error.message };
   }
 
+  // 7.0: the projects this account holds a seat on ride along, role per row;
+  // only those whose owner's plan carries seats (below Team a project is its
+  // owner's alone, owner 2026-09-26).
+  const rows: Array<Row & { role: ProjectRole }> = ((data ?? []) as Row[]).map((p) => ({ ...p, role: 'owner' as const }));
+  const { data: seats } = await supabase
+    .from('project_members')
+    .select('role, projects!inner(id, name, owner_id, metadata, created_at, updated_at)')
+    .eq('user_id', auth.userId);
+  const seatRows = (seats ?? []) as Array<{ role: unknown; projects: (Row & { owner_id?: string }) | null }>;
+  const carried = seatRows.length > 0 ? await ownersCarryingSeats(supabase, seatRows.map((r) => r.projects?.owner_id ?? '')) : new Map();
+  for (const seat of seatRows) {
+    if (seat.projects && isProjectRole(seat.role) && carried.has(seat.projects.owner_id ?? '') && !rows.some((r) => r.id === seat.projects!.id)) {
+      const { owner_id: _owner, ...project } = seat.projects;
+      rows.push({ ...project, role: seat.role });
+    }
+  }
+  rows.sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''));
+
   return {
     success: true,
     data: {
-      projects: data.map((p: { id: string; name: string; metadata: Record<string, unknown> | null; created_at: string; updated_at: string }) => ({
+      projects: rows.map((p) => ({
         projectId: p.id,
         name: p.name,
         description: typeof p.metadata?.description === 'string' ? p.metadata.description : null,
+        role: p.role,
         createdAt: p.created_at,
         updatedAt: p.updated_at,
-      })),
-    },
-  };
-}
-
-export async function handleListBranches(
-  supabase: SupabaseClient,
-  auth: AuthResult,
-  args: { project_id: string }
-): Promise<MCPResponse> {
-  if (!checkScope(auth, 'read')) {
-    return { success: false, error: 'Insufficient permissions: read scope required' };
-  }
-
-  const resolved = await resolveProjectByName(supabase, auth.userId, args.project_id);
-  if ('error' in resolved) return resolved.error;
-  const projectId = resolved.project.id;
-
-  const { data: branches, error } = await supabase
-    .from('branches')
-    .select('id, name, created_at, is_primary')
-    .eq('project_id', projectId)
-    .order('created_at', { ascending: false });
-
-  if (error) {
-    return { success: false, error: error.message };
-  }
-
-  return {
-    success: true,
-    data: {
-      branches: branches.map((b: { id: string; name: string; created_at: string; is_primary?: boolean | null }) => ({
-        branchId: b.id,
-        name: b.name,
-        // Identity, not naming: the trunk may be renamed to its bound git
-        // branch at connect (legacy rows without the flag keep the old rule).
-        isMain: b.is_primary === true || (b.is_primary == null && b.name === 'main'),
-        createdAt: b.created_at,
       })),
     },
   };
@@ -178,6 +163,8 @@ export async function handleGetProjectStatus(
   let archNodeCount = 0;
   let testPlanArtifactCount = 0;
   let staleTestPlanCount = 0;
+  // AE.6: the nodes, kept for the staged explode requests below.
+  let graphNodes: Record<string, { id?: string; label?: string; parentId?: string | null }> | null = null;
   if (branches) {
     const { data: snapshot } = await supabase
       .from('graph_snapshots')
@@ -190,6 +177,7 @@ export async function handleGetProjectStatus(
 
     if (snapshot?.graph_data?.nodes) {
       archNodeCount = Object.keys(snapshot.graph_data.nodes).length;
+      graphNodes = snapshot.graph_data.nodes;
     }
     if (snapshot?.graph_data?.artifacts) {
       for (const artifact of Object.values(snapshot.graph_data.artifacts) as Array<{ kind?: string; metadata?: { stale?: boolean } }>) {
@@ -292,15 +280,39 @@ export async function handleGetProjectStatus(
   // origin rides projects.metadata.workflowOrigin; while such a project has no
   // requirements, the status lead IS the trigger: the AI arriving over MCP
   // learns to ask for the document and convert it through the spec tools.
+  // Owner spike 2026-09-04: the app's import window no longer converts the
+  // document itself (that lane streamed to a retired agent endpoint). It
+  // STAGES the document in projects.metadata.stagedSpecImport and the user is
+  // told to have their AI call THIS tool: the document rides the response as
+  // stagedSpecification, and the lead prescribes the conversion. Both the
+  // staged lead and the bare-origin lead retire once requirements exist.
+  // One read of the project's metadata serves both staged lanes: the spec
+  // document (while there are no requirements) and the explode requests
+  // (AE.6, at any phase).
+  const { data: projRow } = await supabase
+    .from('projects')
+    .select('metadata')
+    .eq('id', projectId)
+    .maybeSingle();
+  const projectMetadata = (projRow as { metadata?: Record<string, unknown> } | null)?.metadata ?? {};
   let specImportLead = '';
+  let stagedSpecification: { text: string; chars: number; stagedAt: string | null } | null = null;
   if ((reqCount || 0) === 0) {
-    const { data: projRow } = await supabase
-      .from('projects')
-      .select('metadata')
-      .eq('id', projectId)
-      .maybeSingle();
-    const origin = (projRow as { metadata?: { workflowOrigin?: string } } | null)?.metadata?.workflowOrigin;
-    if (origin === 'import-spec') {
+    const metadata = projectMetadata;
+    const origin = metadata.workflowOrigin;
+    const staged = readStagedSpecification(metadata);
+    if (staged) {
+      stagedSpecification = staged;
+      specImportLead =
+        `A SPECIFICATION DOCUMENT IS STAGED for import (${staged.chars} characters` +
+        `${staged.stagedAt ? `, staged ${staged.stagedAt}` : ''}). It is in this response as ` +
+        'stagedSpecification.text — do not ask the user to paste it again. Convert it FAITHFULLY now: ' +
+        'update_vision with the document\'s intent (confirm the wording with the user), create_requirement ' +
+        'for each requirement it contains with its acceptance criteria (criteria start unmet), ' +
+        'relate_requirements where the document implies structure, and map_requirement once architecture ' +
+        'exists. Do not invent content the document does not contain — gaps are questions for the user, ' +
+        'not blanks to fill. ';
+    } else if (origin === 'import-spec') {
       specImportLead =
         'This project was created to IMPORT AN EXISTING SPECIFICATION document. Ask the user to paste ' +
         'their spec/PRD into this chat, then convert it FAITHFULLY: update_vision with the document\'s ' +
@@ -310,13 +322,24 @@ export async function handleGetProjectStatus(
         'document does not contain — gaps are questions for the user, not blanks to fill. ';
     }
   }
-  const { data: importJobRow } = await supabase
-    .from('import_jobs')
-    .select('id, status, stage, proposal_id')
-    .eq('project_id', projectId)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // Q: repo import is Indie and above. Below it the status never points the
+  // agent at run_repo_import (a job left from a paid period included).
+  let importAllowed = false;
+  let workflowsAllowed = false;
+  try {
+    const tier = await getProjectTier(supabase, projectId, auth.userId, { role: resolved.project.role });
+    importAllowed = featureAllowed(tier, 'repo_import');
+    workflowsAllowed = featureAllowed(tier, 'workflow_space');
+  } catch { /* fail closed */ }
+  const { data: importJobRow } = importAllowed
+    ? await supabase
+      .from('import_jobs')
+      .select('id, status, stage, proposal_id')
+      .eq('project_id', projectId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    : { data: null };
   const importJob = importJobRow as { id: string; status: string; stage: string | null; proposal_id: string | null } | null;
   if (importJob && archNodeCount === 0) {
     if (importJob.status === 'awaiting_review' && importJob.proposal_id) {
@@ -327,11 +350,62 @@ export async function handleGetProjectStatus(
     } else if (importJob.status === 'failed') {
       stagedImportLead = 'The last repository import FAILED — call run_repo_import for the error, then again with restart=true to retry, before designing by hand. ';
     }
+  } else if (!importJob && importAllowed && archNodeCount === 0 && projectMetadata.workflowOrigin === 'code') {
+    // AL.21 (owner 2026-10-03): the start card offers Import a repository
+    // again. Choosing it records the origin; until a job exists the status
+    // says what the import waits on: the repository, or the agent.
+    const { data: repo } = await supabase
+      .from('git_integrations')
+      .select('repo_owner, repo_name')
+      .eq('project_id', projectId)
+      .maybeSingle();
+    const r = repo as { repo_owner?: string; repo_name?: string } | null;
+    stagedImportLead = r
+      ? `This project was created to IMPORT A REPOSITORY, and ${r.repo_owner}/${r.repo_name} is connected. Call run_repo_import to start the import and follow each response's nextAction until the draft waits for the user's review. Do not design by hand meanwhile. `
+      : 'This project was created to IMPORT A REPOSITORY, and none is connected yet. Ask the user to connect it in the app (the Git button in the toolbar), then call run_repo_import. Do not design by hand meanwhile. ';
+  }
+
+  // AE.6: the Expand button staged an explode request; the agent learns of it
+  // here (MCP is not event driven). A request whose node is gone or already
+  // exploded is not served; one the agent has proposed reads as waiting.
+  let stagedExplodes: LiveStagedExplode[] = [];
+  let explodeLead = '';
+  // One read of the pending proposals serves both staged lanes, and their
+  // patches are read only when the import intent needs them.
+  const stagedIntent = importAllowed && workflowsAllowed ? readImportIntent(projectMetadata) : null;
+  let pendingRead: Promise<Awaited<ReturnType<typeof loadPendingProposals>>> | null = null;
+  const pendingProposals = () => (pendingRead ??= loadPendingProposals(supabase, projectId, { patches: !!stagedIntent }));
+  {
+    const staged = readStagedExplodes(projectMetadata);
+    if (staged.length > 0 && graphNodes) {
+      // A read that fails must not read as "nothing proposed": that would
+      // ask the agent for the explode again. Say so and serve no lead.
+      try {
+        stagedExplodes = liveStagedExplodes(staged, graphNodes, await pendingProposals());
+        explodeLead = stagedExplodeLead(stagedExplodes);
+      } catch (err) {
+        explodeLead = `The user asked from the canvas for ${staged.length === 1 ? 'a node' : `${staged.length} nodes`} to be exploded, but the pending proposals could not be read (${err instanceof Error ? err.message : String(err)}); call get_project_status again before proposing one. `;
+      }
+    }
+  }
+
+  // AL.21: what the person said they are here to do as they accepted the
+  // import, until the agent has filed outcomes for it. Workflows and repo
+  // import are both on the plan, or the answer is not served.
+  let importIntent: ImportIntentState | null = null;
+  let intentLead = '';
+  if (stagedIntent) {
+    try {
+      importIntent = await loadImportIntentState(supabase, projectId, stagedIntent, pendingProposals);
+      intentLead = importIntentLead(importIntent, hasVision);
+    } catch (err) {
+      intentLead = `The user chose what this import is for in the app, but it could not be read (${err instanceof Error ? err.message : String(err)}); call get_project_status again before asking them. `;
+    }
   }
 
   // Pending reconciliation OUTRANKS the phase-based advice: designing further on
   // top of an unreconciled repository change is how the two sides diverge.
-  const importLeads = `${stagedImportLead}${specImportLead}`;
+  const importLeads = `${stagedImportLead}${specImportLead}${intentLead}${explodeLead}`;
   const nextAction = (pendingChangeCount || 0) > 0
     ? `${importLeads}${pendingChangeCount} unreconciled repository change${pendingChangeCount !== 1 ? 's' : ''} detected. ` +
       'Call get_pending_changes FIRST: for each change, decide whether the repository or the design wins, ' +
@@ -354,6 +428,15 @@ export async function handleGetProjectStatus(
       hasVision,
       /** R4: unreconciled out-of-band repository changes awaiting a decision. */
       pendingRepositoryChanges: pendingChangeCount || 0,
+      /** Owner spike 2026-09-04: the document the app's import window staged
+       *  for conversion — present only while the project has no requirements. */
+      ...(stagedSpecification ? { stagedSpecification } : {}),
+      /** AE.6: the nodes the user asked from the canvas to explode into parts,
+       *  each with the pending proposal that already answers it, if any. */
+      ...(stagedExplodes.length > 0 ? { stagedExplodes } : {}),
+      /** AL.21: what the user chose in the app as they accepted the import,
+       *  and whether the agent has filed outcomes for it yet. */
+      ...(importIntent ? { importIntent } : {}),
       counts: {
         requirements: reqCount || 0,
         architectureNodes: archNodeCount,
@@ -390,6 +473,22 @@ export async function handleGetProjectStatus(
   };
 }
 
+/** The staged-document shape the app writes to projects.metadata.stagedSpecImport
+ *  (src/ui/utils/spec-import-staging.ts is the writer). Tolerates anything else. */
+export function readStagedSpecification(
+  metadata: Record<string, unknown> | null | undefined,
+): { text: string; chars: number; stagedAt: string | null } | null {
+  const raw = metadata?.stagedSpecImport;
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.text !== 'string' || !r.text.trim()) return null;
+  return {
+    text: r.text,
+    chars: typeof r.chars === 'number' ? r.chars : r.text.length,
+    stagedAt: typeof r.stagedAt === 'string' ? r.stagedAt : null,
+  };
+}
+
 export async function handleCreateProject(
   supabase: SupabaseClient,
   auth: AuthResult,
@@ -410,19 +509,19 @@ export async function handleCreateProject(
   // would not bind the MCP surface. Admins are exempt, and a self-hosted
   // deployment lifts the cap entirely (NODESPEC_DEPLOYMENT is THE
   // deployment-mode flag — config, never a fork, per the SHIP-1 doctrine).
-  const tier = await getEffectiveTier(supabase, auth.userId);
+  const tier = await getEffectiveTier(supabase as never, auth.userId);
   if (tier === 'community' && Deno.env.get('NODESPEC_DEPLOYMENT') !== 'self-hosted') {
-    const { data: settings } = await supabase
-      .from('user_settings')
-      .select('is_admin')
-      .eq('user_id', auth.userId)
-      .maybeSingle();
-    if (settings?.is_admin !== true) {
-      const { count } = await supabase
+    // Admin is the account's app_metadata, which only the service sets; a person writes
+    // their own user_settings row, so its is_admin column is no authority (RLS audit).
+    const { data: who } = await supabase.auth.admin.getUserById(auth.userId);
+    if (who?.user?.app_metadata?.is_admin !== true) {
+      // The account's example project (AJ.6) is not counted.
+      const { data: held } = await supabase
         .from('projects')
-        .select('id', { count: 'exact', head: true })
+        .select('id, metadata')
         .eq('owner_id', auth.userId);
-      if ((count ?? 0) >= HOSTED_COMMUNITY_PROJECT_LIMIT) {
+      const count = ((held ?? []) as Array<{ metadata?: unknown }>).filter((p) => !isExampleMetadata(p.metadata)).length;
+      if (count >= HOSTED_COMMUNITY_PROJECT_LIMIT) {
         return {
           success: false,
           error:

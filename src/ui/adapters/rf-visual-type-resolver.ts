@@ -1,4 +1,4 @@
-import { getCanContainRoleIds, getContainerTypeById } from '@nodespec/core/container-types.js';
+import { getContainerTypeById, hasCanContainRules } from '@nodespec/core/container-types.js';
 import type { CatalogResolver } from '../../persistence/supabase/catalog-repository.js';
 
 // M6: `database` is GONE from the accepted set — zero roles carry it (the `database` role
@@ -18,6 +18,16 @@ const STATIC_RF_VISUAL_TYPES: Record<string, string> = {
   'library': 'library',
 };
 
+// AB.5 (owner 2026-09-24): a role is a container because the catalog says it
+// is one (is_container), never because of how it is drawn. desktop-app was
+// made a leaf in M3 (an Electron app is one node whose UI framework is a
+// field) but kept rf_visual_type 'container', so the canvas drew it as a box
+// and let nodes be nested in it while import, the MCP tools and task packets
+// treated it as a node. A leaf drawn as a container now draws as a service,
+// and the database refuses the pair (20260924110000).
+const drawnAs = (role: { rfVisualType: string; isContainer: boolean }) =>
+  (role.rfVisualType === 'container' && !role.isContainer ? 'service' : role.rfVisualType);
+
 let _rfTypeIndex: Map<string, string> | null = null;
 let _catalogPopulated = false;
 
@@ -33,7 +43,7 @@ export function populateRFVisualTypes(catalog: CatalogResolver): void {
 
   for (const role of catalog.getAllRoles()) {
     if (role.rfVisualType && VALID_RF_TYPES.has(role.rfVisualType)) {
-      index.set(role.id, role.rfVisualType);
+      index.set(role.id, drawnAs(role));
     }
   }
 
@@ -52,7 +62,7 @@ export function resolveRFVisualType(nodeType: string, catalog?: CatalogResolver 
       if (resolved.role.containerStyle === 'logical-boundary') {
         return 'logicalBoundary';
       }
-      return resolved.role.rfVisualType;
+      return drawnAs(resolved.role);
     }
   }
 
@@ -68,8 +78,10 @@ export function resolveRFVisualType(nodeType: string, catalog?: CatalogResolver 
     return cached;
   }
 
+  // AG.11f: offline, a platform in the fallback admits by rule (its provider, natures,
+  // interface kinds) rather than by id, as it does when the catalog is loaded.
   const containerDef = getContainerTypeById(nodeType);
-  if (containerDef && getCanContainRoleIds(containerDef).length > 0) {
+  if (containerDef && hasCanContainRules(containerDef)) {
     return containerDef.containerStyle === 'logical-boundary' ? 'logicalBoundary' : 'container';
   }
 
@@ -80,8 +92,13 @@ export function isContainerType(nodeType: string, catalog?: CatalogResolver | nu
   if (catalog) {
     const resolved = catalog.resolveNodeType(nodeType);
     if (resolved?.role) {
-      return resolved.role.rfVisualType === 'container' ||
-        (resolved.role.isContainer && getCanContainRoleIds(resolved.role).length > 0);
+      // A container that admits nothing is a dead box, not a container; a
+      // platform admits by nature, interface or provider rather than by id.
+      const cc = resolved.role.canContain;
+      const admits = Array.isArray(cc)
+        ? cc.length > 0
+        : !!(cc?.roleIds?.length || cc?.natures?.length || cc?.interfaceKinds?.length || cc?.providers?.length);
+      return resolved.role.isContainer === true && admits;
     }
   }
 
@@ -89,7 +106,7 @@ export function isContainerType(nodeType: string, catalog?: CatalogResolver | nu
   if (rfType === 'container') return true;
 
   const containerDef = getContainerTypeById(nodeType);
-  return !!containerDef && getCanContainRoleIds(containerDef).length > 0;
+  return !!containerDef && hasCanContainRules(containerDef);
 }
 
 export function isLogicalBoundaryType(nodeType: string, catalog?: CatalogResolver | null): boolean {

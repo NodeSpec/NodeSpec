@@ -19,11 +19,23 @@ import {
   assessNodeReadiness,
   type ReadinessGap,
 } from "../../_shared/task-document-generator.ts";
+import { recordFingerprint } from "../../_shared/node-memory.ts";
 import { PatchOperationSchema } from "../../_shared/patch-schema.ts";
-import { loadTaskStateByNode, reconcileTaskItemOrphans } from "../../_shared/task-deltas.ts";
+import { loadTaskStateByNode, preserveAddedTasksSection, reconcileTaskItemOrphans } from "../../_shared/task-deltas.ts";
+import { loadNodeConstraints, loadConstraintsAndRules, constraintRef, countConstraintUse, asRuleGraph, workflowsServedByNodes, type NodeConstraint } from "../../_shared/node-constraints.ts";
+import { evaluateChecks, ruleSignals, repeatedLearnings, RECURRING_GAP_AT, SIGNAL_ASKS, type RuleView, type Violation } from "../../_shared/constraint-rules.ts";
+import { learningOf } from "../../_shared/node-memory.ts";
+import { chainReport, CHAIN_REMEDIATIONS, type ChainGap, type ChainOutcome, type ChainReport } from "../../_shared/chain.ts";
+import { servesOf } from "../../_shared/vision-sentences.ts";
+import { loadServedVision, servedVisionText, type ServedVision } from "../../_shared/served-vision.ts";
+import { getEffectiveTier, getProjectTier } from "../../_shared/deployment.ts";
+import { workflowsAllowed } from "../../_shared/workflow-gate.ts";
+import { UNTRUSTED_ADVISORY, wrapField } from "../../_shared/untrusted-data.ts";
 import { liveNodeIdSet, filterMappingsToLiveNodes } from "../../_shared/mapping-liveness.ts";
 import type { AuthResult, MCPResponse } from "../shared.ts";
-import { checkScope, resolveProjectByName, UUID_RE } from "../shared.ts";
+import { checkScope, resolveProjectByName, resolveBranchId, UUID_RE, actorLabel, credentialOf } from "../shared.ts";
+import { nodeLeasesOfOthers } from "./checkouts.ts";
+import { waitingProposals } from "./change-router.ts";
 
 // deno-lint-ignore no-explicit-any
 type AnyRecord = Record<string, any>;
@@ -35,6 +47,8 @@ type AnyRecord = Record<string, any>;
 // UUIDs never reach packets or readiness reports (read-time pruning per
 // mapping-liveness.ts; write-time cascade is wrong across branches).
 async function loadSpecPlane(supabase: SupabaseClient, projectId: string, liveNodeIds: Set<string>): Promise<{
+  /** AA.1: the chain reads every requirement of this specification, mapped or not. */
+  specId: string | null;
   vision: string | undefined;
   requirementsByNode: Record<string, AnyRecord[]>;
   requirementNodeMap: Record<string, string[]>;
@@ -87,37 +101,50 @@ async function loadSpecPlane(supabase: SupabaseClient, projectId: string, liveNo
       }
     }
   }
-  return { vision, requirementsByNode, requirementNodeMap, requirementRowIdMap };
+  return { specId: spec ? String(spec.id) : null, vision, requirementsByNode, requirementNodeMap, requirementRowIdMap };
+}
+
+/** AA.6: node id → the requirement ROW uuids mapped to it, for loadServedVision. */
+function requirementRowsByNode(nodes: AnyRecord[], requirementsByNode: Record<string, AnyRecord[]>, requirementRowIdMap: Record<string, string>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const n of nodes) {
+    const id = String(n.id);
+    out.set(id, (requirementsByNode[id] ?? []).map((r) => requirementRowIdMap[String(r.requirementId)]).filter((x): x is string => !!x));
+  }
+  return out;
 }
 
 export async function handleGenerateTaskDocs(
   supabase: SupabaseClient,
   auth: AuthResult,
-  args: { project_id: string; branch_id: string; node_ids?: string[]; external_agent?: string },
+  args: { project_id: string; branch_id?: string; node_ids?: string[]; external_agent?: string },
 ): Promise<MCPResponse> {
   if (!checkScope(auth, 'propose')) {
     return { success: false, error: 'Insufficient permissions: propose scope required' };
   }
-  if (!args.project_id || !args.branch_id) {
-    return { success: false, error: 'project_id and branch_id are required' };
+  if (!args.project_id) {
+    return { success: false, error: 'project_id is required (branch_id is optional and defaults to the primary branch)' };
   }
 
   const resolved = await resolveProjectByName(supabase, auth.userId!, args.project_id);
   if ('error' in resolved) return resolved.error;
   const projectId = resolved.project.id;
+  // V3 3.2: branch_id is optional; the primary branch is the default.
+  const branchId = await resolveBranchId(supabase, projectId, args.branch_id);
+  if (!branchId) return { success: false, error: 'No primary branch found for this project' };
 
   const { data: branch } = await supabase
     .from('branches')
     .select('id')
-    .eq('id', args.branch_id)
+    .eq('id', branchId)
     .eq('project_id', projectId)
     .maybeSingle();
   if (!branch) return { success: false, error: 'Branch not found' };
 
   const { data: snapshot } = await supabase
     .from('graph_snapshots')
-    .select('graph_data')
-    .eq('branch_id', args.branch_id)
+    .select('graph_data, patch_sequence')
+    .eq('branch_id', branchId)
     .order('patch_sequence', { ascending: false })
     .order('created_at', { ascending: false })
     .limit(1)
@@ -127,10 +154,23 @@ export async function handleGenerateTaskDocs(
   if (nodes.length === 0) {
     return { success: false, error: 'Branch has no nodes — propose an architecture first, then generate task docs.' };
   }
+  // AL.11: the graph version these documents are generated from. The accept
+  // compares the branch's later patches against it and applies nothing when
+  // one changed a document or its node meanwhile. Not best-effort: without it
+  // a later accept would overwrite whatever landed in between.
+  const { data: headRow, error: headError } = await supabase
+    .from('graph_patches').select('sequence').eq('branch_id', branchId)
+    .order('sequence', { ascending: false }).limit(1).maybeSingle();
+  if (headError) {
+    return { success: false, error: `Could not read the branch's head, so no task document was generated: ${headError.message}` };
+  }
+  const head = typeof (headRow as { sequence?: unknown } | null)?.sequence === 'number' ? (headRow as { sequence: number }).sequence : 0;
+  const snapshotSequence = (snapshot as { patch_sequence?: unknown } | null)?.patch_sequence;
+  const baseSequence = typeof snapshotSequence === 'number' && snapshotSequence < head ? snapshotSequence : head;
 
-  const catalogs = await loadCatalogs(supabase);
+  const catalogs = await loadCatalogs(supabase, { projectIds: [projectId] });
 
-  const { vision, requirementsByNode, requirementNodeMap } = await loadSpecPlane(supabase, projectId, liveNodeIdSet(graph.nodes as Record<string, unknown>));
+  const { vision, requirementsByNode, requirementNodeMap, requirementRowIdMap } = await loadSpecPlane(supabase, projectId, liveNodeIdSet(graph.nodes as Record<string, unknown>));
 
   // Target selection: every node with a deliverable — N5.16 (owner): HOSTING
   // containers carry task docs too (VPC gateways, compose definitions); only the
@@ -153,6 +193,7 @@ export async function handleGenerateTaskDocs(
   // since the N5.8 none-skip; containers made it likely).
   const skipped: string[] = [];
   let created = 0, refreshed = 0, alreadyFresh = 0;
+  const packetNodes: string[] = [];
 
   // A4 (docs/WORK_LOOP_PLAN.md): one batch read of recorded task done-state so
   // regenerated docs render `[x]` for done tasks instead of wiping progress.
@@ -162,6 +203,44 @@ export async function handleGenerateTaskDocs(
   try {
     taskStateByNode = await loadTaskStateByNode(supabase, projectId);
   } catch { /* generation proceeds stateless */ }
+
+  // AA.0 (R.2a): the constraints each node must honour, in one batch. Unlike
+  // task state this is not best-effort: a doc generated without them would
+  // tell the agent there are none.
+  let constraintsByNode: Map<string, NodeConstraint[]>;
+  try {
+    constraintsByNode = await loadNodeConstraints(supabase, projectId, leafNodes.map((n: AnyRecord) => String(n.id)), undefined, graph);
+  } catch (err) {
+    return { success: false, error: `Could not read the project's constraints, so no task document was generated: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  // AA.6: the vision sentences each node serves. Not best-effort either: a doc
+  // generated without them would say the node serves nothing.
+  let servedByNode: Map<string, ServedVision>;
+  try {
+    servedByNode = await loadServedVision(supabase, projectId, branchId, vision, requirementRowsByNode(leafNodes, requirementsByNode, requirementRowIdMap));
+  } catch (err) {
+    return { success: false, error: `Could not read which vision sentences these nodes serve, so no task document was generated: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  // AL.11 (owner 2026-10-01: "Fix task document checkout, this is critical"):
+  // a task document changes only when nobody else is working from it. A node
+  // another agent holds (the node itself, or task or code work inside it)
+  // keeps its document as it is, and so does a node whose document a waiting
+  // proposal already changes. The other nodes are generated; each one held
+  // back says by whom. Neither read is best-effort: a failed read generates
+  // nothing rather than writing over someone's work.
+  const leases = await nodeLeasesOfOthers(supabase, auth, projectId);
+  if (leases.error) {
+    return { success: false, error: `Could not read who holds these nodes, so no task document was generated: ${leases.error}` };
+  }
+  const waiting = await waitingProposals(supabase, projectId);
+  if (!waiting) {
+    return { success: false, error: 'Could not read the waiting proposals, so no task document was generated. Try again.' };
+  }
+  const waitingOn = new Map<string, { id: string; by: string }>();
+  for (const w of waiting) for (const k of w.keys) if (!waitingOn.has(k)) waitingOn.set(k, { id: w.id, by: w.by });
+  const held: AnyRecord[] = [];
 
   const meta = (summary: string) => ({
     id: crypto.randomUUID(),
@@ -193,36 +272,65 @@ export async function handleGenerateTaskDocs(
       skipped.push(`${node.label}: no deliverable (${why}) — no task doc generated`);
       continue;
     }
+    const existingDoc = findExistingTaskArtifact((graph.artifacts ?? {}) as AnyRecord, node.id) as AnyRecord | null;
+    const lease = leases.byNode.get(String(node.id))
+      ?? (node.parentId && leases.byNode.get(String(node.parentId))?.level === 'node'
+        && (catalogs.nodeRoles[node.type]?.capability_tags ?? []).includes('part')
+        ? leases.byNode.get(String(node.parentId)) : undefined);
+    if (lease) {
+      const where = lease.node_id === node.id ? (lease.level === 'node' ? 'holds the node' : `holds ${lease.level} work in it`) : 'holds the node it is a part of';
+      const line = `${node.label}: ${lease.holder_label} ${where} since ${lease.since}, so its task document was left as it is. Ask them, or regenerate it once the hold ends.`;
+      held.push({ nodeId: node.id, label: node.label, by: lease.holder_label, since: lease.since, level: lease.level, line });
+      skipped.push(line);
+      continue;
+    }
+    const waits = (existingDoc ? waitingOn.get(`artifact:${existingDoc.id}`) : undefined) ?? waitingOn.get(`taskdoc:${node.id}`);
+    if (waits) {
+      const line = `${node.label}: proposal ${waits.id} (from ${waits.by}) already changes its task document, so it was left as it is. The user accepts or rejects that one first.`;
+      held.push({ nodeId: node.id, label: node.label, by: waits.by, proposalId: waits.id, line });
+      skipped.push(line);
+      continue;
+    }
     const nodeForGen = {
       id: node.id, label: node.label, type: node.type,
       technology: node.technology, parentId: node.parentId,
-      ports: node.ports, metadata: node.metadata,
+      metadata: node.metadata,
     };
     // deno-lint-ignore no-explicit-any
+    const served = servedByNode.get(String(node.id));
     const content = generateTaskDocument({
       node: nodeForGen, graph, catalogs, requirements: reqs,
-      projectVision: vision, requirementNodeMap,
+      servedVision: served, requirementNodeMap,
       taskState: taskStateByNode.get(node.id),
+      constraints: constraintsByNode.get(node.id),
       // deno-lint-ignore no-explicit-any
     } as any);
+    // deno-lint-ignore no-explicit-any
+    const fp = computeTaskContextFingerprint(nodeForGen as any, graph as any, reqs as any, servedVisionText(served), catalogs as any, constraintsByNode.get(node.id));
+
+    const existing = existingDoc;
+    // N5.17: authored Implementation Context survives regeneration; REVIEW-NEEDED
+    // is flagged only when the derived context actually changed (fingerprint flip),
+    // not on a generator-version content diff. Y: so does the person's Added Tasks.
+    const preserved = existing
+      ? preserveAddedTasksSection(
+        preserveImplementationContextSection(
+          content, String(existing.content ?? ''),
+          { flagReview: fp.fingerprint !== existing.metadata?.taskContextFingerprint?.fingerprint },
+        ),
+        String(existing.content ?? ''),
+      )
+      : content;
     // A4: reconcile state rows against the keys this regeneration actually
     // emits — vanished keys are ORPHANED (never deleted), reappearing keys
-    // restored. Best-effort: reconciliation must never fail a generation.
+    // restored. Y: against the doc as it will be stored, Added Tasks included,
+    // so a person's task is never orphaned by the list regenerating around it.
+    // Best-effort: reconciliation must never fail a generation.
     try {
-      await reconcileTaskItemOrphans(supabase, projectId, node.id, content);
+      await reconcileTaskItemOrphans(supabase, projectId, node.id, preserved);
     } catch { /* non-fatal */ }
-    // deno-lint-ignore no-explicit-any
-    const fp = computeTaskContextFingerprint(nodeForGen as any, graph as any, reqs as any, vision, catalogs as any);
 
-    const existing = findExistingTaskArtifact((graph.artifacts ?? {}) as AnyRecord, node.id) as AnyRecord | null;
     if (existing) {
-      // N5.17: authored Implementation Context survives regeneration; REVIEW-NEEDED
-      // is flagged only when the derived context actually changed (fingerprint flip),
-      // not on a generator-version content diff.
-      const preserved = preserveImplementationContextSection(
-        content, String(existing.content ?? ''),
-        { flagReview: fp.fingerprint !== existing.metadata?.taskContextFingerprint?.fingerprint },
-      );
       if (existing.content === preserved) { alreadyFresh++; continue; }
       patches.push({
         type: 'update_artifact',
@@ -231,12 +339,14 @@ export async function handleGenerateTaskDocs(
           id: existing.id,
           changes: {
             content: preserved, status: 'draft', updatedAt: now,
-            metadata: { ...(existing.metadata ?? {}), taskContextFingerprint: fp, stale: false },
+            // AA.7: the fingerprints the document has carried, for the node's memory flags.
+            metadata: { ...recordFingerprint(existing.metadata as Record<string, unknown> | undefined, fp), stale: false },
           },
         },
       });
       explanations.push(`Regenerated task packet for ${node.label} (context changed since last generation)`);
       refreshed++;
+      packetNodes.push(String(node.id));
     } else {
       const artifactId = crypto.randomUUID();
       patches.push({
@@ -248,11 +358,12 @@ export async function handleGenerateTaskDocs(
           content, language: 'markdown', status: 'draft',
           description: `Implementation task document for ${node.label}`,
           createdAt: now, updatedAt: now,
-          metadata: { taskContextFingerprint: fp },
+          metadata: recordFingerprint({}, fp),
         },
       });
       explanations.push(`Generated task packet for ${node.label}: mapped requirements, contracts, neighbors, and technology context`);
       created++;
+      packetNodes.push(String(node.id));
       const currentLinks = Array.isArray(node.artifacts) ? node.artifacts : [];
       patches.push({
         type: 'update_node',
@@ -263,6 +374,18 @@ export async function handleGenerateTaskDocs(
     }
   }
 
+  // R.2c: guidance is used when it reaches a packet; its count says so.
+  const guided: Record<string, { fired: number }> = {};
+  for (const id of packetNodes) for (const c of constraintsByNode.get(id) ?? []) if (c.kind !== 'check') guided[c.id] = { fired: 1 };
+  await countConstraintUse(supabase, projectId, guided);
+
+  if (patches.length === 0 && held.length > 0) {
+    return {
+      success: false,
+      error: `No task document was generated. ${held.map((h) => h.line).join(' ')}`,
+      data: { generated: 0, refreshed: 0, alreadyFresh, held, skipped },
+    };
+  }
   if (patches.length === 0) {
     return {
       success: true,
@@ -283,24 +406,26 @@ export async function handleGenerateTaskDocs(
     }
   }
 
-  const externalAgent = args.external_agent || 'external-mcp-agent';
+  // O.2: the nickname when given, else the proven credential. Never 'external-mcp-agent'.
+  const externalAgent = actorLabel(auth, args.external_agent);
+  const cred = credentialOf(auth);
   const aiRunId = crypto.randomUUID();
   const { error: runError } = await supabase.from('ai_runs').insert({
-    id: aiRunId, project_id: projectId, branch_id: args.branch_id,
+    id: aiRunId, project_id: projectId, branch_id: branchId,
     model: 'task-generator', prompt_hash: 'mcp-task-docs', status: 'completed',
     completed_at: now,
-    metadata: { source: 'mcp-task-docs', requestedBy: externalAgent, patchCount: patches.length, authMethod: auth.authMethod, apiKeyId: auth.keyId || null },
+    metadata: { source: 'mcp-task-docs', requestedBy: externalAgent, patchCount: patches.length, authMethod: auth.authMethod, apiKeyId: auth.keyId || null, credential: cred.delegate, credentialLabel: cred.label },
   });
   if (runError) return { success: false, error: `Failed to create AI run: ${runError.message}` };
 
   const proposalId = crypto.randomUUID();
   const { error: proposalError } = await supabase.from('ai_proposals').insert({
     id: proposalId, ai_run_id: aiRunId,
-    source_branch_id: args.branch_id, proposal_branch_id: args.branch_id,
+    source_branch_id: branchId, proposal_branch_id: branchId,
     status: 'pending',
     patches: patches.map((patch, i) => ({ patch, status: 'pending', explanation: explanations[i] ?? patch.metadata.summary })),
     validation_expectations: [],
-    metadata: { source: 'mcp-task-docs', requestedBy: externalAgent, authMethod: auth.authMethod, apiKeyId: auth.keyId || null },
+    metadata: { source: 'mcp-task-docs', requestedBy: externalAgent, authMethod: auth.authMethod, apiKeyId: auth.keyId || null, credential: cred.delegate, credentialLabel: cred.label, baseSequence },
   });
   if (proposalError) return { success: false, error: `Failed to create proposal: ${proposalError.message}` };
 
@@ -309,6 +434,8 @@ export async function handleGenerateTaskDocs(
     data: {
       proposalId, aiRunId,
       generated: created, refreshed, alreadyFresh, skipped,
+      ...(held.length > 0 ? { held } : {}),
+      baseSequence,
       patchCount: patches.length,
       status: 'pending',
       message: `Deterministic task documents prepared for ${created + refreshed} node(s) as a pending proposal.`,
@@ -341,6 +468,8 @@ const GAP_REMEDIATIONS: Record<string, string> = {
   technology: "Ask the user which technology the component uses (search_catalog to explore options), then bind it via the inspector — or confirm it is intentionally technology-neutral.",
   mapping: "Map existing requirements with map_requirement, or add missing ones upstream with create_requirement, then regenerate the task doc.",
   tests: "Call get_test_plan for each named requirement, re-run the failing/stale tests, and report outcomes via report_test_results — a fresh passing result flips the criterion met and clears staleness.",
+  "container-edge": "An edge ends on a container (a host, a place or a group) instead of a node. Ask the user which node inside is meant, then propose update_edge moving that end to it (relatedNodeIds are the nodes inside). Stored edges are never rewritten for you.",
+  constraint: "Each names a check this project holds to that the architecture breaks now. Change the architecture so it holds (propose_patches), or, when the break is intended, ask the user and file update_constraint { constraintId, addWaiver: { target, reason } } for them to accept. A refusing check stops only a proposal that adds a break; one already standing is reported here.",
 };
 
 // The emitted gap shape: resolveWith stripped (see GAP_REMEDIATIONS), everything else kept.
@@ -362,23 +491,28 @@ function countByKind(gaps: ReadinessGap[]): Record<string, number> {
 export async function handleGetBuildReadiness(
   supabase: SupabaseClient,
   auth: AuthResult,
-  args: { project_id: string; branch_id: string; node_ids?: string[]; detail?: 'summary' | 'full' },
+  args: { project_id: string; branch_id?: string; node_ids?: string[]; detail?: 'summary' | 'full' },
+  /** AA.1: the work queue reads only buildOrder, so it skips the chain's reads. */
+  opts: { chain?: boolean } = {},
 ): Promise<MCPResponse> {
   if (!checkScope(auth, 'read')) {
     return { success: false, error: 'Insufficient permissions: read scope required' };
   }
-  if (!args.project_id || !args.branch_id) {
-    return { success: false, error: 'project_id and branch_id are required' };
+  if (!args.project_id) {
+    return { success: false, error: 'project_id is required (branch_id is optional and defaults to the primary branch)' };
   }
 
   const resolved = await resolveProjectByName(supabase, auth.userId!, args.project_id);
   if ('error' in resolved) return resolved.error;
   const projectId = resolved.project.id;
+  // V3 3.2: branch_id is optional; the primary branch is the default.
+  const branchId = await resolveBranchId(supabase, projectId, args.branch_id);
+  if (!branchId) return { success: false, error: 'No primary branch found for this project' };
 
   const { data: branch } = await supabase
     .from('branches')
     .select('id')
-    .eq('id', args.branch_id)
+    .eq('id', branchId)
     .eq('project_id', projectId)
     .maybeSingle();
   if (!branch) return { success: false, error: 'Branch not found' };
@@ -386,7 +520,7 @@ export async function handleGetBuildReadiness(
   const { data: snapshot } = await supabase
     .from('graph_snapshots')
     .select('graph_data')
-    .eq('branch_id', args.branch_id)
+    .eq('branch_id', branchId)
     .order('patch_sequence', { ascending: false })
     .order('created_at', { ascending: false })
     .limit(1)
@@ -397,10 +531,10 @@ export async function handleGetBuildReadiness(
     return { success: false, error: 'Branch has no nodes — propose an architecture first.' };
   }
 
-  const catalogs = await loadCatalogs(supabase);
+  const catalogs = await loadCatalogs(supabase, { projectIds: [projectId] });
   // R6: vision joins the destructure — the readiness staleness check must hash
   // the SAME fields the generators stamp, or every packet reads stale forever.
-  const { vision, requirementsByNode, requirementNodeMap, requirementRowIdMap } = await loadSpecPlane(supabase, projectId, liveNodeIdSet(graph.nodes as Record<string, unknown>));
+  const { specId, vision, requirementsByNode, requirementNodeMap, requirementRowIdMap } = await loadSpecPlane(supabase, projectId, liveNodeIdSet(graph.nodes as Record<string, unknown>));
 
   // C4 step 4: tests triage — the verification backlog, batch-queried ONCE for every
   // mapped requirement row uuid. Failing cases mean the criterion's evidence says
@@ -434,6 +568,51 @@ export async function handleGetBuildReadiness(
     return { success: false, error: 'No matching nodes. Check node_ids against get_architecture_overview.' };
   }
 
+  // AA.0: the fingerprint hashes the constraints that apply, so readiness reads
+  // them the way generation does, or every doc would read as stale.
+  let readinessConstraints = new Map<string, NodeConstraint[]>();
+  let projectConstraints: NodeConstraint[] | null = null;
+  // R.2b: the same read gives the checks (one read of project_constraints).
+  // AC: below Indie there are none: no note, no advisory, no signal.
+  let rules: RuleView[] = [];
+  let carried = false;
+  try {
+    const read = await loadConstraintsAndRules(supabase, projectId);
+    carried = read.carried;
+    if (carried) {
+      ({ constraints: projectConstraints, rules } = read);
+      readinessConstraints = await loadNodeConstraints(supabase, projectId, leafNodes.map((n: AnyRecord) => String(n.id)), projectConstraints, graph);
+    }
+  } catch { /* staleness is then judged without them; generation refuses loudly */ }
+  // AA.6: and the vision sentences each node serves, the same way; read only
+  // for the nodes that have a document to judge.
+  let readinessServed = new Map<string, ServedVision>();
+  try {
+    const withDoc = leafNodes.filter((n: AnyRecord) => findExistingTaskArtifact((graph.artifacts ?? {}) as AnyRecord, n.id));
+    readinessServed = await loadServedVision(supabase, projectId, branchId, vision, requirementRowsByNode(withDoc, requirementsByNode, requirementRowIdMap));
+  } catch { /* judged as serving nothing; generation refuses loudly */ }
+
+  // R.2b: the project's checks on the graph as it stands. A break is an
+  // advisory on the nodes it touches, never a blocker: a refusing check
+  // stops a proposal that adds a break, and nothing here waits on it.
+  const checkRules = rules.filter((r) => r.kind === 'check');
+  const breaksByNode = new Map<string, Violation[]>();
+  if (checkRules.length > 0) {
+    const rg = asRuleGraph(graph)!;
+    const lanes = checkRules.some((r) => r.scopeKind === 'workflow')
+      ? await workflowsServedByNodes(supabase, projectId, Object.keys(rg.nodes))
+      : undefined;
+    for (const v of evaluateChecks(checkRules, rg, lanes).violations) {
+      for (const id of v.nodeIds) (breaksByNode.get(id) ?? breaksByNode.set(id, []).get(id)!).push(v);
+    }
+  }
+  const ruleById = new Map(rules.map((r) => [r.id, r]));
+  const breakDetail = (v: Violation) => {
+    const r = ruleById.get(v.constraintId);
+    const named = r && !r.mark && r.title ? ` "${r.title}"` : '';
+    return `Breaks ${constraintRef(v.constraintId)}${named} (${v.severity === 'refuse' ? 'refuses' : 'warns'}): ${v.message}`;
+  };
+
   const results: AnyRecord[] = [];
   const upstreamByNode = new Map<string, string[]>();
   for (const node of leafNodes) {
@@ -453,7 +632,7 @@ export async function handleGetBuildReadiness(
       });
     } else {
       // deno-lint-ignore no-explicit-any
-      const fp = computeTaskContextFingerprint(node as any, graph as any, reqs as any, vision, catalogs as any);
+      const fp = computeTaskContextFingerprint(node as any, graph as any, reqs as any, servedVisionText(readinessServed.get(String(node.id))), catalogs as any, readinessConstraints.get(String(node.id)));
       const storedFpRaw = (existing.metadata as AnyRecord | undefined)?.taskContextFingerprint;
       // The stamp is an object ({fingerprint, timestamp, fields}); compare the hash,
       // tolerating a legacy raw-string form.
@@ -484,6 +663,14 @@ export async function handleGetBuildReadiness(
         staleCases += stat.stale;
         affectedReqIds.push(String(r.requirementId));
       }
+    }
+    for (const v of breaksByNode.get(String(node.id)) ?? []) {
+      advisories.push({
+        kind: 'constraint',
+        detail: breakDetail(v),
+        resolveWith: '',
+        ...(v.nodeIds.length > 1 ? { relatedNodeIds: v.nodeIds.filter((id) => id !== node.id) } : {}),
+      });
     }
     if (failedCases > 0 || staleCases > 0) {
       advisories.push({
@@ -535,6 +722,36 @@ export async function handleGetBuildReadiness(
 
   const blockedCount = results.filter((r) => !r.ready).length;
 
+  // 8.3: the project-level advisory row — candidates (outcomes and imported
+  // candidates alike) that were never promoted: still pending on this branch.
+  // Advisory, never a blocker: the build brief is complete; the IDEATION is
+  // ahead of the specification. One count, one row, the resolution named.
+  const { count: candidatesOpen } = await supabase
+    .from('requirement_candidates')
+    .select('id', { count: 'exact', head: true })
+    .eq('project_id', projectId)
+    .eq('branch_id', branchId)
+    .eq('status', 'pending');
+  const openCandidates = candidatesOpen ?? 0;
+  const projectAdvisories: Array<{ kind: string; count: number; detail: string }> = openCandidates > 0
+    ? [{ kind: 'candidates', count: openCandidates, detail: `${openCandidates} outcome${openCandidates === 1 ? '' : 's'} under Work ${openCandidates === 1 ? 'has' : 'have'} never been made a requirement` }]
+    : [];
+
+  // AA.1: the chain, by plan. Project-wide on every call (a node filter
+  // narrows the node rows, never the chain). Reported, never enforced: no
+  // node's `ready` moves and no other tool waits on it. A constraint that
+  // reaches no node is judged on a whole-project read only.
+  let chain: ChainReport | null = null;
+  if (opts.chain !== false) {
+    let unreached: string[] | undefined;
+    if (filter.length === 0 && projectConstraints) {
+      const reached = new Set<string>();
+      for (const list of readinessConstraints.values()) for (const c of list) reached.add(c.id);
+      unreached = projectConstraints.filter((c) => !reached.has(c.id)).map((c) => constraintRef(c.id));
+    }
+    chain = await loadChain(supabase, auth, projectId, resolved.project.role, branchId, specId, vision, projectConstraints ? projectConstraints.length : null, unreached);
+  }
+
   // WS1 two-step protocol: unscoped calls default to SUMMARY rows (counts by kind);
   // scoped calls default to FULL gap objects. An explicit `detail` arg overrides either
   // default. remediations carries the one resolution action per gap kind present.
@@ -546,6 +763,12 @@ export async function handleGetBuildReadiness(
     for (const g of [...(r.blockers as ReadinessGap[]), ...(r.advisories as ReadinessGap[])]) {
       if (GAP_REMEDIATIONS[g.kind]) remediations[g.kind] = GAP_REMEDIATIONS[g.kind];
     }
+  }
+  if (chain) {
+    for (const g of [...chain.blockers, ...chain.advisories]) remediations[g.kind] = CHAIN_REMEDIATIONS[g.kind];
+  }
+  if (openCandidates > 0) {
+    remediations.candidates = 'Read get_outcome_board: each pending candidate is an outcome the user has not decided on. Propose a promotion (checkout_task at level outcome, then propose_patches with promote_candidate) or ask the user to settle or dismiss it in the Work view of the app; nothing here blocks the build.';
   }
   const nodeRows = results.map((r) => detailLevel === 'full'
     ? {
@@ -559,21 +782,150 @@ export async function handleGetBuildReadiness(
       advisoryCounts: countByKind(r.advisories as ReadinessGap[]),
     });
 
+  // R.2c: what this project's own use says about its constraints, on a
+  // whole-project read. Evidence and an ask; the agent drafts, the user decides.
+  const constraintSignals: Array<Record<string, unknown>> = [];
+  if (filter.length === 0 && carried) {
+    for (const sig of ruleSignals(rules)) {
+      const r = ruleById.get(sig.constraintId);
+      constraintSignals.push({ signal: sig.signal, constraintId: sig.constraintId, ref: constraintRef(sig.constraintId), ...(r && !r.mark && r.title ? { title: r.title } : {}), evidence: sig.detail, ask: SIGNAL_ASKS[sig.signal] });
+    }
+    const schemaNodes = results.filter((r) => (r.blockers as ReadinessGap[]).some((g) => g.kind === 'schema')).map((r) => String(r.nodeId));
+    const hasSchemaCheck = rules.some((r) => r.check?.predicate === 'contract_has_schema');
+    if (schemaNodes.length >= RECURRING_GAP_AT && !hasSchemaCheck) {
+      constraintSignals.push({ signal: 'recurring_gap', gap: 'schema', nodeIds: schemaNodes, evidence: `${schemaNodes.length} nodes build against a connection with no contract schema.`, ask: SIGNAL_ASKS.recurring_gap });
+    }
+    const learned = nodes
+      .map((n) => ({ nodeId: String(n.id), doc: findExistingTaskArtifact((graph.artifacts ?? {}) as AnyRecord, n.id) as AnyRecord | null }))
+      .map(({ nodeId, doc }) => ({ nodeId, text: learningOf(doc?.content)?.text ?? '' }))
+      .filter((e) => e.text);
+    for (const hit of repeatedLearnings(learned)) {
+      constraintSignals.push({ signal: 'repeated_learning', text: hit.text, nodeIds: hit.nodeIds, evidence: `Written in the Implementation Context of ${hit.nodeIds.length} nodes.`, ask: SIGNAL_ASKS.repeated_learning });
+    }
+  }
+
+  const chainGaps = chain ? chain.blockers.length : 0;
   return {
     success: true,
     data: {
       detail: detailLevel,
       nodes: nodeRows,
+      // 8.3: the Readiness · CANDIDATES OPEN row — advisory, project-wide.
+      candidatesOpen: openCandidates,
+      projectAdvisories,
+      ...(chain ? { chain: shapeChain(chain, detailLevel), untrustedDataAdvisory: UNTRUSTED_ADVISORY } : {}),
+      ...(constraintSignals.length > 0 ? { constraintSignals } : {}),
       remediations,
       buildOrder,
       ...(cyclic ? { buildOrderNote: 'Contract cycle detected — the tail of buildOrder is alphabetical, not topological.' } : {}),
-      message: blockedCount === 0
+      message: (blockedCount === 0
         ? `All ${results.length} node(s) are ready to build. Follow buildOrder.`
-        : `${blockedCount} of ${results.length} node(s) have blocking gaps.`,
+        : `${blockedCount} of ${results.length} node(s) have blocking gaps.`)
+        + (openCandidates > 0 ? ` ${openCandidates} outcome${openCandidates === 1 ? '' : 's'} under Work ${openCandidates === 1 ? 'has' : 'have'} never been made a requirement (advisory).` : '')
+        + (chainGaps > 0 ? ` The chain from vision to requirements has ${chainGaps} blocking gap${chainGaps === 1 ? '' : 's'} (${chain!.blockers.map((g) => g.kind).join(', ')}); nothing waits on ${chainGaps === 1 ? 'it' : 'them'}, so close ${chainGaps === 1 ? 'it' : 'them'} alongside the build.` : ''),
       // WS1: ~120 chars — the how lives in remediations, keyed by gap kind.
       nextAction: blockedCount === 0
-        ? 'Implement in buildOrder per each node\'s task document, expanding its work orders first.'
+        ? (chainGaps > 0
+          ? 'Implement in buildOrder per each node\'s task document; alongside, close the chain gaps per remediations.'
+          : 'Implement in buildOrder per each node\'s task document, expanding its work orders first.')
         : 'Fix per remediations (keyed by gap kind), then re-check blocked nodes with node_ids for full gap detail.',
     },
+  };
+}
+
+// ── AA.1: the chain's reads ─────────────────────────────────────────────────
+// All batch, none per row: the outcomes on the branch, every derivation of
+// the project, every live requirement of the specification, and (on plans
+// with Workflows) the branch's step maps. The rules are pure, in
+// _shared/chain.ts. A failed outcome read reports no chain rather than a
+// wrong one.
+async function loadChain(
+  supabase: SupabaseClient,
+  auth: AuthResult,
+  projectId: string,
+  role: string | undefined,
+  branchId: string,
+  specId: string | null,
+  vision: string | undefined,
+  constraintsRecorded: number | null,
+  unreachedConstraints: string[] | undefined,
+): Promise<ChainReport | null> {
+  let tier: Awaited<ReturnType<typeof getEffectiveTier>> = 'community';
+  try { tier = await getProjectTier(supabase, projectId, auth.userId, { role }); } catch { /* fail closed */ }
+  const workflows = workflowsAllowed(tier);
+
+  const { data: candRows, error: candErr } = await supabase
+    .from('requirement_candidates')
+    .select('id, key, kind, name, status, evidence, mark')
+    .eq('project_id', projectId)
+    .eq('branch_id', branchId)
+    .neq('status', 'dismissed');
+  if (candErr) return null;
+  const candidates = (Array.isArray(candRows) ? candRows : []) as Array<{ id: string; key: string; kind: string; name: string; status: string; evidence: unknown; mark: string | null }>;
+
+  const { data: derRows } = await supabase
+    .from('outcome_derivations')
+    .select('candidate_id, requirement_row_id')
+    .eq('project_id', projectId);
+  const derivations = (Array.isArray(derRows) ? derRows : []) as Array<{ candidate_id: string; requirement_row_id: string }>;
+  const derivedBy = new Map<string, number>();
+  const withOrigin = new Set<string>();
+  for (const d of derivations) {
+    derivedBy.set(d.candidate_id, (derivedBy.get(d.candidate_id) ?? 0) + 1);
+    withOrigin.add(d.requirement_row_id);
+  }
+
+  let requirements: Array<{ id: string; requirement_id: string; name: string; mark: string | null; archived_at: string | null }> = [];
+  if (specId) {
+    const { data: reqRows } = await supabase
+      .from('specification_requirements')
+      .select('id, requirement_id, name, mark, archived_at')
+      .eq('specification_id', specId);
+    requirements = ((Array.isArray(reqRows) ? reqRows : []) as typeof requirements).filter((r) => !r.archived_at);
+  }
+
+  const onStep = new Set<string>();
+  if (workflows && candidates.length > 0) {
+    const { data: mapRows } = await supabase
+      .from('outcome_step_maps')
+      .select('candidate_id')
+      .eq('branch_id', branchId);
+    for (const m of (Array.isArray(mapRows) ? mapRows : []) as Array<{ candidate_id: string }>) onStep.add(m.candidate_id);
+  }
+
+  const outcomes: ChainOutcome[] = candidates.map((c) => ({
+    id: c.id, key: c.key, name: c.name, kind: c.kind, status: c.status, mark: c.mark ?? null,
+    serves: servesOf(c.evidence), derived: derivedBy.get(c.id) ?? 0, onStep: onStep.has(c.id),
+  }));
+  return chainReport({
+    vision,
+    workflows,
+    outcomes,
+    requirements: requirements.map((r) => ({ requirementId: r.requirement_id, name: r.name, mark: r.mark ?? null, hasOrigin: withOrigin.has(r.id) })),
+    constraintsRecorded,
+    unreachedConstraints,
+  });
+}
+
+/** The chain as readiness emits it: user-authored words in the envelope; items only at detail 'full'. */
+function shapeChain(chain: ChainReport, detail: 'summary' | 'full'): AnyRecord {
+  const gap = (g: ChainGap): AnyRecord => {
+    const count = (g.items?.length ?? 0) + (g.more ?? 0);
+    if (!g.items) return { kind: g.kind, detail: g.detail };
+    if (detail === 'summary') return { kind: g.kind, detail: g.detail, count };
+    return {
+      kind: g.kind,
+      detail: g.detail,
+      count,
+      items: g.items.map((i) => ({ id: i.id, label: wrapField(i.label), ...(i.was ? { was: wrapField(i.was) } : {}), ...(i.mark ? { mark: i.mark } : {}) })),
+      ...(g.more ? { more: g.more } : {}),
+    };
+  };
+  return {
+    ready: chain.ready,
+    counts: chain.counts,
+    blockers: chain.blockers.map(gap),
+    advisories: chain.advisories.map(gap),
+    notes: chain.notes,
   };
 }

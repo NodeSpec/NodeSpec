@@ -474,6 +474,7 @@ export function getMetadataTypeForNodeType(nodeType: string): string | null {
     'logging': 'managed-service',
 
     'external-service': 'managed-service',
+    'notification-service': 'managed-service',
     'external-data': 'managed-service',
 
     'build-pipeline': 'managed-service',

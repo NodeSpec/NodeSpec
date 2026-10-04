@@ -1,6 +1,6 @@
 ---
 name: nodespec-oss-developer
-description: NodeSpec OSS Skill for Developers — drive implementation work on a project managed by a self-hosted NodeSpec Community Edition (the user runs NodeSpec locally and has its MCP server connected). Use whenever the user asks to plan, build, implement, continue, or verify work on a NodeSpec project — "design my architecture", "build the next node", "implement REQ-007", "work through the backlog", "run the verification loop", "what should I build next" — or whenever a repo contains a .nodespec/ directory (model.json / spec.json / tasks/ / tests/). NodeSpec is the source of truth for architecture, requirements, and acceptance criteria; this skill defines the end-to-end flow from empty project to verified software, the exact tool loop, the honesty rules that prevent invented schemas and unearned completions, and the token discipline. Do NOT use for editing the NodeSpec application's own source code — Community Edition users have that code checked out, and this skill governs building THEIR projects with NodeSpec, never modifying NodeSpec itself.
+description: NodeSpec OSS Skill for Developers. Drive implementation work on a project managed by the self-hosted, open source NodeSpec Community Edition (the user runs NodeSpec locally and has its MCP server connected). Use whenever the user asks to plan, build, implement, continue, or verify work on a NodeSpec project ("design my architecture", "build the next node", "implement REQ-007", "work through the backlog", "run the verification loop", "what should I build next"), or whenever a repo contains a .nodespec/ directory (model.json / spec.json / tasks/ / tests/). NodeSpec is the source of truth for architecture, requirements, and acceptance criteria; this skill defines the end-to-end flow from empty project to verified software, how the canvas holds nodes, the exact tool loop, the honesty rules that prevent invented schemas and unearned completions, and the token discipline. Do NOT use for editing the NodeSpec application's own source code: Community Edition users have that code checked out, and this skill governs building THEIR projects with NodeSpec, never modifying NodeSpec itself.
 ---
 
 # NodeSpec OSS Skill for Developers
@@ -19,7 +19,31 @@ trusted context; you supply the code. Three rules override everything else:
    re-fetching. One brief per node, one plan per requirement, summary-first
    readiness.
 
-## The flow at a glance — empty project to verified software
+## How NodeSpec works, in brief
+
+- **The canvas is the architecture.** A node has a catalog role (its `type`:
+  the job it does) and usually a catalog technology. Nodes connect through
+  edges, each carrying a contract (the interface: kind, schema). A
+  container holds nodes in one of three ways, read from its type: it
+  **runs** them (a runtime or cluster hosts them), it **places** them (a
+  network or cloud account their configuration names), or it **groups**
+  them (organization only). A node has one parent; a group whose nodes all
+  run on one host sits inside that host. An edge joins two nodes, never a
+  container.
+- **Nothing lands without the user.** Every graph write is a proposal the
+  user accepts or rejects in the app. Spec writes (requirements, vision)
+  follow the project's Autonomy settings per lane, filed directly or in a
+  `propose_patches` batch; a batch that sets the vision waits for the user
+  at every level. A proposal is checked
+  where it is filed: a node placed where its parent may not hold it, an
+  edge ending on a container, or a node someone else holds is refused by
+  name, and nothing is created.
+- **Git carries the model.** On a connected repository NodeSpec pushes
+  `.nodespec/` (`model.json`, `spec.json`, `tasks/*.task.md`,
+  `tests/*.tests.md`, `BOARD.md`); commits made outside NodeSpec come back
+  as change cards to reconcile.
+
+## The flow at a glance: empty project to verified software
 
 Every NodeSpec project moves through the same concrete pipeline. Each stage
 produces an artifact the next stage consumes; skipping a stage is what the
@@ -39,7 +63,13 @@ readiness gate exists to catch.
    graph and buildable work: contracts missing schemas (you draft them from
    the provided inputs and propose them), unresolved criterion owners,
    missing task docs. Clear blockers; advisories inform.
-5. **Implement, node by node.** Work `buildOrder`. The node's task document
+5. **Implement, node by node.** Work `buildOrder` — or let `get_work_queue`
+   serve it task-by-task (the same order), with `checkout_task` /
+   `release_checkout` marking who holds what when several agents share the
+   project (a checkout is coordination, never permission; a leased node is
+   locked: level `node` holds its structure, and work inside it runs in
+   parallel when each claim names its files in `touches`; release with a
+   `note` for whoever comes next). The node's task document
    (`.nodespec/tasks/<node>.task.md` in the repo, or the `get_project_context`
    brief) is the implementation spec — T-numbered tasks, configuration
    decisions, contract references. Your read set is the node's bound
@@ -47,9 +77,20 @@ readiness gate exists to catch.
 6. **Verify, requirement by requirement.** `get_test_plan` gives the
    scenarios; you implement and RUN them; `report_test_results` with each
    criterion's exact wording is the only thing that flips criteria met.
+   A passing report also releases your task checkouts on that requirement's
+   tasks as 'verified' — evidence, not declaration, closes the lease.
    Manual steps are the user's to confirm, never yours to report.
 7. **Close.** `mark_entity_complete` per node — it returns any still-unmet
    criteria, and unmet means not done. Then back to step 4 for the next node.
+
+One rule wraps every write: the project's Autonomy settings route it. A
+lane on "Propose" means your edit comes back as `routed: proposed` with a
+proposalId and NOTHING changed until the user accepts; "Ask first" refuses
+— discuss, never retry. Promotion of an outcome candidate is ALWAYS the
+user's act, in the app. Working beside other agents, guard requirement
+writes with `preconditions` (`value_equals` on `updated_at` is the cheap
+whole-row token): a row that changed since your read refuses loudly with
+the current state — re-read and re-submit, never overwrite blind.
 
 Git-connected projects wrap this loop: NodeSpec's pushes write the task docs,
 test plans, and board file into `.nodespec/`; your out-of-band commits come
@@ -88,7 +129,65 @@ Two hard routing rules:
   to the user (an `update_requirement` call or an `update_contract` patch
   proposal, or a plain question) instead of quietly picking a side.
 
-## Patch discipline — how graph writes actually behave
+## Designing architecture: the catalog is the vocabulary
+
+Every node's `type` is a catalog role id and its `technology` a catalog
+technology id. Proposing an invented id is the most common way an
+architecture proposal comes back wrong.
+
+1. **`search_catalog(query)`**: one call per capability you need
+   ("postgres", "message queue"). Each result carries its id, `when_to_use`,
+   a nature line, and for a role its `holds` line: whether it runs, places
+   or groups what it holds, or is a leaf, and what it may hold. The
+   `guidance` legend is the vocabulary: `treatment` (leaf: you author its
+   code; boundary: you configure or call it, never author its internals;
+   container: it holds other nodes), `ownership` and `configMode`.
+2. **`lookup_catalog`** on each id you settle on: purpose, config mode,
+   best practices, security guidance, SDK patterns, the docs URL, and for a
+   role everything it may hold. A row marked MIGRATED or RETIRED names its
+   successor.
+3. **Then propose** with the ids exactly as the catalog spells them.
+
+The rules the catalog encodes:
+
+- **A node has one parent**, and sits only where its parent may hold it;
+  a proposal that breaks it is refused naming what the parent holds. The
+  placement follows how the parent holds, so leave `placementKind` unset.
+- **Logical groups** (`application-module`, `bounded-context`,
+  `microservice-boundary`, `software-layer`) are optional organization:
+  nothing runs in them. A group whose nodes all run on one host sits inside
+  that host.
+- A **boundary** node is never decomposed: you configure or call it.
+- **Provider-branded managed services** (technology ids prefixed `aws-`,
+  `azure-`, `gcp-` and the like) belong inside their provider's platform
+  node; create it first.
+- **If nothing fits, say so.** The user can define a custom node in the
+  app. Never invent a catalog id.
+
+This edition ships a curated starter catalog, so a search returns fewer
+rows than a larger catalog would; the vocabulary and the rules are the same.
+
+### Where it runs
+
+- **The code is the node.** Its role says what job it does, its technology
+  the framework (Express, FastAPI, Next.js).
+- **The runtime that runs portable code is its host**: a container, a
+  virtual machine, a cluster, or a managed runtime that only runs it. Put
+  the node inside the host and keep its framework; the host's task document
+  writes the deploy definition (Dockerfile, compose service, manifest) for
+  each node it runs.
+- **Code written against a platform's own API is a leaf** with the platform
+  as its technology (a Lambda, a Cloudflare Worker), placed in its cloud
+  account. Its platform configuration is its own. Engines (n8n, Airflow)
+  are leaves too.
+- **A managed service** (a database, a queue, a bucket) sits in the network
+  or account it lives in.
+- **A network link** (VPN, NAT, a private endpoint) is a Network Connection
+  inside the VPC it serves.
+- Each task document says where its node runs (**Runs on:** the chain up to
+  the account, and the host with its technology).
+
+## Patch discipline: how graph writes actually behave
 
 `propose_patches` carries ALL graph writes, and its validator is strict so
 that mistakes fail loudly instead of landing quietly:
@@ -150,12 +249,23 @@ tool calls. Check `pendingRepositoryChanges`: if non-zero, reconcile FIRST via
 change to accept with patches, noise to dismiss). Never build on unreconciled
 drift.
 
+`nextAction` may lead with EXPANSION REQUESTED: the person pressed Expand on
+a node in the canvas and the request waits for you (MCP is not event driven;
+`stagedExplodes` lists the nodes). Read the node (`get_project_context` view
+`slice` says it too), claim its lease (`checkout_task` level `node`) and
+propose ONE `explode_node`. Once it is proposed the status says it waits for
+the person; do not propose it again.
+
 ### 1. Preflight (per work batch)
 `get_build_readiness(project_id, branch_id)` — unscoped returns SUMMARY:
 per-node `{ready, blockerCounts, advisoryCounts}`, `buildOrder`, and ONE
 `remediations` map keyed by gap kind. Pick the first not-ready node in
 `buildOrder`, then re-call scoped: `node_ids: [<that node>]` for full gap
 detail. Do not request `detail:'full'` unscoped.
+The `chain` block reports what the project lacks from vision to
+requirements: a vision the outcomes cite (`serves` on `create_candidate` /
+`update_candidate`), an outcome behind every requirement. Nothing waits on
+it; close its gaps alongside the build.
 
 ### 2. Clear blockers before writing any code
 - **`schema` blockers**: each carries `draftInputs` — both endpoint
@@ -186,7 +296,15 @@ files; grep wider only for symbols and conventions. Honor
 internals` on boundary nodes, execute `## Manual Steps` by telling the USER
 what to do (you cannot do console clicks for them). Only request
 `view:'structured'` when you need machine-readable fields you'll transform
-(never for prose context); `view:'full'` almost never.
+(never for prose context); `view:'full'` almost never. To check what moved
+around a node while you work on it, read `view:'slice'`: every edge with its
+full contract, its consumers' expectations, its requirements, tasks, tests
+and leases, the vision sentences that apply, and its memory
+(decisions, changes, hand-offs, its learning, criteria proven at a commit,
+each with who and commit; an entry flagged `review` was written before the
+node's context changed: re-check it before you rely on it), with its size
+beside the whole spec's and what it left out. Keep its `fingerprint` and pass it back as `since`;
+only the sections that changed come back. `budget` caps it in tokens.
 
 ### 4. Verify (per requirement the node serves)
 Doctrine: **plans follow schemas — schemas → plans → implement → verify.**
@@ -225,20 +343,70 @@ alone never flips met).
   the step; once they confirm, tick the criterion's box in the node's
   `.task.md` in the repo and push — the user approves the resulting change
   card. That approval, not your say-so, flips the criterion.
+- **Working beside other agents? Claim the criterion first.**
+  `checkout_task { level: 'criterion', ref_id: <requirement ROW uuid>,
+  criterion_id: <the criterion's id — list_requirements serves it on every
+  criterion> }`. The lease is exclusive (one criterion, one binding test,
+  one reported outcome): a refusal names the holder — verify a different
+  criterion instead of duplicating their work. Release it or let evidence
+  end it; 30 silent minutes makes it reclaimable.
+- **Write the failing test first, and REPORT the red.** A `failed` report
+  is not a mistake to hide: it flips `met` to false with provenance — a
+  genuine, auditable RED, the first half of the TDD cycle the lane is built
+  for. Implement, re-run exactly the failing tests, report the green.
 - A **failing** result is correct data — report it, fix the code, re-run
   exactly the failing tests, re-report. Fresh passes clear staleness.
 
 ### 5. Close the node
-`mark_entity_complete(node_id)` — this records your declaration and returns
+`mark_entity_complete(project_id, node_id)` records your declaration and returns
 the still-unmet criteria. If any remain, you are not done; go back to step 4.
 Then return to step 1 for the next node in `buildOrder`.
 
 ## Git-connected projects
-Pushes from NodeSpec refresh stale task docs and test plans automatically —
+Pushes from NodeSpec refresh stale task docs and test plans automatically:
 after the user accepts schema proposals, the regenerated docs land in the next
-push; re-read them rather than assuming your cached copy. Out-of-band edits you
-make to bound source files will surface as change cards and stale test cases —
-that is the system working; reconcile, re-run, re-report.
+push, so re-read them rather than trusting your cached copy. Commits made
+outside NodeSpec, yours included, come back as change cards (and stale test
+cases). That is the system working: reconcile each card, then re-run and
+re-report.
+
+**Reconcile a card in one read and one write.** `get_pending_changes` lists
+the cards; `get_pending_changes` with `change_event_id` answers one card's
+reconcile packet:
+
+- `files`: each changed file with its action, its `owner` (the node its
+  binding names) or a `suggestion` (the node that owns the nearest
+  bound directory, with the reason), `newDirectory` when it sits in a
+  directory the change adds, and its `kind` (task doc, test, spec or model
+  anchor).
+- `nodes`: each touched node's role, technology, contracts in and out with
+  the node on the other end, mapped requirements (locked, confirmed), tests,
+  live holds (yours marked `mine`), task-doc freshness, and
+  `lastFileRemoved`.
+- `signals`: `{ available: false }` in this edition. Read the changed files
+  yourself for new routes, dependencies and service directories.
+- `classification`: content-only, needs-binding, structural, spec,
+  model-edited, conflicts; `conflicts` names each node and why (a locked
+  requirement, someone else's hold).
+- `draft`: intents for `resolve_change` (add_node with a `ref`, bind_file,
+  connect_nodes, each citing `evidence: [{ path, line, note }]`), and notes
+  for what only you can judge (a removed route, a node with no files left,
+  a new outbound host).
+
+Then act on what the change is:
+
+- content-only: `resolve_change` accepted, with the card's `commitSha`.
+- needs-binding or structural: `resolve_change` accepted with `intents`, the
+  draft as it stands or edited. They file ONE proposal the user reviews with
+  its evidence; the card resolves when they accept it, and the bound files'
+  bytes come from the card's commit.
+- conflicts: a locked requirement is the user's to unlock and held work is
+  the holder's. Say so and leave the card; never resolve over them.
+- spec or model-edited: the card offers a load of `.nodespec/spec.json` or
+  `.nodespec/model.json`, which the user decides in the Git panel.
+
+Never file an intent the packet or your own reading gives no evidence for,
+and cite the file and line you read.
 
 **Declare the files you create.** When you write a NEW source file in a
 git-connected project, add one entry to `.nodespec/bindings.json` in the same
@@ -297,6 +465,9 @@ naming the missing paths.
   creating a fragment. Always compare the response's `patchCountThisCall`
   with what you sent before telling the user a proposal is complete.
 - Don't paste tool responses back into your own messages; act on them.
+- The endpoint holds each credential to a burst of 60 calls, then 4 a second
+  (240 a minute). A 429 carries Retry-After in seconds: wait that long, then
+  retry once; batch the work instead of looping.
 
 ## Tool reference — the tools by job
 
@@ -308,7 +479,6 @@ discipline above.
 | Tool | Use when |
 |---|---|
 | `list_projects` | Resolve which project the user means; list what exists |
-| `list_branches` | Get the branch_id that scoped calls need (main is default) |
 | `get_project_status` | START HERE each session: phase, counts, pending drift, `nextAction` |
 | `get_architecture_overview` | The whole topology at once (Mermaid) — orientation, not implementation detail |
 
@@ -317,20 +487,19 @@ discipline above.
 |---|---|
 | `update_vision` | Set the product vision — the user's words, asked for, never inferred from code |
 | `create_requirement` | Add a requirement with acceptance criteria (criteria start unmet, always); `section` files it under a named section, created when absent |
-| `update_requirement` | Reword, re-criterion, reprioritize, or re-section an existing requirement (`section` name moves it; null clears) |
+| `update_requirement` | Reword, re-criterion, reprioritize, or re-section an existing requirement (`section` name moves it; null clears) Locked means locked: a locked requirement refuses every write; no tool unlocks, the user does in the app. |
 | `delete_requirement` | Last resort for disposable drafts only — refused (without `force`) when mapped or carrying test evidence (deletion cascades it away). Prefer supersession: `create_requirement` + `expands` relation archives the original; `update_test_case` retires its cases with history intact |
 | `map_requirement` | Bind a requirement to the node(s) serving it — this is the traceability edge |
-| `relate_requirements` | Declare depends-on/refines/conflicts between requirements |
-| `set_requirement_lock` | Freeze a settled requirement against further edits |
+| `relate_requirements` | Declare lineage between requirements: `expands` (the newer supersedes and archives the completed older one), `depends_on` (ordering), `relates_to` (loose). Binding a requirement to nodes is `map_requirement` |
 | `list_requirements` | Exact criterion wording + met/unmet state — the source for `criterion_text` |
 
 **Build — "implement the next node"**
 | Tool | Use when |
 |---|---|
 | `get_build_readiness` | Preflight: summary first, then ONE scoped re-call per node you will build |
-| `get_project_context` | The node brief (`view:'brief'`) when the repo's `.task.md` isn't at hand |
-| `generate_task_docs` | Regenerate stale/missing task packets (doc blockers) |
-| `propose_patches` | ALL graph writes: nodes, edges, contracts, schema drafts, artifact bindings — always a proposal, never direct. See "Patch discipline" above. For files already pushed to git, omit `content` and pass `content_ref` (push code; propose bindings) |
+| `get_project_context` | The node brief (`view:'brief'`) when the repo's `.task.md` isn't at hand; `view:'slice'` for what moved around the node. The structured view and the slice say what the node may hold and what its parent holds |
+| `generate_task_docs` | Regenerate stale/missing task packets (doc blockers). A doc's `## Added Tasks` section holds tasks a person added by hand in the app; regeneration carries it verbatim, and you build those tasks like the generated work orders |
+| `propose_patches` | ALL graph writes: nodes, edges, contracts, schema drafts, artifact bindings: always a proposal, never direct. See "Patch discipline" above. For files already pushed to git, omit `content` and pass `content_ref` (push code; propose bindings) |
 | `get_proposal_status` | Did the user accept what you proposed — the status reflects the settled outcome |
 | `mark_entity_complete` | Declare a node done — returns any still-unmet criteria (believe them) |
 
@@ -341,11 +510,26 @@ discipline above.
 | `report_test_results` | EVERY outcome you actually ran, exact `criterion_text` — this is what flips criteria; heed the testBudget nudge |
 | `update_test_case` | Fix a mistyped `test_id`, move a case to the requirement it actually verifies (`reassign_to` — it arrives stale, re-run there), retire a superseded case (`retire` + reason — never a hard delete; a fresh report revives it), or re-bind after a criterion reword (`criterion_text`, exact text; binding alone never flips met) |
 
-**Git drift — "the repo changed out of band"**
+**Work loop: "what should I build next" (safe beside other agents)**
+| Tool | Use when |
+|---|---|
+| `get_work_queue` | Top of an autonomous loop: the next unblocked tasks in build order, with who holds what. Its `activeHolds` is the whole lease board (your holds marked `mine`) |
+| `checkout_task` | Claim before working: level task (default), code, criterion (`ref_id` = requirement row uuid + `criterion_id`) or node (`node_id`: its structure is locked while you hold it; name the files in `touches` so others can work beside you). A refusal names the holder; take the next entry. A hold silent for 30 minutes is claimable |
+| `checkout_heartbeat` | Between work steps: keeps your lease fresh and publishes progress |
+| `release_checkout` | Stepping away without evidence: 'released' with a `note` saying where the work stands. A passing `report_test_results` releases your task leases on that requirement as 'verified' |
+
+**Outcomes and approvals**
+| Tool | Use when |
+|---|---|
+| `get_outcome_board` | Before drafting outcomes or requirements from them: the pending outcomes with criteria ids, what is already claimed, and who holds what |
+| `resolve_proposal` | Accept or reject a pending spec proposal only when the user tells you to; a promotion is accepted by the user in the app, never by your key |
+| `list_project_members` | Who is on the project and what your own access allows |
+
+**Git drift: "the repo changed out of band"**
 | Tool | Use when |
 |---|---|
 | `get_pending_changes` | List unreconciled change cards after out-of-band commits — each card also surfaces checkbox ticks it carries (`criterionDeltas` for acceptance criteria, `taskDeltas` for anchored implementation tasks) |
-| `resolve_change` | Classify each card: accept with patches, clean residue, or dismiss noise. When a card carries ticks, accept with `apply_ticks: true` — that single call flips the ticked criteria met and marks the tasks done with git provenance. Ticks apply only on accept, re-resolving cannot double-apply, and unticked boxes never retract evidence |
+| `resolve_change` | Classify each card: accept with patches, clean residue, or dismiss noise. Pass the card's `commit_sha` as `get_pending_changes` returned it: a card that moved on to cover newer commits is refused, so read it again. Ticks split by kind: a criterion tick is the user's to apply in the Git panel, so an accept leaves the card pending for them (`waitingForPerson` says what waits); task ticks follow the Tasks setting (Auto-apply: accept with `apply_ticks: true`; Propose: they wait for the user; Ask first: the accept is refused). Ticks apply only on accept, never twice, and unticked boxes never retract evidence. With patches, the patches are filed as a proposal and the card stays pending until the user accepts it (`reconcileProposalId` on the card); leave the card alone meanwhile |
 
 **Catalog — "what roles/technologies exist"**
 | Tool | Use when |

@@ -165,7 +165,7 @@ Deno.test("merge with task-doc deltas dedups the same tick from both sources", (
   assertEquals(mergedTasks.deltas.length, 1);
 });
 
-Deno.test("wiring: push writes the board, webhook and sweep ingest it, path excluded from residue by prefix", async () => {
+Deno.test("wiring: push writes the board, the sync check ingests it, path excluded from residue by prefix", async () => {
   assertEquals(BOARD_PATH, ".nodespec/BOARD.md");
   const push = await Deno.readTextFile(new URL("../git-push/index.ts", import.meta.url));
   assert(push.includes("renderBoardMd(boardModel)"), "push renders the board");
@@ -173,9 +173,10 @@ Deno.test("wiring: push writes the board, webhook and sweep ingest it, path excl
   const drift = await Deno.readTextFile(new URL("../_shared/git-drift.ts", import.meta.url));
   assert(drift.includes("computeSweepBoardDeltas"), "sweep ingests");
   assert(drift.includes("mergeCriterionDeltaResults(criterionDeltas, boardDeltas.criterionDeltas)"), "sweep merges into the SAME arrays");
+  // AD.1: the webhook wakes the sync check, which is the one place ticks are read.
   const hook = await Deno.readTextFile(new URL("../git-webhook/handlers.ts", import.meta.url));
-  assert(hook.includes("computeWebhookBoardDeltas"), "webhook ingests");
-  assert(hook.includes("f.path === BOARD_PATH"), "webhook keys on the board path");
+  assert(hook.includes("deps.runDriftSweep("), "a delivery runs the sync check");
+  assert(drift.includes("files.some((f) => f.path === BOARD_PATH)"), "the sync check keys on the board path");
 });
 
 
@@ -363,4 +364,14 @@ Deno.test("formatCriterionAnnotation: empty when nothing aligns, segments compos
     }),
     "↳ tasks: T3 ☑ (Worker) · tests: TC-2 ❌ (stale)",
   );
+});
+
+// ── schema audit (2026-09-14): the relations read names a table that exists ──
+// The board read `requirement_relations` — a table that never existed (the
+// real one is specification_requirement_relations) — and swallowed the error,
+// so the relations lane was silently empty for push, webhook and drift alike.
+Deno.test("the relations read targets specification_requirement_relations", async () => {
+  const gen = await Deno.readTextFile(new URL("../_shared/board-generator.ts", import.meta.url));
+  assert(gen.includes('from("specification_requirement_relations")'), "reads the real relations table");
+  assert(!/from\(["']requirement_relations["']\)/.test(gen), "never the phantom table");
 });

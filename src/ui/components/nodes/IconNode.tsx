@@ -1,7 +1,6 @@
 import { memo, useState } from 'react';
-import { FallbackHandles } from './FallbackHandles.js';
+import { LeafHandles } from './LeafHandles.js';
 import { NodeActionToolbar, useNodeToolbarHover } from './NodeActionToolbar.js';
-import { Handle, Position } from '@xyflow/react';
 import type { RFNodeData } from '../../adapters/graph-to-reactflow.js';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { NodeIcon } from '../common/index.js';
@@ -25,9 +24,6 @@ function CompactNestedNode({ data, selected }: IconNodeProps) {
   const artifactCount = data.artifactCount || 0;
   const hasArtifacts = artifactCount > 0;
   const HIGHLIGHT_COLOR = '#22c55e';
-
-  const inputPorts = data.ports.filter(p => p.direction === 'in');
-  const outputPorts = data.ports.filter(p => p.direction === 'out');
 
   return (
     <div
@@ -54,44 +50,18 @@ function CompactNestedNode({ data, selected }: IconNodeProps) {
         cursor: 'pointer',
         position: 'relative',
       }}>
-        <FallbackHandles showTarget={inputPorts.length === 0} showSource={outputPorts.length === 0} />
-        {inputPorts.map((port) => (
-          <Handle
-            key={port.id}
-            type="target"
-            position={Position.Left}
-            id={port.id}
-            style={{
-              width: '8px',
-              height: '8px',
-              backgroundColor: c.surface,
-              border: `2px solid ${colors.primary}`,
-              top: '50%',
-              left: '-4px',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-            }}
-            title={port.name}
-          />
-        ))}
-
-        {outputPorts.map((port) => (
-          <Handle
-            key={port.id}
-            type="source"
-            position={Position.Right}
-            id={port.id}
-            style={{
-              width: '8px',
-              height: '8px',
-              backgroundColor: c.surface,
-              border: `2px solid ${colors.primary}`,
-              top: '50%',
-              right: '-4px',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-            }}
-            title={port.name}
-          />
-        ))}
+        <LeafHandles
+          style={{
+            width: '8px',
+            height: '8px',
+            backgroundColor: c.surface,
+            border: `2px solid ${colors.primary}`,
+            top: '50%',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+          }}
+          targetStyle={{ left: '-4px' }}
+          sourceStyle={{ right: '-4px' }}
+        />
 
         {iconSrc ? (
           <img
@@ -247,56 +217,22 @@ function FullIconNode({ data, selected }: IconNodeProps) {
     borderRadius: '6px',
   };
 
-  const inputPorts = data.ports.filter(p => p.direction === 'in');
-  const outputPorts = data.ports.filter(p => p.direction === 'out');
-
-  const getHandlePosition = (index: number, total: number) => {
-    const spacing = 100 / (total + 1);
-    return `${(index + 1) * spacing}%`;
-  };
-
   return (
     <div style={containerStyles} {...toolbarHover.nodeHoverProps}>
       <NodeActionToolbar visible={!!selected || toolbarHover.hoverVisible} data={data} bridgeProps={toolbarHover.bridgeProps} />
 
-      <FallbackHandles showTarget={inputPorts.length === 0} showSource={outputPorts.length === 0} />
-      {inputPorts.map((port, index) => (
-        <Handle
-          key={port.id}
-          type="target"
-          position={Position.Left}
-          id={port.id}
-          style={{
-            width: '12px',
-            height: '12px',
-            backgroundColor: c.surface,
-            border: `3px solid ${colors.primary}`,
-            top: getHandlePosition(index, inputPorts.length),
-            left: '-6px',
-            boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
-          }}
-          title={port.name}
-        />
-      ))}
-
-      {outputPorts.map((port, index) => (
-        <Handle
-          key={port.id}
-          type="source"
-          position={Position.Right}
-          id={port.id}
-          style={{
-            width: '12px',
-            height: '12px',
-            backgroundColor: c.surface,
-            border: `3px solid ${colors.primary}`,
-            top: getHandlePosition(index, outputPorts.length),
-            right: '-6px',
-            boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
-          }}
-          title={port.name}
-        />
-      ))}
+      <LeafHandles
+        style={{
+          width: '12px',
+          height: '12px',
+          backgroundColor: c.surface,
+          border: `3px solid ${colors.primary}`,
+          top: '50%',
+          boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+        }}
+        targetStyle={{ left: '-6px' }}
+        sourceStyle={{ right: '-6px' }}
+      />
 
       <div style={iconContainerStyles}>
         {iconSrc ? (

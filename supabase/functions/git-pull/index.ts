@@ -1,12 +1,15 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { extractOrchestratorAuth } from "../_shared/auth-helpers.ts";
-import { getPrimaryBranch } from "../_shared/primary-branch.ts";
 import { decryptWithUpgrade, isEncrypted } from "../_shared/crypto.ts";
-import { providerApiBase, fetchRemoteHeadSha, fetchRepoFile } from "../_shared/git-provider.ts";
-import { runDriftSweep, restoreBranchModelFromRef, restoreSpecFromRef, applyCriterionDeltas } from "../_shared/git-drift.ts";
+import { providerApiBase } from "../_shared/git-provider.ts";
+import { runDriftSweep, fileModelLoadProposal, restoreSpecFromRef, applyCriterionDeltas, moveBaselineAfterLoad, resolveCardsAfterRestore } from "../_shared/git-drift.ts";
 import { applyTaskDeltas } from "../_shared/task-deltas.ts";
-import { MODEL_ANCHOR_PATH, parseModel, verifyModelHash, anchorToGraph } from "../_shared/model-anchor.ts";
-import { buildGitHubHeaders, fetchFullGitHubTree } from "../_shared/git-tree.ts";
+import { MODEL_ANCHOR_PATH } from "../_shared/model-anchor.ts";
+import { isPrimaryRow, getPrimaryBranch } from "../_shared/primary-branch.ts";
+import { buildGitHubHeaders, encodeRepoPath, fetchFullGitHubTree, fetchGitHubFiles } from "../_shared/git-tree.ts";
+import { gitPullModeAccess, mayUseIntegration, INTEGRATION_NOT_FOUND, type GitAccess } from "../_shared/git-access.ts";
+import { advanceBaseline, ancestryFor, baselineOutcomeNote, isCommitSha, planBaselineMove } from "../_shared/baseline.ts";
+import { resolveCard } from "../_shared/card-resolve.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -17,15 +20,25 @@ const corsHeaders = {
 interface PullRequest {
   integrationId: string;
   path?: string;
-  mode?: 'content-fetch' | 'tree-scan' | 'selective-fetch' | 'drift-check' | 'restore-model' | 'restore-spec' | 'apply-criteria';
-  /** apply-criteria (R5c): the change-event card whose criterionDeltas to apply. */
+  mode?: 'tree-scan' | 'selective-fetch' | 'drift-check' | 'restore-model' | 'restore-spec' | 'apply-criteria' | 'resolve-change' | 'proposal-baseline';
+  /** apply-criteria (R5c), resolve-change (AD.1): the change-event card. */
   changeEventId?: string;
-  /** R3-3a: restore-model targets this NodeSpec branch (default 'main'); the anchor
+  /** resolve-change (AD.1): accept or dismiss, the card's commit sha as the
+   *  person read it, and the audit stamps the accept lane records. */
+  resolution?: 'accepted' | 'dismissed';
+  commitSha?: string;
+  stamps?: Record<string, unknown>;
+  /** proposal-baseline (AD.1): the accepted proposal that carries a baseline. */
+  proposalId?: string;
+  /** R3-3a: restore-model targets this NodeSpec branch (default: the primary branch, by its flag); the anchor
    *  is fetched from that branch's bound git ref. R3-3c: drift-check honors it too
    *  (branch-scoped sweep). */
   branchName?: string;
   /** R3-3c: drift-check only — user-initiated (branch switch) skips the throttle. */
   force?: boolean;
+  /** restore-model (AD.2b): the app asked on its own (a page load), not a
+   *  person; accepting that load never re-anchors a rewritten history. */
+  automatic?: boolean;
   paths?: string[];
   maxContentLength?: number;
   /** selective-fetch only: fetch at this EXACT ref/commit sha (recovery lane —
@@ -46,34 +59,12 @@ interface TreeScanEntry {
   size: number;
 }
 
-const TEXT_EXTENSIONS = new Set([
-  "ts", "tsx", "js", "jsx", "mjs", "cjs",
-  "py", "rb", "rs", "go", "java", "kt", "swift", "c", "cpp", "h", "hpp", "cs",
-  "html", "css", "scss", "less", "sass",
-  "json", "yaml", "yml", "toml", "xml", "csv",
-  "md", "txt", "rst",
-  "sql", "graphql", "gql",
-  "sh", "bash", "zsh", "fish",
-  "dockerfile", "makefile", "cmake",
-  "env", "gitignore", "editorconfig",
-  "svelte", "vue", "astro",
-  "tf", "hcl",
-  "proto",
-]);
-
-const MAX_FILE_SIZE = 256 * 1024;
-const MAX_FILES = 10_000;
-
 function getExtension(path: string): string {
   const filename = path.split("/").pop() || "";
   if (filename.toLowerCase() === "dockerfile") return "dockerfile";
   if (filename.toLowerCase() === "makefile") return "makefile";
   const ext = filename.split(".").pop()?.toLowerCase() || "";
   return ext;
-}
-
-function isTextFile(path: string): boolean {
-  return TEXT_EXTENSIONS.has(getExtension(path));
 }
 
 function detectLanguage(path: string): string {
@@ -97,7 +88,9 @@ function detectLanguage(path: string): string {
 }
 
 async function resolveIntegrationAndToken(
-  integrationId: string
+  integrationId: string,
+  userId: string,
+  access: GitAccess,
 ): Promise<{
   integration: {
     id: string;
@@ -110,7 +103,7 @@ async function resolveIntegrationAndToken(
   };
   token: string;
   serviceClient: ReturnType<typeof createClient>;
-}> {
+} | null> {
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
   const serviceClient = createClient(supabaseUrl, supabaseServiceKey);
@@ -122,7 +115,12 @@ async function resolveIntegrationAndToken(
     .maybeSingle();
 
   if (integrationError) throw integrationError;
-  if (!integration) throw new Error("Integration not found");
+  if (!integration) return null;
+  // AD.0 (S1): the caller must hold a seat on the integration's project before
+  // its token is decrypted; a refusal reads as an unknown id.
+  if (!(await mayUseIntegration(serviceClient, { integrationProjectId: integration.project_id, userId, access }))) {
+    return null;
+  }
 
   let token = integration.access_token_encrypted;
   if (!token) {
@@ -160,10 +158,27 @@ Deno.serve(async (req: Request) => {
     const { userId } = await extractOrchestratorAuth(req);
     console.log('[git-pull] Authenticated userId:', userId);
 
-    const { integrationId, path: subPath, mode, paths, maxContentLength, branchName, force, ref, changeEventId }: PullRequest = await req.json();
-    const requestMode = mode || 'content-fetch';
+    const { integrationId, path: subPath, mode, paths, maxContentLength, branchName, force, ref, changeEventId, resolution, commitSha, stamps, proposalId, automatic }: PullRequest = await req.json();
+    // AD.0 (D9): no default mode. content-fetch used to be the default, and it
+    // moved the baseline to HEAD without loading anything; AD.4 retired it
+    // (nothing called it).
+    const access = gitPullModeAccess(mode);
+    if (!access) {
+      return new Response(
+        JSON.stringify({ error: "git-pull needs a mode: tree-scan, selective-fetch, drift-check, restore-model, restore-spec, apply-criteria, resolve-change or proposal-baseline" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+    const requestMode = mode as NonNullable<PullRequest['mode']>;
 
-    const { integration, token, serviceClient } = await resolveIntegrationAndToken(integrationId);
+    const resolved = await resolveIntegrationAndToken(integrationId, userId, access);
+    if (!resolved) {
+      return new Response(
+        JSON.stringify({ error: INTEGRATION_NOT_FOUND }),
+        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+    const { integration, token, serviceClient } = resolved;
 
     if (requestMode === 'drift-check') {
       // P1-7 R2: on-connect drift sweep — remote HEAD vs the branch's last_synced_commit
@@ -180,19 +195,35 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    if (requestMode === 'restore-model') {
-      return await handleRestoreModel(integration, token, serviceClient, branchName ?? 'main');
-    }
-    // R7c: the spec plane's twin. Separate action on purpose — loading the repo's
-    // requirements must not force a canvas replacement, and vice versa.
-    if (requestMode === 'restore-spec') {
-      return await handleRestoreSpec(integration, serviceClient, branchName ?? 'main');
+    // AD.4 (D15): a load names its branch or targets the primary branch, found
+    // by its flag. The literal 'main' missed once connect renamed the primary.
+    if (requestMode === 'restore-model' || requestMode === 'restore-spec') {
+      const target = branchName ?? (await getPrimaryBranch(serviceClient, integration.project_id, 'id, name, is_primary'))?.name;
+      if (!target) return jsonResponse({ error: 'This project has no primary branch to load into.' }, 404);
+      if (requestMode === 'restore-model') {
+        return await handleRestoreModel(integration, serviceClient, target, automatic === true);
+      }
+      // R7c: the spec plane's twin. Separate action on purpose: loading the repo's
+      // requirements must not force a canvas replacement, and vice versa.
+      return await handleRestoreSpec(integration, serviceClient, target);
     }
     // R5c: apply a card's ticked acceptance criteria. Owner rule (2026-07-21):
     // git ticks flow VIA THE DRIFT CARD — one approval, never silent. A file in a
     // repository must not be able to mutate the spec plane on its own.
     if (requestMode === 'apply-criteria') {
-      return await handleApplyCriteria(integration, serviceClient, changeEventId);
+      return await handleApplyCriteria(integration, serviceClient, changeEventId, userId);
+    }
+
+    // AD.1 (D8): a card resolves on the server, through the one resolver and
+    // the one baseline writer, never from the browser.
+    if (requestMode === 'resolve-change') {
+      return await handleResolveChangeCard(integration, token, serviceClient, userId, { changeEventId, resolution, commitSha, stamps });
+    }
+    // AD.1 (D5, D8, D10): a baseline riding on a proposal moves when the
+    // proposal is accepted, not when it is filed: an adopt at connect, or an
+    // agent's reconcile of a change card.
+    if (requestMode === 'proposal-baseline') {
+      return await handleProposalBaseline(integration, token, serviceClient, userId, proposalId);
     }
 
     if (requestMode === 'tree-scan') {
@@ -223,7 +254,8 @@ Deno.serve(async (req: Request) => {
       return await handleSelectiveFetch(integration, token, paths, maxContentLength, fetchRef);
     }
 
-    return await handleContentFetch(integration, token, subPath, serviceClient);
+    // Unreachable: gitPullModeAccess refuses every mode not handled above.
+    return jsonResponse({ error: `Unhandled git-pull mode: ${requestMode}` }, 400);
   } catch (error: any) {
     console.error("Git pull error:", error);
     const message = error.message || "Failed to pull from git";
@@ -234,6 +266,130 @@ Deno.serve(async (req: Request) => {
     );
   }
 });
+
+const jsonResponse = (body: unknown, status = 200) => new Response(
+  JSON.stringify(body),
+  { status, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+);
+
+/** The audit stamps the app's accept lane may fold into a resolve. Nothing
+ *  else from the browser reaches a card's metadata. */
+const RESOLVE_STAMP_KEYS = ["autoSynced", "declarationsBound"] as const;
+
+async function handleResolveChangeCard(
+  integration: { project_id: string; provider: string; repo_owner: string; repo_name: string; base_url?: string | null },
+  token: string,
+  // deno-lint-ignore no-explicit-any
+  serviceClient: any,
+  userId: string,
+  args: { changeEventId?: string; resolution?: string; commitSha?: string; stamps?: Record<string, unknown> },
+): Promise<Response> {
+  if (!args.changeEventId) return jsonResponse({ error: "changeEventId is required" }, 400);
+  if (args.resolution !== "accepted" && args.resolution !== "dismissed") {
+    return jsonResponse({ error: 'resolution must be "accepted" or "dismissed"' }, 400);
+  }
+  if (!args.commitSha) return jsonResponse({ error: "commitSha is required: the card's commit as you read it" }, 400);
+  const metadataPatch: Record<string, unknown> = {};
+  for (const key of RESOLVE_STAMP_KEYS) {
+    if (args.stamps && args.stamps[key] !== undefined) metadataPatch[key] = args.stamps[key];
+  }
+  const outcome = await resolveCard(serviceClient, {
+    projectId: integration.project_id,
+    eventId: args.changeEventId,
+    resolution: args.resolution,
+    expectedCommitSha: args.commitSha,
+    resolvedBy: userId,
+    metadataPatch,
+    ancestry: ancestryFor(
+      integration.provider, providerApiBase(integration.provider, integration.base_url),
+      integration.repo_owner, integration.repo_name, token,
+    ),
+  });
+  if (!outcome.ok) {
+    const status = outcome.code === "not-found" ? 404 : outcome.code === "unconfirmed" ? 503 : 409;
+    return jsonResponse({ error: outcome.message, code: outcome.code }, status);
+  }
+  const note = outcome.baseline.outcome === "none" ? null : baselineOutcomeNote(outcome.baseline.outcome);
+  return jsonResponse({ success: true, baseline: { ...outcome.baseline, ...(note ? { note } : {}) } });
+}
+
+async function handleProposalBaseline(
+  integration: { id: string; project_id: string; provider: string; repo_owner: string; repo_name: string; default_branch: string; base_url?: string | null },
+  token: string,
+  // deno-lint-ignore no-explicit-any
+  serviceClient: any,
+  userId: string,
+  proposalId?: string,
+): Promise<Response> {
+  if (!proposalId) return jsonResponse({ error: "proposalId is required" }, 400);
+  const { data: proposal } = await serviceClient
+    .from("ai_proposals")
+    .select("id, status, metadata, source_branch_id")
+    .eq("id", proposalId)
+    .maybeSingle();
+  const { data: branch } = proposal?.source_branch_id
+    ? await serviceClient.from("branches").select("id, project_id, name, is_primary").eq("id", proposal.source_branch_id).maybeSingle()
+    : { data: null };
+  const reconciles = proposal?.metadata?.reconcilesChange;
+  const isAdopt = proposal?.metadata?.source === "git-adopt";
+  const loads = proposal?.metadata?.source === "git-load" ? proposal.metadata.loadsModel : null;
+  if (!proposal || !branch || branch.project_id !== integration.project_id || (!isAdopt && !reconciles?.eventId && !isCommitSha(loads?.headSha))) {
+    return jsonResponse({ error: "No proposal carrying a baseline was found for this project" }, 404);
+  }
+  if (proposal.status !== "merged" && proposal.status !== "accepted") {
+    return jsonResponse({ error: "The proposal is not accepted; the baseline waits for it" }, 409);
+  }
+  const apiBase = providerApiBase(integration.provider, integration.base_url);
+  const ancestry = ancestryFor(integration.provider, apiBase, integration.repo_owner, integration.repo_name, token);
+
+  // AD.2b: an accepted load of git's model. The canvas now holds the design
+  // read at `headSha`: the last sync moves as a load's does (forward only
+  // when the range holds nothing else; a person's load may re-anchor), and
+  // the cards the load answers are answered.
+  if (loads) {
+    const plan = await planBaselineMove(serviceClient, { branchId: branch.id, to: loads.headSha, ancestry, reanchor: loads.reanchor === true });
+    const after = plan
+      ? await moveBaselineAfterLoad(serviceClient, {
+        plan, anchorPath: MODEL_ANCHOR_PATH,
+        provider: integration.provider, apiBase, owner: integration.repo_owner, repo: integration.repo_name, token,
+        integrationId: integration.id,
+      })
+      : { moved: false, note: baselineOutcomeNote("no-branch") };
+    await resolveCardsAfterRestore(serviceClient, integration.project_id, loads.headSha, "model", {
+      name: branch.name, isPrimary: isPrimaryRow(branch),
+    });
+    return jsonResponse({ success: true, baseline: { moved: after.moved, ...(after.note ? { note: after.note } : {}) } });
+  }
+
+  // An agent's reconcile: the change card it answered resolves now, through
+  // the one resolver, as the version the agent read. A card that moved on
+  // since holds newer commits and stays for a person.
+  if (!isAdopt) {
+    const outcome = await resolveCard(serviceClient, {
+      projectId: integration.project_id,
+      eventId: String(reconciles.eventId),
+      resolution: "accepted",
+      expectedCommitSha: String(reconciles.commitSha ?? ""),
+      resolvedBy: userId,
+      metadataPatch: { reconciledByProposal: proposalId },
+      ancestry,
+    });
+    if (!outcome.ok) {
+      const status = outcome.code === "not-found" ? 404 : outcome.code === "unconfirmed" ? 503 : 409;
+      return jsonResponse({ error: outcome.message, code: outcome.code }, status);
+    }
+    const note = outcome.baseline.outcome === "none" ? null : baselineOutcomeNote(outcome.baseline.outcome);
+    return jsonResponse({ success: true, baseline: { ...outcome.baseline, ...(note ? { note } : {}) } });
+  }
+
+  const sha = proposal.metadata?.adoptHeadSha;
+  if (!isCommitSha(sha)) {
+    return jsonResponse({ error: "The adopt proposal carries no commit to sync from" }, 400);
+  }
+  const moved = await advanceBaseline(serviceClient, { branchId: branch.id, to: sha, ancestry });
+  const note = baselineOutcomeNote(moved.outcome);
+  return jsonResponse({ success: true, baseline: { ...moved, ...(note ? { note } : {}) } });
+}
 
 async function handleTreeScan(
   integration: { provider: string; repo_owner: string; repo_name: string; default_branch: string; base_url?: string | null },
@@ -262,81 +418,6 @@ async function handleTreeScan(
       entries,
       totalEntries: entries.length,
       truncated,
-    }),
-    { headers: { ...corsHeaders, "Content-Type": "application/json" } },
-  );
-}
-
-async function handleContentFetch(
-  integration: { id: string; project_id: string; provider: string; repo_owner: string; repo_name: string; default_branch: string; base_url?: string | null },
-  token: string,
-  subPath: string | undefined,
-  serviceClient: ReturnType<typeof createClient>,
-): Promise<Response> {
-  const apiBase = providerApiBase(integration.provider, integration.base_url);
-  let files: RepoFile[];
-  let totalMatched = 0;
-  let treeTruncated = false;
-
-  if (integration.provider === "github") {
-    const result = await pullFromGitHub(apiBase, integration.repo_owner, integration.repo_name, integration.default_branch, token, subPath);
-    files = result.files;
-    totalMatched = result.totalMatched;
-    treeTruncated = result.truncated;
-  } else if (integration.provider === "gitlab") {
-    const result = await pullFromGitLab(apiBase, integration.repo_owner, integration.repo_name, integration.default_branch, token, subPath);
-    files = result.files;
-    totalMatched = result.totalMatched;
-  } else {
-    throw new Error(`Unsupported provider: ${integration.provider}`);
-  }
-
-  await serviceClient.from("git_integrations").update({
-    last_sync_at: new Date().toISOString(),
-    sync_status: "idle",
-  }).eq("id", integration.id);
-
-  // P1-7 R1: record WHICH commit this pull reflected (previously omitted — pulls never captured
-  // a SHA, so no sync baseline could ever be established from the pull side) and advance the
-  // main branch's drift baseline to it.
-  let pulledHeadSha: string | null = null;
-  try {
-    pulledHeadSha = await fetchRemoteHeadSha(
-      integration.provider, apiBase, integration.repo_owner, integration.repo_name,
-      integration.default_branch, token,
-    );
-    if (pulledHeadSha) {
-      const primary = await getPrimaryBranch(serviceClient, integration.project_id, "id, name, is_primary");
-      if (primary) {
-        await serviceClient
-          .from("branches")
-          .update({ last_synced_commit: pulledHeadSha, git_ref: integration.default_branch })
-          .eq("id", primary.id);
-      }
-    }
-  } catch (headErr) {
-    console.warn("[git-pull] failed to capture pulled HEAD SHA:", headErr);
-  }
-
-  await serviceClient.from("git_sync_log").insert({
-    integration_id: integration.id,
-    project_id: integration.project_id,
-    direction: "pull",
-    status: "success",
-    commit_sha: pulledHeadSha,
-    patches_synced: files.length,
-    completed_at: new Date().toISOString(),
-    metadata: { fileCount: files.length, subPath: subPath || "/" },
-  });
-
-  return new Response(
-    JSON.stringify({
-      success: true,
-      files,
-      fileCount: files.length,
-      totalMatched,
-      truncated: treeTruncated || totalMatched > files.length,
-      ...(treeTruncated ? { treeTruncatedNote: "Tree traversal was incomplete. totalMatched may be understated." } : {}),
     }),
     { headers: { ...corsHeaders, "Content-Type": "application/json" } },
   );
@@ -410,98 +491,20 @@ async function treeScanGitHub(
   return { entries, truncated };
 }
 
-async function pullFromGitHub(
-  apiBase: string, owner: string, repo: string, branch: string, token: string,
-  subPath?: string,
-): Promise<{ files: RepoFile[]; totalMatched: number; truncated: boolean }> {
-  const baseUrl = apiBase;
-  const headers = buildGitHubHeaders(token);
-  const { tree, truncated } = await fetchFullGitHubTree(apiBase, owner, repo, branch, headers);
-
-  let blobs = tree.filter((item: any) =>
-    item.type === "blob" && isTextFile(item.path) && item.size <= MAX_FILE_SIZE
-  );
-
-  if (subPath) {
-    const prefix = subPath.endsWith("/") ? subPath : subPath + "/";
-    blobs = blobs.filter((item: any) => item.path.startsWith(prefix) || item.path === subPath);
-  }
-
-  const totalMatched = blobs.length;
-  blobs = blobs.slice(0, MAX_FILES);
-
-  const files: RepoFile[] = [];
-
-  const batchSize = 10;
-  for (let i = 0; i < blobs.length; i += batchSize) {
-    const batch = blobs.slice(i, i + batchSize);
-    const results = await Promise.all(
-      batch.map(async (blob: any) => {
-        const contentResponse = await fetch(
-          `${baseUrl}/repos/${owner}/${repo}/contents/${blob.path}?ref=${branch}`,
-          { headers: { ...headers, "Accept": "application/vnd.github.raw+json" } },
-        );
-        if (!contentResponse.ok) return null;
-        const content = await contentResponse.text();
-        return {
-          path: blob.path,
-          content,
-          size: blob.size,
-          language: detectLanguage(blob.path),
-        };
-      }),
-    );
-    for (const result of results) {
-      if (result) files.push(result);
-    }
-  }
-
-  return { files, totalMatched, truncated };
-}
-
 async function selectiveFetchGitHub(
   apiBase: string, owner: string, repo: string, branch: string, token: string,
   paths: string[], maxContentLength: number | undefined, truncatedFiles: string[],
 ): Promise<RepoFile[]> {
-  const baseUrl = apiBase;
-  const headers = {
-    ...buildGitHubHeaders(token),
-    "Accept": "application/vnd.github.raw+json",
-  };
-
-  const files: RepoFile[] = [];
-  const batchSize = 10;
-
-  for (let i = 0; i < paths.length; i += batchSize) {
-    const batch = paths.slice(i, i + batchSize);
-    const results = await Promise.all(
-      batch.map(async (filePath: string) => {
-        const contentResponse = await fetch(
-          `${baseUrl}/repos/${owner}/${repo}/contents/${filePath}?ref=${branch}`,
-          { headers },
-        );
-        if (!contentResponse.ok) return null;
-        let content = await contentResponse.text();
-        let wasTruncated = false;
-        if (maxContentLength && content.length > maxContentLength) {
-          content = content.substring(0, maxContentLength);
-          wasTruncated = true;
-        }
-        if (wasTruncated) truncatedFiles.push(filePath);
-        return {
-          path: filePath,
-          content,
-          size: content.length,
-          language: detectLanguage(filePath),
-        };
-      }),
-    );
-    for (const result of results) {
-      if (result) files.push(result);
+  // The shared reader encodes each path and refuses one that is not inside the repository.
+  const fetched = await fetchGitHubFiles(apiBase, owner, repo, branch, token, paths);
+  return fetched.map(({ path, content }) => {
+    let body = content;
+    if (maxContentLength && body.length > maxContentLength) {
+      body = body.substring(0, maxContentLength);
+      truncatedFiles.push(path);
     }
-  }
-
-  return files;
+    return { path, content: body, size: body.length, language: detectLanguage(path) };
+  });
 }
 
 async function treeScanGitLab(
@@ -524,10 +527,17 @@ async function treeScanGitLab(
 
   while (allItems.length < MAX_TREE_SCAN_ITEMS) {
     const treeResponse = await fetch(
-      `${baseUrl}/projects/${glProjectId}/repository/tree?ref=${branch}&recursive=true&per_page=100&page=${page}${pathParam}`,
+      `${baseUrl}/projects/${glProjectId}/repository/tree?ref=${encodeURIComponent(branch)}&recursive=true&per_page=100&page=${page}${pathParam}`,
       { headers: glHeaders },
     );
-    if (!treeResponse.ok) break;
+    // GL-1 (owner report 2026-09-08): a failed page used to `break` into an
+    // EMPTY scan — "no files detected" with no cause. Name it instead
+    // (GitHub's scan already throws); the first page is the one that tells.
+    if (!treeResponse.ok) {
+      if (treeResponse.status === 401) throw new Error("GitLab rejected the access token (401) — re-save the integration with a token that has read_api + read_repository (or api) scope.");
+      if (treeResponse.status === 404) throw new Error(`GitLab could not find branch "${branch}" of ${projectPath} (404) — check the branch name and that the token can see the project.`);
+      throw new Error(`GitLab tree scan failed on page ${page} (HTTP ${treeResponse.status})`);
+    }
     const items = await treeResponse.json();
     if (!items.length) break;
     allItems = allItems.concat(items);
@@ -546,69 +556,6 @@ async function treeScanGitLab(
     }));
 
   return { entries, truncated: hitLimit };
-}
-
-async function pullFromGitLab(
-  apiBase: string, owner: string, repo: string, branch: string, token: string,
-  subPath?: string,
-): Promise<{ files: RepoFile[]; totalMatched: number }> {
-  const baseUrl = apiBase;
-  const projectPath = `${owner}/${repo}`;
-  const glHeaders = { "PRIVATE-TOKEN": token };
-
-  const projectResponse = await fetch(`${baseUrl}/projects/${encodeURIComponent(projectPath)}`, { headers: glHeaders });
-  if (!projectResponse.ok) throw new Error(`Failed to get project: ${projectResponse.statusText}`);
-  const projectData = await projectResponse.json();
-  const glProjectId = projectData.id;
-
-  const pathParam = subPath ? `&path=${encodeURIComponent(subPath)}` : "";
-  let allItems: any[] = [];
-  let page = 1;
-
-  while (allItems.length < MAX_FILES) {
-    const treeResponse = await fetch(
-      `${baseUrl}/projects/${glProjectId}/repository/tree?ref=${branch}&recursive=true&per_page=100&page=${page}${pathParam}`,
-      { headers: glHeaders },
-    );
-    if (!treeResponse.ok) break;
-    const items = await treeResponse.json();
-    if (!items.length) break;
-    allItems = allItems.concat(items);
-    page++;
-  }
-
-  const matchedBlobs = allItems
-    .filter((item: any) => item.type === "blob" && isTextFile(item.path));
-  const totalMatched = matchedBlobs.length;
-  const blobs = matchedBlobs.slice(0, MAX_FILES);
-
-  const files: RepoFile[] = [];
-  const batchSize = 10;
-
-  for (let i = 0; i < blobs.length; i += batchSize) {
-    const batch = blobs.slice(i, i + batchSize);
-    const results = await Promise.all(
-      batch.map(async (blob: any) => {
-        const fileResponse = await fetch(
-          `${baseUrl}/projects/${glProjectId}/repository/files/${encodeURIComponent(blob.path)}/raw?ref=${branch}`,
-          { headers: glHeaders },
-        );
-        if (!fileResponse.ok) return null;
-        const content = await fileResponse.text();
-        return {
-          path: blob.path,
-          content,
-          size: content.length,
-          language: detectLanguage(blob.path),
-        };
-      }),
-    );
-    for (const result of results) {
-      if (result) files.push(result);
-    }
-  }
-
-  return { files, totalMatched };
 }
 
 async function selectiveFetchGitLab(
@@ -631,8 +578,9 @@ async function selectiveFetchGitLab(
     const batch = paths.slice(i, i + batchSize);
     const results = await Promise.all(
       batch.map(async (filePath: string) => {
+        if (!encodeRepoPath(filePath)) return null;
         const fileResponse = await fetch(
-          `${baseUrl}/projects/${glProjectId}/repository/files/${encodeURIComponent(filePath)}/raw?ref=${branch}`,
+          `${baseUrl}/projects/${glProjectId}/repository/files/${encodeURIComponent(filePath)}/raw?ref=${encodeURIComponent(branch)}`,
           { headers: glHeaders },
         );
         if (!fileResponse.ok) return null;
@@ -661,59 +609,47 @@ async function selectiveFetchGitLab(
 
 // ── R3-1: THE LOADER — restore the graph from the repo's model anchor ──────────────
 // Git is the durable source of truth for the model; this is the git→canvas direction.
-// Whole-graph replace via a NEW snapshot (N6.1 snapshot-only persist precedent —
-// graph_patches are NEVER rewritten; the log keeps forward history, the snapshot
-// moves). Establishes the baseline at the restored HEAD and resolves any pending
-// model cards (their question — "which side wins?" — has been answered: git did).
-// Invoked EXPLICITLY only (a card button / the blocked-push panel); never automatic.
-// R3-3a/merge-arrival: the restore CORE lives in _shared/git-drift.ts
-// (restoreBranchModelFromRef) so the sweep's and webhook's merge-arrival lanes
-// share ONE implementation. This handler is the explicit user-invoked lane —
-// no canvas==baseline guard (the user chose git as the winner) — and maps the
-// shared result codes onto HTTP responses.
+// AD.2b (D3, D4): loading git's model files it as a proposal of ordinary
+// patches (fileModelLoadProposal): git's design, with the canvas's positions,
+// file content and withheld values kept. A person accepts it in Proposals, and
+// only then does the last sync move (proposal-baseline). Nothing here writes
+// the canvas. When the canvas already holds git's design there is nothing to
+// accept; the cards the load answers are answered at once.
 async function handleRestoreModel(
-  integration: {
-    id: string;
-    project_id: string;
-    provider: string;
-    repo_owner: string;
-    repo_name: string;
-    default_branch: string;
-    base_url?: string | null;
-  },
-  _token: string,
+  integration: { project_id: string },
   // deno-lint-ignore no-explicit-any
   serviceClient: any,
   branchName: string,
+  automatic: boolean,
 ): Promise<Response> {
-  const result = await restoreBranchModelFromRef(serviceClient, integration.project_id, branchName);
+  const result = await fileModelLoadProposal(serviceClient, integration.project_id, branchName, {
+    requestedBy: automatic ? "automatic" : "person",
+  });
   if (!result.ok) {
     const statusByCode: Record<string, number> = {
       "no-integration": 404,
       "no-branch": 404,
       "no-head": 502,
       "no-anchor": 404,
+      "read-failed": 502,
       "invalid-anchor": 422,
       "hash-failed": 422,
       "guard-failed": 409,
+      "cannot-express": 409,
       "write-failed": 500,
     };
-    return new Response(
-      JSON.stringify({ error: result.message }),
-      { status: statusByCode[result.code] ?? 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    return jsonResponse({ error: result.message, code: result.code }, statusByCode[result.code] ?? 500);
   }
-  return new Response(
-    JSON.stringify({
-      success: true,
-      restored: true,
-      headSha: result.headSha,
-      modelHash: result.modelHash,
-      counts: result.counts,
-      note: "Artifact file contents are not stored in the anchor — they hydrate on demand via Load-from-repo in the Files tab.",
-    }),
-    { headers: { ...corsHeaders, "Content-Type": "application/json" } },
-  );
+  if (result.status === "identical") {
+    return jsonResponse({
+      success: true, status: "identical", headSha: result.headSha, baselineMoved: result.baselineMoved,
+      ...(result.baselineNote ? { note: result.baselineNote } : {}),
+    });
+  }
+  return jsonResponse({
+    success: true, status: result.status, headSha: result.headSha, proposalId: result.proposalId,
+    patchCount: result.patchCount, ...(result.notApplied.length > 0 ? { notApplied: result.notApplied } : {}),
+  });
 }
 
 // R7c: load `.nodespec/spec.json` from the branch's bound ref. Adopts when the
@@ -728,7 +664,8 @@ async function handleApplyCriteria(
   integration: { project_id: string },
   // deno-lint-ignore no-explicit-any
   serviceClient: any,
-  changeEventId?: string,
+  changeEventId: string | undefined,
+  userId: string,
 ): Promise<Response> {
   if (!changeEventId) {
     return new Response(
@@ -757,11 +694,16 @@ async function handleApplyCriteria(
       { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
+  // AD.3 (ruling 3): this is the one way a criterion tick is applied, by a
+  // person in the app. The provenance records who applied it beside who
+  // committed it; for an automated criterion that is the person's own mark,
+  // standing where a test result would.
   const result = hasCriterionDeltas
     ? await applyCriterionDeltas(serviceClient, integration.project_id, {
         deltas,
         commitSha: card.commit_sha ?? undefined,
         actor: card.author ?? undefined,
+        appliedBy: userId,
       })
     : { applied: 0, requirementsTouched: [] as string[] };
 
@@ -811,6 +753,7 @@ async function handleRestoreSpec(
       "no-integration": 404,
       "no-branch": 404,
       "no-head": 502,
+      "read-failed": 502,
       "no-spec-file": 404,
       "invalid-spec": 422,
       "hash-failed": 422,
@@ -831,6 +774,9 @@ async function handleRestoreSpec(
       specHash: result.specHash,
       counts: result.counts,
       ...(result.keptLocal?.length ? { keptLocal: result.keptLocal } : {}),
+      ...(result.locked?.length ? { locked: result.locked } : {}),
+      baselineMoved: result.baselineMoved,
+      ...(result.baselineNote ? { note: result.baselineNote } : {}),
     }),
     { headers: { ...corsHeaders, "Content-Type": "application/json" } },
   );

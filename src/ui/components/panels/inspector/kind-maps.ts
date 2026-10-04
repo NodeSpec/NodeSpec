@@ -1,9 +1,7 @@
 // M1c: the NODE_KIND_LABELS/COLORS maps are GONE with the inspector kind chip and the
 // `kind` column itself (NODE_REFERENCE §12.4). What remains is the contract-kind vocabulary.
-// N5 chunk 2: port-contract helpers, extracted verbatim from
-// SimplifiedInspector (shared by the inspector shell, ConnectionPointsEditor, and
-// ConnectionDetails).
-import type { Edge, Graph } from '@nodespec/core/types.js';
+// N5 chunk 2: contract-kind helpers shared by the inspector shell and
+// ConnectionDetails (AG.13 removed the port helper with the ports).
 
 // M6: re-exported, not redefined. This file held one of three byte-identical copies; the
 // single table now lives in core (repo-import needed it too) and is typed against the enum.
@@ -89,17 +87,3 @@ export const CONTRACT_KIND_GROUPS: ReadonlyArray<{
     { value: 'custom', label: 'Custom' },
   ]},
 ];
-
-// N8.6(B): a port's kind comes from its connected edge's CONTRACT — the only truth.
-// The old fallback guessed the kind from the port NAME prefix ("REST Input" → rest),
-// which only ever matched names the dead ConnectionPointsEditor kind-select generated;
-// both halves of that hack are gone. Unconnected ports honestly show no kind badge.
-export function getPortContractKind(portId: string, edges: Edge[], graph: Graph): string | null {
-  for (const edge of edges) {
-    if (edge.sourcePortId === portId || edge.targetPortId === portId) {
-      const contract = graph.contracts[edge.contractId];
-      if (contract) return contract.kind;
-    }
-  }
-  return null;
-}

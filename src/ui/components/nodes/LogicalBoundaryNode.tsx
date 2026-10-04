@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useRef } from 'react';
-import { Handle, Position, NodeResizer, useStore } from '@xyflow/react';
+import { NodeResizer, useStore } from '@xyflow/react';
+import { FallbackHandles } from './FallbackHandles.js';
 import type { RFNodeData } from '../../adapters/graph-to-reactflow.js';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { getContainerTypeById } from '@nodespec/core/container-types.js';
@@ -93,9 +94,6 @@ function LogicalBoundaryNodeComponent({ data, selected, id }: LogicalBoundaryNod
   const transitionAnimationName = isEntering ? 'containerEnter' : isExiting ? 'containerExit' : 'none';
   const transitionDuration = isEntering ? '300ms' : isExiting ? '250ms' : '0ms';
 
-  const inputPorts = data.ports.filter(p => p.direction === 'in');
-  const outputPorts = data.ports.filter(p => p.direction === 'out');
-
   if (isCollapsed) {
     return (
       <div style={{
@@ -184,37 +182,9 @@ function LogicalBoundaryNodeComponent({ data, selected, id }: LogicalBoundaryNod
           +
         </button>
 
-        {inputPorts.map((port) => (
-          <Handle
-            key={port.id}
-            type="target"
-            position={Position.Left}
-            id={port.id}
-            style={{
-              width: '8px',
-              height: '8px',
-              backgroundColor: accentColor,
-              border: `2px solid ${isDark ? '#1e293b' : '#ffffff'}`,
-              top: '50%',
-            }}
-          />
-        ))}
-
-        {outputPorts.map((port) => (
-          <Handle
-            key={port.id}
-            type="source"
-            position={Position.Right}
-            id={port.id}
-            style={{
-              width: '8px',
-              height: '8px',
-              backgroundColor: accentColor,
-              border: `2px solid ${isDark ? '#1e293b' : '#ffffff'}`,
-              top: '50%',
-            }}
-          />
-        ))}
+        {/* AG.14: a group takes no edge (an edge ends on the node inside); the
+            invisible pair is only where an edge rolled up onto it ends. */}
+        <FallbackHandles showTarget showSource />
       </div>
     );
   }
@@ -373,37 +343,9 @@ function LogicalBoundaryNodeComponent({ data, selected, id }: LogicalBoundaryNod
           />
         )}
 
-        {inputPorts.map((port) => (
-          <Handle
-            key={port.id}
-            type="target"
-            position={Position.Left}
-            id={port.id}
-            style={{
-              width: '8px',
-              height: '8px',
-              backgroundColor: accentColor,
-              border: `2px solid ${isDark ? '#1e293b' : '#ffffff'}`,
-              top: `${40 + inputPorts.indexOf(port) * 24}px`,
-            }}
-          />
-        ))}
-
-        {outputPorts.map((port) => (
-          <Handle
-            key={port.id}
-            type="source"
-            position={Position.Right}
-            id={port.id}
-            style={{
-              width: '8px',
-              height: '8px',
-              backgroundColor: accentColor,
-              border: `2px solid ${isDark ? '#1e293b' : '#ffffff'}`,
-              top: `${40 + outputPorts.indexOf(port) * 24}px`,
-            }}
-          />
-        ))}
+        {/* AG.14: a group takes no edge (an edge ends on the node inside); the
+            invisible pair is only where an edge rolled up onto it ends. */}
+        <FallbackHandles showTarget showSource />
       </div>
     </>
   );

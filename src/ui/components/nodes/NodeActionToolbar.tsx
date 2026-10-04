@@ -1,8 +1,9 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { NodeToolbar, Position } from '@xyflow/react';
-import { Lock, LockOpen as Unlock, Share2, Trash2, LogOut, LogIn, ChevronDown } from 'lucide-react';
+import { Lock, LockOpen as Unlock, Share2, Trash2, LogOut, LogIn, ChevronDown, ShieldCheck } from 'lucide-react';
 import type { RFNodeData } from '../../adapters/graph-to-reactflow.js';
 import { useTheme } from '../../theme/ThemeContext.js';
+import { leaseInitials, leaseLine } from '../ideation/node-leases.js';
 
 // Owner merge ruling 2026-08-13: ONE professional pane under the clicked node
 // carries every node action — lock/unlock (blocks AI-proposed patches against
@@ -130,7 +131,52 @@ function NodeActionToolbarComponent({ visible, data, bridgeProps }: NodeActionTo
     }} />
   );
 
+  // AA.5: a leased node wears its holder's badge above it, always; the
+  // node is locked for everyone but the holder while the lease lasts.
+  const lease = data.lease ?? null;
+  const leaseBadge = lease && (
+    <NodeToolbar isVisible position={Position.Top} align="end" offset={6} className="nodrag nopan">
+      <span
+        data-testid="node-lease-badge"
+        data-level={lease.level}
+        title={leaseLine(lease)}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '2px 7px 2px 4px', borderRadius: '999px',
+          border: `1px solid ${lease.mine ? '#16a34a' : '#d97706'}`, backgroundColor: c.surface,
+          color: lease.mine ? '#16a34a' : '#d97706', fontSize: '10px', fontWeight: 700,
+          fontFamily: 'system-ui, -apple-system, sans-serif', whiteSpace: 'nowrap',
+        }}
+      >
+        <span aria-hidden="true" style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '16px', height: '16px', borderRadius: '50%', backgroundColor: lease.mine ? '#16a34a' : '#d97706', color: '#fff', fontSize: '8.5px', textTransform: 'uppercase' }}>{leaseInitials(lease.holder)}</span>
+        <Lock size={10} aria-label="Leased" />
+        {lease.count > 1 ? lease.count : null}
+      </span>
+    </NodeToolbar>
+  );
+
+  // AA.2: a node in the active change's scope carries the change's constraints.
+  const changeConstraints = data.changeConstraints ?? 0;
+  const constraintsMarker = changeConstraints > 0 && (
+    <NodeToolbar isVisible position={Position.Top} align="start" offset={6} className="nodrag nopan">
+      <span
+        data-testid="node-change-constraints"
+        title={`${changeConstraints} constraint${changeConstraints === 1 ? '' : 's'} of the change hold${changeConstraints === 1 ? 's' : ''} here`}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '2px 7px', borderRadius: '999px',
+          border: '1px solid #3b82f6', backgroundColor: c.surface, color: '#3b82f6', fontSize: '10px', fontWeight: 700,
+          fontFamily: 'system-ui, -apple-system, sans-serif', whiteSpace: 'nowrap',
+        }}
+      >
+        <ShieldCheck size={10} aria-hidden="true" />
+        {changeConstraints}
+      </span>
+    </NodeToolbar>
+  );
+
   return (
+    <>
+    {leaseBadge}
+    {constraintsMarker}
     <NodeToolbar
       isVisible={visible}
       position={Position.Bottom}
@@ -243,8 +289,17 @@ function NodeActionToolbarComponent({ visible, data, bridgeProps }: NodeActionTo
             </span>
           </>
         )}
+        {lease && !lease.mine && (
+          <>
+            {divider}
+            <span data-testid="node-lease-line" style={{ padding: '0 8px', fontSize: '10.5px', fontWeight: 600, fontFamily: 'system-ui, -apple-system, sans-serif', color: '#d97706', whiteSpace: 'nowrap' }}>
+              Locked by {lease.holder}
+            </span>
+          </>
+        )}
       </div>
     </NodeToolbar>
+    </>
   );
 }
 

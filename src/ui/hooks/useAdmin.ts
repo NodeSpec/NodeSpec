@@ -31,26 +31,6 @@ export interface AdminUser {
   raw_app_meta_data: Record<string, unknown>;
 }
 
-export interface TokenUsageRow {
-  id: string;
-  user_id: string;
-  model: string;
-  input_tokens: number;
-  output_tokens: number;
-  edge_function: string | null;
-  project_id: string | null;
-  created_at: string;
-}
-
-export interface TokenGrant {
-  id: string;
-  user_id: string;
-  granted_by: string | null;
-  amount: number;
-  reason: string;
-  created_at: string;
-}
-
 export interface BugReport {
   id: string;
   user_id: string | null;
@@ -85,7 +65,6 @@ export interface StripeSubscription {
   status: string;
   price_id: string | null;
   billing_interval: string | null;
-  token_limit: number | null;
   cancel_at_period_end: boolean | null;
   current_period_start: string | null;
   current_period_end: string | null;
@@ -116,45 +95,6 @@ export function useAdminData() {
     const { data, error } = await supabase.rpc('get_all_users');
     if (error) throw error;
     return (data || []) as AdminUser[];
-  }, [supabase]);
-
-  const fetchTokenUsage = useCallback(async (
-    start: Date,
-    end: Date
-  ): Promise<TokenUsageRow[]> => {
-    const { data, error } = await supabase
-      .from('token_usage')
-      .select('*')
-      .gte('created_at', start.toISOString())
-      .lte('created_at', end.toISOString())
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    return (data || []) as TokenUsageRow[];
-  }, [supabase]);
-
-  const fetchTokenGrants = useCallback(async (): Promise<TokenGrant[]> => {
-    const { data, error } = await supabase
-      .from('token_grants')
-      .select('*')
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    return (data || []) as TokenGrant[];
-  }, [supabase]);
-
-  const grantTokens = useCallback(async (
-    userId: string,
-    amount: number,
-    reason: string
-  ): Promise<void> => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) throw new Error('Not authenticated');
-    const { error } = await supabase.from('token_grants').insert({
-      user_id: userId,
-      granted_by: user.id,
-      amount,
-      reason,
-    });
-    if (error) throw error;
   }, [supabase]);
 
   const fetchBugReports = useCallback(async (): Promise<BugReport[]> => {
@@ -270,9 +210,6 @@ export function useAdminData() {
 
   return {
     fetchUsers,
-    fetchTokenUsage,
-    fetchTokenGrants,
-    grantTokens,
     fetchBugReports,
     updateBugReport,
     fetchFeedback,

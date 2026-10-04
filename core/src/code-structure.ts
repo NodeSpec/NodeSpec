@@ -129,6 +129,17 @@ export function detectLanguageFromPath(path: string): string {
     cs: 'csharp',
     php: 'php',
     rb: 'ruby',
+    c: 'c',
+    h: 'c',
+    cpp: 'cpp',
+    cc: 'cpp',
+    cxx: 'cpp',
+    hpp: 'cpp',
+    hh: 'cpp',
+    hxx: 'cpp',
+    ixx: 'cpp',
+    cppm: 'cpp',
+    zig: 'zig',
   };
 
   return extensionMap[ext || ''] || 'other';

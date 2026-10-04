@@ -4,7 +4,6 @@
 // a fixture CatalogData (Deno tests have no DB).
 import {
   normalizeProposedNode,
-  ensureNodePorts,
   genericRoleForCategory,
   GLOBAL_GENERIC_ROLE,
   PREFERRED_GENERIC_BY_CATEGORY,
@@ -16,7 +15,7 @@ function role(id: string, palette_category: string, extra: Partial<NodeRoleRow> 
   return {
     id, label: id, description: '', icon_name: '', color: '', rf_visual_type: '',
     palette_category, nature: 'build', interface_kind: 'service', is_container: false, container_layer: null,
-    container_style: null, can_contain: [], metadata_schema: {}, default_ports: [],
+    container_style: null, can_contain: [], metadata_schema: {},
     suggested_contracts: [], sort_order: 0, capability_tags: [], default_technology: null,
     when_to_use: null, deprecated: false,
     ...extra,
@@ -170,49 +169,3 @@ Deno.test('PREFERRED_GENERIC_BY_CATEGORY values are non-empty role-id strings', 
   }
 });
 
-// ── ensureNodePorts (2026-07-16: portless nodes render zero handles → edges dropped) ──
-
-const CATALOG_WITH_PORTS: CatalogData = {
-  ...CATALOG,
-  nodeRoles: {
-    ...CATALOG.nodeRoles,
-    'webhook-handler': role('webhook-handler', 'External', {
-      default_ports: [
-        { name: 'inbound', direction: 'in' },
-        { name: 'processed', direction: 'out' },
-      ],
-    }),
-  },
-};
-
-Deno.test('ensureNodePorts: existing ports pass through untouched, no note', () => {
-  const existing = [{ id: '99999999-9999-4999-8999-999999999999', name: 'api', direction: 'in' }];
-  const r = ensureNodePorts(CATALOG_WITH_PORTS, 'backend-service', existing);
-  assertEquals(r.ports, existing);
-  assertEquals(r.note, undefined);
-});
-
-Deno.test('ensureNodePorts: role default_ports are materialized with ids', () => {
-  const r = ensureNodePorts(CATALOG_WITH_PORTS, 'webhook-handler', undefined);
-  assertEquals(r.ports.length, 2);
-  assertEquals(r.ports.map((p) => `${p.direction}:${p.name}`), ['in:inbound', 'out:processed']);
-  assert(r.ports.every((p) => typeof p.id === 'string' && (p.id as string).length > 0), 'ids minted');
-  assert(r.note !== undefined && r.note.field === 'ports', 'notes the provisioning');
-});
-
-Deno.test('ensureNodePorts: no default_ports → generic in/out pair (internal-agent parity)', () => {
-  const r = ensureNodePorts(CATALOG_WITH_PORTS, 'backend-service', []);
-  assertEquals(r.ports.map((p) => `${p.direction}:${p.name}`), ['in:input', 'out:output']);
-  assert(r.note !== undefined, 'notes the provisioning');
-});
-
-Deno.test('ensureNodePorts: container roles get no ports and no note', () => {
-  const r = ensureNodePorts(CATALOG_WITH_PORTS, 'region', undefined);
-  assertEquals(r.ports, []);
-  assertEquals(r.note, undefined);
-});
-
-Deno.test('ensureNodePorts: unknown role still gets the generic pair (never portless)', () => {
-  const r = ensureNodePorts(CATALOG_WITH_PORTS, 'no-such-role', undefined);
-  assertEquals(r.ports.length, 2);
-});

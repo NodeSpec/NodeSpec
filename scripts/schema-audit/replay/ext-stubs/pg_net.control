@@ -1,0 +1,3 @@
+comment = 'stub pg_net for schema replay'
+default_version = '1.0'
+relocatable = true

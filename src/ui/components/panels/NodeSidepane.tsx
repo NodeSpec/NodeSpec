@@ -1,7 +1,7 @@
 // N5.5 (owner direction 2026-07-24): ONE popup sidepane. The node Inspector and the
 // Artifact Workbench were two mutually-exclusive fixed cards at the same anchor; this
 // shell merges them behind two tabs — Details (the simplified inspector) and Files
-// (the workbench: Monaco tabs + suggested-file Accept/Dismiss + create/rename/delete;
+// (the workbench: Monaco tabs + create/rename/delete;
 // its internal editor|context toggle is the context view). Edges show Details only.
 // Selection drives visibility, exactly as the inspector always behaved.
 import { useTheme } from '../../theme/ThemeContext.js';
@@ -12,34 +12,54 @@ import { getTechnologyLogo } from '../../utils/technology-logo-map.js';
 import { getNodeTypeById } from '@nodespec/core/node-types.js';
 import { NodeIcon } from '../common/index.js';
 import { getContractKindLabel, getContractKindColor } from './inspector/kind-maps.js';
+import { ArchitectureRail, type WorkTarget } from './ArchitectureRail.js';
+import type { StagedExplode } from '../../utils/explode-staging.js';
 
 export type SidepaneTab = 'details' | 'files';
 
 interface NodeSidepaneProps {
+  /** V3 4.4: the rail reads the node's items and holds per project. */
+  projectId?: string | null;
+  /** AA.7: the branch the rail reads the node's history on. */
+  branchId?: string | null;
   selectedNodeId: string | null;
   selectedEdgeId: string | null;
   graph: Graph;
   onPatchGenerated: (patch: PatchOperation) => void;
-  onPatchesGenerated?: (patches: PatchOperation[]) => void;
   tab: SidepaneTab;
   onTabChange: (tab: SidepaneTab) => void;
   focusArtifactId?: string | null;
-  onLoadFromRepo?: (artifactId: string) => Promise<void>;
-  /** DecompositionCanvas mode: Details only, no tab bar. */
+  onLoadFromRepo?: (artifactId: string) => Promise<boolean | void>;
+  /** Details only, no tab bar (kept for embedded hosts; the retired
+   *  DecompositionCanvas was its original user). */
   detailsOnly?: boolean;
+  /** The rail's Work here rows open Work on that record. */
+  onOpenWork?: (target: WorkTarget) => void;
+  /** An imported candidate on the node is decided under Proposals. */
+  onOpenChanges?: () => void;
+  /** AE.6: the explode requests staged on the project, and the two presses. */
+  stagedExplodes?: readonly StagedExplode[];
+  onRequestExplode?: (nodeId: string) => void;
+  onWithdrawExplode?: (nodeId: string) => void;
 }
 
 export function NodeSidepane({
+  projectId,
+  branchId,
   selectedNodeId,
   selectedEdgeId,
   graph,
   onPatchGenerated,
-  onPatchesGenerated,
   tab,
   onTabChange,
   focusArtifactId,
   onLoadFromRepo,
   detailsOnly,
+  onOpenWork,
+  onOpenChanges,
+  stagedExplodes,
+  onRequestExplode,
+  onWithdrawExplode,
 }: NodeSidepaneProps) {
   const { theme } = useTheme();
   const c = theme.colors;
@@ -59,7 +79,7 @@ export function NodeSidepane({
     position: 'fixed',
     right: '20px',
     top: '128px',
-    width: wide ? '600px' : '380px',
+    width: wide ? 'min(600px, calc(100vw - 40px))' : 'min(380px, calc(100vw - 40px))',
     height: 'calc(100vh - 148px)',
     maxHeight: 'calc(100vh - 148px)',
     backgroundColor: c.surface,
@@ -167,12 +187,13 @@ export function NodeSidepane({
 
       {activeTab === 'details' && (
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+          {/* V3 4.4: what lives on the node, who holds it, what it connects to. */}
+          {selectedNodeId && selectedNode && <ArchitectureRail projectId={projectId} branchId={branchId} nodeId={selectedNodeId} graph={graph} onOpenWork={onOpenWork} onOpenChanges={onOpenChanges} stagedExplodes={stagedExplodes} onRequestExplode={onRequestExplode} onWithdrawExplode={onWithdrawExplode} />}
           <SimplifiedInspector
             selectedNodeId={selectedNodeId}
             selectedEdgeId={selectedEdgeId}
             graph={graph}
             onPatchGenerated={onPatchGenerated}
-            onPatchesGenerated={onPatchesGenerated}
           />
         </div>
       )}

@@ -1,0 +1,4 @@
+comment = 'stub pg_cron for schema replay'
+default_version = '1.0'
+relocatable = false
+schema = pg_catalog

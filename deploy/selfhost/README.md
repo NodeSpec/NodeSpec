@@ -95,8 +95,11 @@ carries the claim.
 ## The license
 
 `NODESPEC_LICENSE` (in `selfhost.env`) is the signed `nslic1.…` token NodeSpec
-issues per contract. It sets your deployment's plan tier — same tier vocabulary
-as the SaaS, different source. **Fail-closed and non-fatal:** a missing/expired/
+issues per contract. It sets your deployment's plan: Enterprise, or Government
+(Team, Indie and Free are the managed service's plans; no licence carries
+them). The server verifies it, and the app shows what the server verified, so a
+licensed deployment reads NodeSpec Enterprise from the sign-in page through
+every feature. **Fail-closed and non-fatal:** a missing/expired/
 altered license runs at the community tier and logs the exact reason
 (`[selfhost-license] running unlicensed: …` in the functions log) — nothing
 stops working, per the all-features doctrine; tiers scale, they never gate
@@ -117,6 +120,11 @@ firewalled pilot. For confirmed-email production use, configure
   (release-to-release schema deltas ship with each bundle), re-run
   `bootstrap.sh`. Never run `supabase db reset` on a live deployment — it
   DROPS the database; it is a first-install step only.
+- **The self-hosted mark:** `bootstrap.sh` writes one row to
+  `public.deployment_settings` (`mode = self-hosted`) on every run, and the
+  functions write it on first use. The database's plan checks (writes to
+  workflows, seats, marks, the project cap) defer to your licence only when
+  that row is there, so re-run `bootstrap.sh` after applying a delta.
 - **Backup:** `supabase db dump --local --data-only -f backup-$(date +%F).sql`
   on a schedule you control (cron), copied off the VM (e.g. to S3); the Docker
   volumes carry the live data, so VM/EBS snapshots are a second layer.
@@ -127,6 +135,16 @@ firewalled pilot. For confirmed-email production use, configure
   mode landed 2026-08-24 after a live find: home/mobile networks commonly
   filter nonstandard outbound ports; enterprise proxies want 80/443 anyway.)
 - **Logs:** `supabase functions logs` / `docker logs nodespec-frontend`.
+- **Technology icons:** the icon set ships in the repo (`assets/icons/`) and
+  is seeded into THIS deployment's own storage bucket by
+  `scripts/icons/seed-icons.sh` (bootstrap runs it automatically) — nothing
+  is fetched from nodespec.io, so fully air-gapped environments render the
+  full palette. The script also repoints `technology_catalog.icon_url` to
+  the local bucket (relative `/storage/v1/...` paths riding the same
+  single-origin gateway). Catalog migrations may re-write hosted-absolute
+  icon URLs; the seeding is idempotent and self-healing, so the rule is
+  simply: **after any `supabase migration up`, finish with `bootstrap.sh`**
+  (which you already do), or run the seed script directly.
 
 ## Doctrine notes (what this artifact is and isn't)
 

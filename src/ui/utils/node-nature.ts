@@ -50,6 +50,8 @@ export function deriveNodeNature(role: NatureRoleShape, tech?: TechnologyCatalog
   const cm = (tech?.aiContext as Record<string, unknown> | undefined)?.configMode;
   const providerBacked = tech ? providerPlatformRoleId(tech.id) !== null : false;
   if (providerBacked || cm === 'declarative' || cm === 'external') {
+    // AG.3: a self-hostable technology (PostgreSQL, Redis, Kafka) is not only a provider's.
+    if (!providerBacked && cm === 'declarative') return { line: 'Provider-managed, or operated by you if self-hosted', chip: 'Managed' };
     return cm === 'code'
       ? { line: 'Managed runtime — you write the code, the provider runs it', chip: 'You build' }
       : { line: 'Managed service — provider runs it, you configure it', chip: 'Managed' };
@@ -82,26 +84,6 @@ export { PROVIDER_ID_ALIASES as PROVIDER_ALIASES } from '@nodespec/core/provider
 export function providerPlatformRoleId(technologyId: string | null | undefined): string | null {
   if (!technologyId) return null;
   return providerFamilyForId(technologyId);
-}
-
-/** N3.7 palette chip — the ONLY classification vocabulary shown at recognition time
- *  (owner 2026-07-22: 7 nature words read as a third taxonomy). Three words:
- *  Build = yours, the AI writes its code · Connect = someone else's — you configure or
- *  call it (external, managed, engine all collapse here) · Host = it runs other nodes
- *  (platforms + hosting containers). Logical groups get NO chip — their shape says it.
- *  The full nature sentence (deriveNodeNature) stays for tooltips/inspector/task docs,
- *  where the finer truth changes behavior. */
-export function paletteChip(role: NatureRoleShape, tech?: TechnologyCatalogEntry | null): 'Build' | 'Connect' | 'Host' | null {
-  const nature = deriveNodeNature(role, tech);
-  switch (nature.chip) {
-    case 'You build': return 'Build';
-    case 'You call':
-    case 'Managed':
-    case 'Engine': return 'Connect';
-    case 'You host':
-    case 'Hosts': return 'Host';
-    default: return null; // 'Groups' — logical containers carry no chip
-  }
 }
 
 /** N3.7 drop-time disambiguation: when a technology maps to several roles, the question

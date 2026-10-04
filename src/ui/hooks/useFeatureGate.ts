@@ -4,96 +4,31 @@ import { isProvisioningInFlight } from '../services/SubscriptionService.js';
 import type { SubscriptionInfo } from '../services/SubscriptionService.js';
 
 import {
-  canonicalizeTier,
-  HOSTED_COMMUNITY_PROJECT_LIMIT,
-  TIER_RANK,
+  canonicalizeTier, hostedTier,
+  projectCapReached,
 } from '../config/tiers.js';
-import { isHostedEdition } from '../config/edition.js';
+import { FEATURE_RULES, featureAvailable, type Feature, type FeatureRule } from '../config/feature-rules.js';
+import { testTierOverride } from '../config/test-tier.js';
+import { isHostedEdition, isLicensedEdition, buildEdition } from '../config/edition.js';
+import { readLicencePlan } from '../services/licence-plan.js';
 import type { PlanTier } from '../config/tiers.js';
 
 export type { PlanTier } from '../config/tiers.js';
 
-export type Feature =
-  | 'chat'
-  | 'node_generate'
-  | 'architecture_generation'
-  | 'git_push'
-  | 'git_pull'
-  | 'repo_import'
-  | 'node_context_export'
-  | 'unlimited_projects'
-  | 'mcp_connectivity'
-  | 'mcp_write_scope';
+// 7.1: the rules live in src/ui/config/feature-rules.ts (the client mirror of
+// the server table every closed tool refuses through); this hook binds them
+// to the live plan. The Feature vocabulary is the stable surface call sites
+// and self-host licensing both speak.
+export type { Feature, FeatureRule } from '../config/feature-rules.js';
 
-interface FeatureRule {
-  minimumTier: PlanTier;
-  label: string;
-  upgradeMessage: string;
-}
-
-// AMENDED 2026-08-25 (open-core GTM): tiers gate again, narrowly. Hosted
-// Community includes ONE project (server-enforced in MCP create_project too),
-// and repo import is Indie+ on hosted (absent from the community bundle
-// entirely). Everything else stays every-tier; the Feature vocabulary is the
-// stable surface call sites and self-host licensing both speak.
-const FEATURE_RULES: Record<Feature, FeatureRule> = {
-  chat: {
-    minimumTier: 'community',
-    label: 'AI Chat',
-    upgradeMessage: 'AI chat is available on all plans.',
-  },
-  node_generate: {
-    minimumTier: 'community',
-    label: 'Generate Code',
-    upgradeMessage: 'Code generation is available on all plans.',
-  },
-  architecture_generation: {
-    minimumTier: 'community',
-    label: 'Architecture Generation',
-    upgradeMessage: 'Architecture generation is available on all plans.',
-  },
-  git_push: {
-    minimumTier: 'community',
-    label: 'Git Export',
-    upgradeMessage: 'Git export is available on all tiers.',
-  },
-  git_pull: {
-    minimumTier: 'community',
-    label: 'Git Import',
-    upgradeMessage: 'Git import is available on all tiers.',
-  },
-  repo_import: {
-    minimumTier: 'indie',
-    label: 'Repo Import',
-    upgradeMessage: 'Repo import reverse visualization is available on Indie and above.',
-  },
-  node_context_export: {
-    minimumTier: 'community',
-    label: 'Node Context Export',
-    upgradeMessage: 'Node context export is available on all tiers.',
-  },
-  unlimited_projects: {
-    minimumTier: 'indie',
-    label: 'Multiple Projects',
-    upgradeMessage: 'Hosted Free includes 2 projects; Indie and above are unlimited.',
-  },
-  mcp_connectivity: {
-    minimumTier: 'community',
-    label: 'Agent Connectivity (MCP)',
-    upgradeMessage: 'MCP agent connectivity is available on all tiers.',
-  },
-  mcp_write_scope: {
-    minimumTier: 'community',
-    label: 'Agent Write Scope',
-    upgradeMessage: 'The MCP write scope is available on all tiers.',
-  },
-};
-
-function planFromSubscription(sub: SubscriptionInfo | null): PlanTier {
+/** Exported for the AccountPanel build-identity stamp (R18) — one resolver,
+ *  so the stamp can never disagree with the gate about what the tier is. */
+export function planFromSubscription(sub: SubscriptionInfo | null): PlanTier {
   if (!sub || !['active', 'trialing'].includes(sub.status)) return 'community';
   // Shared resolver — the old exact-equality ladder here disagreed with the
   // server's substring version; canonicalizeTier is now the single behavior.
-  return canonicalizeTier(sub.planName) ?? 'community';
+  // A hosted plan never resolves above Team (audit, owner 2026-09-27).
+  return hostedTier(canonicalizeTier(sub.planName) ?? 'community');
 }
 
 export interface FeatureGate {
@@ -105,6 +40,11 @@ export interface FeatureGate {
   projectLimitReached: (currentCount: number) => boolean;
   refresh: () => Promise<void>;
   refreshUntilActive: () => void;
+  /** AJ.6: the project is the account's example (useProjectFeatureGate only). */
+  example?: boolean;
+  /** AJ.6: in the example, a feature shown with its data that the owner's
+   *  plan does not carry: the surface reads and does not write. */
+  viewOnly?: (feature: Feature) => boolean;
 }
 
 const POLL_INTERVAL_MS = 3_000;
@@ -114,6 +54,8 @@ export function useFeatureGate(): FeatureGate {
   const subscriptionService = useSubscription();
   const auth = useAuth();
   const [subscription, setSubscription] = useState<SubscriptionInfo | null>(null);
+  /** Item 3: the Enterprise build's plan, the licence the server verified. */
+  const [licencePlan, setLicencePlan] = useState<PlanTier | null>(null);
   const [loading, setLoading] = useState(true);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollCountRef = useRef(0);
@@ -204,6 +146,23 @@ export function useFeatureGate(): FeatureGate {
     let cancelled = false;
 
     const load = async () => {
+      // Item 3 (owner 2026-09-26): a licensed container is NodeSpec
+      // Enterprise, or Government; it has no Stripe rows, and its plan is
+      // the licence, which only the server verifies.
+      if (isLicensedEdition) {
+        let tier: PlanTier | null = null;
+        try {
+          const session = await auth.getSession();
+          const userId = session?.user?.id;
+          const token = session?.session?.access_token;
+          if (userId && token) tier = await readLicencePlan(userId, token);
+        } catch { /* the gate stays at community, as the server does */ }
+        if (cancelled) return;
+        setLicencePlan(tier);
+        setLoading(false);
+        return;
+      }
+
       let sub = await fetchSubscription();
       if (cancelled) return;
 
@@ -222,37 +181,34 @@ export function useFeatureGate(): FeatureGate {
       cancelled = true;
       stopPolling();
     };
-  }, [fetchSubscription, stopPolling, attemptRecovery]);
+  }, [fetchSubscription, stopPolling, attemptRecovery, auth]);
 
-  const plan = useMemo(() => planFromSubscription(subscription), [subscription]);
+  // Owner 2026-09-15: local tier-variant testing rides an explicit flag
+  // (VITE_NODESPEC_TEST_TIER, dev builds only) — never the seeded billing row.
+  const plan = useMemo(
+    () => testTierOverride() ?? (isLicensedEdition ? licencePlan ?? 'community' : planFromSubscription(subscription)),
+    [subscription, licencePlan],
+  );
 
+  // R9: BOTH axes. A build that does not carry the code never claims the
+  // feature, whatever tier the account resolves to — fail-closed, so a
+  // forged or stale subscription cannot light up chrome for a module the
+  // community tree does not contain. Planned features are never available.
   const can = useCallback(
-    (feature: Feature): boolean => {
-      const rule = FEATURE_RULES[feature];
-      return TIER_RANK[plan] >= TIER_RANK[rule.minimumTier];
-    },
+    (feature: Feature): boolean => featureAvailable(plan, feature, buildEdition),
     [plan]
   );
 
   const check = useCallback(
-    (feature: Feature) => {
-      const rule = FEATURE_RULES[feature];
-      return { allowed: TIER_RANK[plan] >= TIER_RANK[rule.minimumTier], rule };
-    },
+    (feature: Feature) => ({ allowed: featureAvailable(plan, feature, buildEdition), rule: FEATURE_RULES[feature] }),
     [plan]
   );
 
+  // Hosted Free: two projects; Indie and above, and every self-hosted build,
+  // are uncapped (projectCapReached; the database and MCP create_project
+  // refuse the same).
   const projectLimitReached = useCallback(
-    (currentCount: number): boolean => {
-      // Hosted Free: 2 projects (2026-08-31 Stripe round; server mirror
-      // in MCP create_project). Indie and above are unlimited. Self-hosted
-      // deployments are UNCAPPED — same lift the server applies (projects.ts
-      // checks NODESPEC_DEPLOYMENT); without this, the container's users all
-      // resolve to 'community' (no billing rows) and hit the hosted-Free cap.
-      if (!isHostedEdition) return false;
-      if (plan === 'community') return currentCount >= HOSTED_COMMUNITY_PROJECT_LIMIT;
-      return false;
-    },
+    (currentCount: number): boolean => projectCapReached(plan, currentCount, isHostedEdition),
     [plan]
   );
 

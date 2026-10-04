@@ -9,6 +9,7 @@
 //   GHES          -> https://ghe.example.com/api/v3
 //   gitlab cloud  -> https://gitlab.com/api/v4
 //   self-managed  -> https://gitlab.example.com/api/v4
+import { encodeRepoPath } from "./git-tree.ts";
 
 export function providerApiBase(provider: string, baseUrl?: string | null): string {
   const normalized = (baseUrl ?? "").trim().replace(/\/+$/, "");
@@ -51,41 +52,6 @@ export async function fetchRemoteHeadShaDetailed(
     return { sha: null };
   } catch {
     return { sha: null };
-  }
-}
-
-/**
- * R3-6: the repository's branch NAMES (both providers), for connect-time design-
- * branch detection. Server-side twin of the client's listRemoteBranches (which
- * runs with the token still in the browser form); this one uses the stored
- * token. Empty array on any failure — detection is best-effort by contract.
- */
-export async function listRemoteBranchNames(
-  provider: string, apiBase: string, owner: string, repo: string, token: string,
-): Promise<string[]> {
-  try {
-    if (provider === "github") {
-      const resp = await fetch(
-        `${apiBase}/repos/${owner}/${repo}/branches?per_page=100`,
-        { headers: { "Authorization": `Bearer ${token}`, "Accept": "application/vnd.github+json", "User-Agent": "nodespec" } },
-      );
-      if (!resp.ok) return [];
-      const data = await resp.json();
-      return Array.isArray(data) ? data.map((b: { name?: string }) => b?.name).filter((n): n is string => !!n) : [];
-    }
-    if (provider === "gitlab") {
-      const projectPath = encodeURIComponent(`${owner}/${repo}`);
-      const resp = await fetch(
-        `${apiBase}/projects/${projectPath}/repository/branches?per_page=100`,
-        { headers: { "PRIVATE-TOKEN": token } },
-      );
-      if (!resp.ok) return [];
-      const data = await resp.json();
-      return Array.isArray(data) ? data.map((b: { name?: string }) => b?.name).filter((n): n is string => !!n) : [];
-    }
-    return [];
-  } catch {
-    return [];
   }
 }
 
@@ -240,6 +206,106 @@ export async function createPullRequest(
   }
 }
 
+/** V3 AD.4 (D14): a pull request from NodeSpec's work branch. */
+export interface PullRequestRef {
+  number: number;
+  url: string | null;
+  /** The commits a merge of it put on the target: GitHub's merge_commit_sha
+   *  (the merge, squash or last rebased commit), GitLab's squash, merge and
+   *  source-head shas. Empty while it is open. */
+  mergeShas: string[];
+}
+
+/** The open, or the recently merged, pull requests from sourceRef into
+ *  targetRef, newest first. Null when the provider could not be read: not
+ *  knowing is never "none". */
+export async function listPullRequests(
+  provider: string, apiBase: string, owner: string, repo: string,
+  sourceRef: string, targetRef: string, token: string, state: "open" | "merged",
+): Promise<PullRequestRef[] | null> {
+  try {
+    if (provider === "github") {
+      const query = state === "open" ? "state=open&per_page=10" : "state=closed&sort=updated&direction=desc&per_page=30";
+      const resp = await fetch(
+        `${apiBase}/repos/${owner}/${repo}/pulls?head=${encodeURIComponent(`${owner}:${sourceRef}`)}&base=${encodeURIComponent(targetRef)}&${query}`,
+        { headers: { "Authorization": `Bearer ${token}`, "Accept": "application/vnd.github+json", "User-Agent": "nodespec" } },
+      );
+      if (!resp.ok) return null;
+      const prs = await resp.json();
+      if (!Array.isArray(prs)) return null;
+      return prs
+        // deno-lint-ignore no-explicit-any
+        .filter((pr: any) => state === "open" || !!pr?.merged_at)
+        // deno-lint-ignore no-explicit-any
+        .map((pr: any) => ({
+          number: Number(pr.number),
+          url: pr.html_url ?? null,
+          mergeShas: state === "merged" && typeof pr.merge_commit_sha === "string" ? [pr.merge_commit_sha] : [],
+        }));
+    }
+    if (provider === "gitlab") {
+      const projectPath = encodeURIComponent(`${owner}/${repo}`);
+      const resp = await fetch(
+        `${apiBase}/projects/${projectPath}/merge_requests?source_branch=${encodeURIComponent(sourceRef)}&target_branch=${encodeURIComponent(targetRef)}&state=${state === "open" ? "opened" : "merged"}&order_by=updated_at&sort=desc&per_page=30`,
+        { headers: { "PRIVATE-TOKEN": token } },
+      );
+      if (!resp.ok) return null;
+      const mrs = await resp.json();
+      if (!Array.isArray(mrs)) return null;
+      // deno-lint-ignore no-explicit-any
+      return mrs.map((mr: any) => ({
+        number: Number(mr.iid),
+        url: mr.web_url ?? null,
+        mergeShas: state === "merged"
+          ? [mr.squash_commit_sha, mr.merge_commit_sha, mr.sha].filter((x): x is string => typeof x === "string" && x.length > 0)
+          : [],
+      }));
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** V3 AD.4 (D14): point NodeSpec's work branch at `sha`, creating it when it
+ *  does not exist. Only ever called for a work branch with no open pull
+ *  request: its old commits were merged or turned down. */
+export async function resetRemoteBranch(
+  provider: string, apiBase: string, owner: string, repo: string,
+  branch: string, sha: string, token: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    if (provider === "github") {
+      const resp = await fetch(`${apiBase}/repos/${owner}/${repo}/git/refs/heads/${branch}`, {
+        method: "PATCH",
+        headers: { "Authorization": `Bearer ${token}`, "Accept": "application/vnd.github+json", "User-Agent": "nodespec", "Content-Type": "application/json" },
+        body: JSON.stringify({ sha, force: true }),
+      });
+      if (resp.ok) return { ok: true };
+      if (resp.status === 404 || resp.status === 422) {
+        const created = await createRemoteBranch(provider, apiBase, owner, repo, branch, sha, token);
+        if (created.sha && created.alreadyExists !== true) return { ok: true };
+        return { ok: false, error: created.error ?? `GitHub could not reset ${branch} (HTTP ${resp.status})` };
+      }
+      return { ok: false, error: `GitHub could not reset ${branch} (HTTP ${resp.status})` };
+    }
+    if (provider === "gitlab") {
+      // GitLab moves no branch by force: the work branch is removed and cut again.
+      const projectPath = encodeURIComponent(`${owner}/${repo}`);
+      const del = await fetch(`${apiBase}/projects/${projectPath}/repository/branches/${encodeURIComponent(branch)}`, {
+        method: "DELETE", headers: { "PRIVATE-TOKEN": token },
+      });
+      if (!del.ok && del.status !== 404) return { ok: false, error: `GitLab could not remove ${branch} (HTTP ${del.status})` };
+      const created = await createRemoteBranch(provider, apiBase, owner, repo, branch, sha, token);
+      if (created.sha && created.alreadyExists !== true) return { ok: true };
+      return { ok: false, error: created.error ?? `GitLab could not cut ${branch} again` };
+    }
+    return { ok: false, error: `Unsupported provider: ${provider}` };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export interface MergeBranchResult {
   sha: string | null;
   /** Provider reports the target already contains the source (nothing to merge). */
@@ -312,8 +378,9 @@ export interface CompareResult {
   // oldPath present = the file was renamed/moved; path is the NEW location. Preserving this is
   // what lets artifact bindings FOLLOW git-side moves instead of orphaning (git owns the tree;
   // artifact.path is a binding, not a derivation).
-  files: Array<{ path: string; action: "added" | "modified" | "removed"; oldPath?: string }>;
-  commits: Array<{ sha: string; message: string }>;
+  files: Array<{ path: string; action: "added" | "modified" | "removed"; oldPath?: string; blob?: string | null }>;
+  /** AD.3: `author` is the provider's login, else the commit's author name. */
+  commits: Array<{ sha: string; message: string; author?: string }>;
 }
 
 /** Compare base...head on the remote. Null when the provider can't compare (e.g. force-push). */
@@ -333,13 +400,16 @@ export async function fetchCompare(
         added: "added", removed: "removed", modified: "modified", changed: "modified", renamed: "modified", copied: "added",
       };
       return {
-        files: (data.files ?? []).map((f: { filename: string; status: string; previous_filename?: string }) => ({
+        files: (data.files ?? []).map((f: { filename: string; status: string; previous_filename?: string; sha?: string }) => ({
           path: f.filename,
           action: actionMap[f.status] ?? "modified",
           ...(f.status === "renamed" && f.previous_filename ? { oldPath: f.previous_filename } : {}),
+          // AD.1: the file's blob at head (absent for a removed file).
+          ...(f.status !== "removed" && typeof f.sha === "string" ? { blob: f.sha } : {}),
         })),
-        commits: (data.commits ?? []).map((c: { sha: string; commit?: { message?: string } }) => ({
+        commits: (data.commits ?? []).map((c: { sha: string; commit?: { message?: string; author?: { name?: string } }; author?: { login?: string } | null }) => ({
           sha: c.sha, message: c.commit?.message ?? "",
+          ...((c.author?.login || c.commit?.author?.name) ? { author: c.author?.login || c.commit?.author?.name } : {}),
         })),
       };
     }
@@ -357,8 +427,9 @@ export async function fetchCompare(
           action: d.new_file ? "added" as const : d.deleted_file ? "removed" as const : "modified" as const,
           ...(d.renamed_file && d.old_path && d.old_path !== d.new_path ? { oldPath: d.old_path } : {}),
         })),
-        commits: (data.commits ?? []).map((c: { id: string; message?: string }) => ({
+        commits: (data.commits ?? []).map((c: { id: string; message?: string; author_name?: string }) => ({
           sha: c.id, message: c.message ?? "",
+          ...(c.author_name ? { author: c.author_name } : {}),
         })),
       };
     }
@@ -368,25 +439,43 @@ export async function fetchCompare(
   }
 }
 
-/** Fetch one file's text content at a ref. Null when absent/unreadable. */
-export async function fetchRepoFile(
+/**
+ * V3 AD.1 (finding D11): one file's text at a ref, saying which of three
+ * things happened. A guard must never read a provider outage as "the file is
+ * not there": the unbaselined push guard used to pass on a failed read, and a
+ * connect used to treat an unreachable model.json as a repository without one.
+ *   found   the file, decoded
+ *   absent  the provider answered 404
+ *   failed  anything else: another status, a network error, a body we cannot read
+ */
+export type RepoFileRead =
+  | { status: "found"; text: string }
+  | { status: "absent" }
+  | { status: "failed"; error: string };
+
+export async function readRepoFile(
   provider: string, apiBase: string, owner: string, repo: string,
   path: string, ref: string, token: string,
-): Promise<string | null> {
+): Promise<RepoFileRead> {
+  const encoded = encodeRepoPath(path);
+  if (!encoded) return { status: "failed", error: `${path} is not a path inside the repository` };
   try {
     if (provider === "github") {
       const resp = await fetch(
-        `${apiBase}/repos/${owner}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`,
+        `${apiBase}/repos/${owner}/${repo}/contents/${encoded}?ref=${encodeURIComponent(ref)}`,
         { headers: { "Authorization": `Bearer ${token}`, "Accept": "application/vnd.github+json", "User-Agent": "nodespec" } },
       );
-      if (!resp.ok) return null;
+      if (resp.status === 404) return { status: "absent" };
+      if (!resp.ok) return { status: "failed", error: `GitHub answered HTTP ${resp.status} for ${path}` };
       const data = await resp.json();
       if (data.encoding === "base64" && typeof data.content === "string") {
         const bin = atob(data.content.replace(/\n/g, ""));
         const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
-        return new TextDecoder().decode(bytes);
+        return { status: "found", text: new TextDecoder().decode(bytes) };
       }
-      return typeof data.content === "string" ? data.content : null;
+      return typeof data.content === "string"
+        ? { status: "found", text: data.content }
+        : { status: "failed", error: `GitHub returned no readable content for ${path}` };
     }
     if (provider === "gitlab") {
       const projectPath = encodeURIComponent(`${owner}/${repo}`);
@@ -394,8 +483,166 @@ export async function fetchRepoFile(
         `${apiBase}/projects/${projectPath}/repository/files/${encodeURIComponent(path)}/raw?ref=${encodeURIComponent(ref)}`,
         { headers: { "PRIVATE-TOKEN": token } },
       );
+      if (resp.status === 404) return { status: "absent" };
+      if (!resp.ok) return { status: "failed", error: `GitLab answered HTTP ${resp.status} for ${path}` };
+      return { status: "found", text: await resp.text() };
+    }
+    return { status: "failed", error: `Unsupported provider: ${provider}` };
+  } catch (err) {
+    return { status: "failed", error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Fetch one file's text content at a ref. Null when absent OR unreadable: for
+ *  best-effort reads only. A guard reads with readRepoFile (AD.1, D11). */
+export async function fetchRepoFile(
+  provider: string, apiBase: string, owner: string, repo: string,
+  path: string, ref: string, token: string,
+): Promise<string | null> {
+  const read = await readRepoFile(provider, apiBase, owner, repo, path, ref, token);
+  return read.status === "found" ? read.text : null;
+}
+
+/**
+ * V3 AD.1: the blob at `ref` for each path, where GitLab's compare gives none.
+ * GitLab answers a HEAD on the files API with the blob id in a header. A path
+ * it will not answer for is left out, and a caller reads that as foreign.
+ */
+export async function fetchGitLabBlobIds(
+  apiBase: string, owner: string, repo: string, ref: string, paths: string[], token: string,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const projectPath = encodeURIComponent(`${owner}/${repo}`);
+  for (const path of paths) {
+    try {
+      const resp = await fetch(
+        `${apiBase}/projects/${projectPath}/repository/files/${encodeURIComponent(path)}?ref=${encodeURIComponent(ref)}`,
+        { method: "HEAD", headers: { "PRIVATE-TOKEN": token } },
+      );
+      const blob = resp.ok ? resp.headers.get("x-gitlab-blob-id") : null;
+      if (blob) out.set(path, blob);
+    } catch { /* left out: read as foreign */ }
+  }
+  return out;
+}
+
+/**
+ * V3 AD.1 (finding D8): where `head` stands relative to `base`.
+ *   ahead      head descends from base: moving a baseline from base to head goes forward
+ *   identical  the same commit
+ *   behind     head is an ancestor of base: moving there would go backwards
+ *   diverged   neither: history was rewritten (a force push)
+ * Null when the provider cannot say; the baseline writer treats that as "no".
+ */
+export type Ancestry = "ahead" | "identical" | "behind" | "diverged";
+
+/** V3 AD.3: the paths one commit changed (a rename counts both paths). Null
+ *  when the provider cannot say, so a caller never reads "no files". */
+export async function fetchCommitFiles(
+  provider: string, apiBase: string, owner: string, repo: string,
+  sha: string, token: string,
+): Promise<string[] | null> {
+  try {
+    if (provider === "github") {
+      const resp = await fetch(
+        `${apiBase}/repos/${owner}/${repo}/commits/${encodeURIComponent(sha)}`,
+        { headers: { "Authorization": `Bearer ${token}`, "Accept": "application/vnd.github+json", "User-Agent": "nodespec" } },
+      );
       if (!resp.ok) return null;
-      return await resp.text();
+      const files = (await resp.json())?.files;
+      if (!Array.isArray(files)) return null;
+      return [...new Set(files.flatMap((f: { filename?: string; previous_filename?: string }) =>
+        [f.filename, f.previous_filename].filter((x): x is string => typeof x === "string" && x !== "")))];
+    }
+    if (provider === "gitlab") {
+      const projectPath = encodeURIComponent(`${owner}/${repo}`);
+      const resp = await fetch(
+        `${apiBase}/projects/${projectPath}/repository/commits/${encodeURIComponent(sha)}/diff?per_page=100`,
+        { headers: { "PRIVATE-TOKEN": token } },
+      );
+      if (!resp.ok) return null;
+      const diffs = await resp.json();
+      if (!Array.isArray(diffs)) return null;
+      return [...new Set(diffs.flatMap((d: { new_path?: string; old_path?: string }) =>
+        [d.new_path, d.old_path].filter((x): x is string => typeof x === "string" && x !== "")))];
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** V3 AD.3a: does the repository have this commit? A short sha comes back as
+ *  the full one. "absent" is the provider saying no; "failed" is not knowing. */
+export type CommitLookup =
+  | { status: "found"; sha: string }
+  | { status: "absent" }
+  | { status: "failed"; error: string };
+
+export async function fetchCommit(
+  provider: string, apiBase: string, owner: string, repo: string,
+  sha: string, token: string,
+): Promise<CommitLookup> {
+  try {
+    if (provider === "github") {
+      const resp = await fetch(
+        `${apiBase}/repos/${owner}/${repo}/commits/${encodeURIComponent(sha)}`,
+        { headers: { "Authorization": `Bearer ${token}`, "Accept": "application/vnd.github+json", "User-Agent": "nodespec" } },
+      );
+      // 422: "No commit found for SHA"
+      if (resp.status === 404 || resp.status === 422) return { status: "absent" };
+      if (!resp.ok) return { status: "failed", error: `GitHub answered HTTP ${resp.status}` };
+      const full = (await resp.json())?.sha;
+      return typeof full === "string" && full
+        ? { status: "found", sha: full.toLowerCase() }
+        : { status: "failed", error: "GitHub returned no sha" };
+    }
+    if (provider === "gitlab") {
+      const projectPath = encodeURIComponent(`${owner}/${repo}`);
+      const resp = await fetch(
+        `${apiBase}/projects/${projectPath}/repository/commits/${encodeURIComponent(sha)}`,
+        { headers: { "PRIVATE-TOKEN": token } },
+      );
+      if (resp.status === 404) return { status: "absent" };
+      if (!resp.ok) return { status: "failed", error: `GitLab answered HTTP ${resp.status}` };
+      const full = (await resp.json())?.id;
+      return typeof full === "string" && full
+        ? { status: "found", sha: full.toLowerCase() }
+        : { status: "failed", error: "GitLab returned no sha" };
+    }
+    return { status: "failed", error: `Unsupported provider: ${provider}` };
+  } catch (err) {
+    return { status: "failed", error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export async function fetchAncestry(
+  provider: string, apiBase: string, owner: string, repo: string,
+  base: string, head: string, token: string,
+): Promise<Ancestry | null> {
+  if (base === head) return "identical";
+  try {
+    if (provider === "github") {
+      const resp = await fetch(
+        `${apiBase}/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}?per_page=1`,
+        { headers: { "Authorization": `Bearer ${token}`, "Accept": "application/vnd.github+json", "User-Agent": "nodespec" } },
+      );
+      if (!resp.ok) return null;
+      const status = (await resp.json())?.status;
+      return status === "ahead" || status === "identical" || status === "behind" || status === "diverged" ? status : null;
+    }
+    if (provider === "gitlab") {
+      const projectPath = encodeURIComponent(`${owner}/${repo}`);
+      const resp = await fetch(
+        `${apiBase}/projects/${projectPath}/repository/merge_base?refs[]=${encodeURIComponent(base)}&refs[]=${encodeURIComponent(head)}`,
+        { headers: { "PRIVATE-TOKEN": token } },
+      );
+      if (!resp.ok) return null;
+      const mergeBase = (await resp.json())?.id;
+      if (typeof mergeBase !== "string" || mergeBase === "") return null;
+      if (mergeBase === base) return "ahead";
+      if (mergeBase === head) return "behind";
+      return "diverged";
     }
     return null;
   } catch {

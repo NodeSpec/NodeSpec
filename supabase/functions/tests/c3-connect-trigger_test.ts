@@ -14,7 +14,7 @@ Deno.test("connect trigger: fires only inside the no-anchor branch, gated on emp
     src.indexOf('anchorAdopt.skipped = "no anchor found'),
     src.indexOf("if (anchorText) {"),
   );
-  assert(noAnchorBlock.includes("if (nodeCount === 0)"),
+  assert(noAnchorBlock.includes("if (nodeCount === 0 && importAllowed)"),
     "job creation is gated on the EMPTY-graph condition inside the no-anchor branch");
   assert(noAnchorBlock.includes('from("import_jobs")'),
     "the trigger writes an import_jobs row");
@@ -43,4 +43,19 @@ Deno.test("connect trigger: response surface is anchorAdopt.importJob {id, statu
     "fresh job reported with id + status");
   assert(src.includes("anchorAdopt.importJob = { id: existingJob.id, status: existingJob.status, resumed: true }"),
     "resumed job reported with its live status");
+});
+
+// Q (owner 2026-09-22): repo import is Indie and above. Below it the save
+// makes no job and reports none, so a Free account is never told to drive
+// an import it cannot run. The plan is the project's, its owner's, whoever
+// connects (a maintainer may, owner 2026-09-27).
+Deno.test("Q connect trigger: no import job below Indie, and the plan read fails closed", () => {
+  const noAnchorBlock = src.slice(
+    src.indexOf('anchorAdopt.skipped = "no anchor found'),
+    src.indexOf("if (anchorText) {"),
+  );
+  const gate = noAnchorBlock.indexOf('featureAllowed(await getEffectiveTier(serviceClient as never, project.owner_id), "repo_import")');
+  assert(gate > 0, "the plan is read inside the no-anchor branch");
+  assert(gate < noAnchorBlock.indexOf('from("import_jobs")'), "the plan is read before any job is looked up or made");
+  assert(noAnchorBlock.includes("let importAllowed = false;") && noAnchorBlock.includes("catch { /* fail closed */ }"), "a failed read makes no job");
 });

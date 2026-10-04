@@ -273,3 +273,19 @@ Deno.test('create_requirement without relations: response omits the relations fi
   assert(!('relationsCreated' in data), 'no relationsCreated key when none requested');
   assert(!('relationsFailed' in data), 'no relationsFailed key when none requested');
 });
+
+// v3x (doctrine 6): a relation is a write on BOTH of its ends.
+Deno.test('relate_requirements: a locked end refuses add AND remove in the one lock sentence, before any row write', async () => {
+  for (const mode of ['add', 'remove'] as const) {
+    const sb = new FakeSupabase();
+    scriptProjectAndSpec(sb);
+    sb.script('specification_requirements', 'select', { data: reqRow(FROM_UUID, 'REQ-001'), error: null });
+    sb.script('specification_requirements', 'select', { data: { ...reqRow(TO_UUID, 'REQ-002'), locked: true }, error: null });
+    const r = await handleRelateRequirements(sb as never, WRITE, {
+      project_id: PROJECT_ID, from_requirement_id: 'REQ-001', to_requirement_id: 'REQ-002', relation_type: 'relates_to', mode,
+    });
+    assertEquals(r.success, false, mode);
+    assertEquals(r.error, 'REQ-002 is locked. Unlock it in the app (the lock toggle on its rail under Work), then retry. No tool unlocks.');
+    assertEquals(sb.callsTo('specification_requirement_relations').length, 0, `${mode}: nothing written`);
+  }
+});

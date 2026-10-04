@@ -1,11 +1,15 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Fragment } from 'react';
 import { usePersistence } from '../../context/ServiceContext.js';
 import { GitService, PushOverwriteBlockedError } from '../../services/GitService.js';
-import type { GitIntegration, AnchorAdoptResult } from '../../services/GitService.js';
+import type { GitIntegration, AnchorAdoptResult, WebhookSetup } from '../../services/GitService.js';
 import { GitBranch, Upload, Download, Settings, X, Check, CircleAlert as AlertCircle, Loader as Loader2, ChevronRight, ChevronDown, ArrowLeft, Bell, Circle as XCircle, TriangleAlert as AlertTriangle } from 'lucide-react';
 import type { GitChangeEvent } from '../../services/GitService.js';
+import { pushSkipNote, pushWithheldNote, loadModelMessage, loadSpecMessage, automatedTicksNote, groupCardFiles } from './repoActivity.js';
+import { cardQuestionsBeyondFiles, unappliedTickCounts, ticksPhrase } from '../../utils/git-auto-sync.js';
 import type { FeatureGate } from '../../hooks/useFeatureGate.js';
-import { getSupabaseClient } from '../../../persistence/supabase/client.js';
+import { getSupabaseClient, callEdgeFunction } from '../../../persistence/supabase/client.js';
+import { buildImportIntentPrompt, importIntentStatus, type ImportIntentView } from '../../utils/spec-import-staging.js';
+import { PromptBox } from '../common/ProjectStartPopup.js';
 import { ImportJobService } from '../../services/ImportJobService.js';
 import { useProposal } from '../../context/ServiceContext.js';
 import type { ImportJobView } from '../../services/ImportJobService.js';
@@ -23,8 +27,6 @@ interface GitIntegrationModalProps {
   graphArtifacts?: Record<string, { path?: string; content?: string; nodeId?: string }>;
   /** P1-7 C1.2: pre-push guard — persists unsaved canvas patches so the push snapshot is current. */
   ensureDraftSaved?: () => Promise<boolean>;
-  /** R3-1: called after a successful restore-from-anchor so the canvas reloads the new snapshot. */
-  onModelRestored?: () => void | Promise<void>;
   /** R3-3c: the ref-deleted lifecycle card's Archive action — deletes the NodeSpec design branch. */
   onArchiveBranch?: (branchName: string) => Promise<void>;
   /** R3-4c: bind an unattributed repo file (residue) to a node. */
@@ -45,10 +47,10 @@ export function GitIntegrationModal({
   onDeleteArtifact,
   graphArtifacts,
   ensureDraftSaved,
-  onModelRestored,
   onArchiveBranch,
   onBindResidueFile,
   bindTargetNodes,
+  featureGate,
 }: GitIntegrationModalProps) {
   const persistence = usePersistence();
   const [gitService] = useState(() => new GitService(persistence.getSupabaseClient()));
@@ -57,6 +59,8 @@ export function GitIntegrationModal({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  // AD.0: the webhook to add, shown after a save (the secret comes back only then).
+  const [webhookSetup, setWebhookSetup] = useState<WebhookSetup | null>(null);
 
   const [provider, setProvider] = useState<Provider>('github');
   const [repoOwner, setRepoOwner] = useState('');
@@ -85,9 +89,32 @@ export function GitIntegrationModal({
   const [importJobService] = useState(() => new ImportJobService(persistence.getSupabaseClient()));
   const [importJob, setImportJob] = useState<ImportJobView | null>(null);
   const [importProposalStatus, setImportProposalStatus] = useState<string | null>(null);
+  // Q (owner 2026-09-22): repo import is Indie and above. Below it the modal
+  // neither watches a job nor shows the import section; without a gate it
+  // shows nothing either (fail closed). AJ.6: the account's example shows its
+  // import elsewhere, and below Indie runs none.
+  const canImport = !!featureGate && !featureGate.loading && featureGate.can('repo_import') && !featureGate.viewOnly?.('repo_import');
+
+  // AL.21 (owner 2026-10-03): what the person chose after the import, read
+  // once per opening from the status read the agent gets, so the window
+  // says exactly what the agent is told and whether it has acted on it.
+  const [intent, setIntent] = useState<{ projectName: string; view: ImportIntentView } | null>(null);
+  useEffect(() => {
+    if (!isOpen || !integration || !canImport) { setIntent(null); return; }
+    let cancelled = false;
+    callEdgeFunction<{ success: boolean; data?: { projectName?: string; importIntent?: ImportIntentView } }>('mcp-server', {
+      tool: 'get_project_status',
+      arguments: { project_id: projectId },
+    }).then((r) => {
+      if (cancelled) return;
+      const view = r.success ? r.data?.importIntent : undefined;
+      setIntent(view ? { projectName: r.data?.projectName ?? '', view } : null);
+    }).catch(() => { if (!cancelled) setIntent(null); });
+    return () => { cancelled = true; };
+  }, [isOpen, integration, canImport, projectId]);
 
   useEffect(() => {
-    if (!integration) { setImportJob(null); return; }
+    if (!integration || !canImport) { setImportJob(null); return; }
     let cancelled = false;
     let unsub: (() => void) | null = null;
     (async () => {
@@ -101,7 +128,7 @@ export function GitIntegrationModal({
       } catch { /* best-effort status surface */ }
     })();
     return () => { cancelled = true; if (unsub) unsub(); };
-  }, [integration, projectId, importJobService]);
+  }, [integration, projectId, importJobService, canImport]);
 
   useEffect(() => {
     const proposalId = importJob?.proposal_id;
@@ -158,6 +185,7 @@ export function GitIntegrationModal({
       setView('overview');
       setError(null);
       setSuccessMsg(null);
+      setWebhookSetup(null);
       setAccessToken('');
     }
   }, [isOpen, loadIntegration]);
@@ -173,6 +201,7 @@ export function GitIntegrationModal({
         ...(baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}),
       });
       setAccessToken('');
+      setWebhookSetup(anchorAdopt.webhook ?? null);
       await loadIntegration();
       setView('overview');
       // R2.2: connecting to a repo that carries a NodeSpec model is NEVER silent —
@@ -182,11 +211,6 @@ export function GitIntegrationModal({
       // imported at all"): the spec plane travels in its OWN anchor and reports
       // separately, so "nodes came in but requirements did not" is visible rather
       // than something the user has to notice by its absence.
-      // R3-6: name the design branches this connect materialized from the repo.
-      const bd = anchorAdopt.branchDetect;
-      const branchNote = bd && bd.created.length > 0
-        ? ` Detected ${bd.created.length} design branch(es) from the repository: ${bd.created.map(b => b.name).join(', ')} — they are in the Branches menu with their models loaded.`
-        : '';
 
       const spec = anchorAdopt.spec;
       const specNote = spec?.counts
@@ -200,19 +224,19 @@ export function GitIntegrationModal({
       if (anchorAdopt.importJob) {
         // C3: brownfield entry — no anchor, empty graph. Drive the server-side
         // pipeline; the result lands as ONE reviewable proposal.
-        setSuccessMsg(`Integration saved. ${anchorAdopt.importJob.resumed ? 'An import is already in progress' : 'No NodeSpec model found'}. Next: tell your AI to call run_repo_import (details below).${specNote}${branchNote}`);
+        setSuccessMsg(`Integration saved. ${anchorAdopt.importJob.resumed ? 'An import is already in progress' : 'No NodeSpec model found'}. Next: tell your AI to call run_repo_import (details below).${specNote}`);
       } else if (anchorAdopt.proposalId) {
         const c = anchorAdopt.counts;
-        setSuccessMsg(`Integration saved. This repo carries a NodeSpec model (${c?.nodes ?? '?'} nodes, ${c?.edges ?? '?'} edges) — a RESTORE proposal was created; review and accept it in AI Proposals to load the design onto the canvas.${specNote}${branchNote}`);
+        setSuccessMsg(`Integration saved. This repo carries a NodeSpec model (${c?.nodes ?? '?'} nodes, ${c?.edges ?? '?'} edges): a RESTORE proposal was created; review and accept it under Agents, Proposals to load the design onto the canvas.${specNote}`);
       } else if (anchorAdopt.mismatchCardId) {
-        setSuccessMsg(`Integration saved. This repo carries a NodeSpec model that differs from this project — see the pending change card below before pushing.${specNote}${branchNote}`);
+        setSuccessMsg(`Integration saved. This repo carries a NodeSpec model that differs from this project: see the pending change card below before pushing.${specNote}`);
       } else if (anchorAdopt.detected && anchorAdopt.skipped) {
         // R2.2 observability (owner bench): "no card" must be distinguishable from
         // "didn't check" — surface the server's exact outcome (e.g. "repo anchor
         // matches this project's model — baseline re-established").
-        setSuccessMsg(`Integration saved. ${anchorAdopt.skipped}${specNote}${branchNote}`);
+        setSuccessMsg(`Integration saved. ${anchorAdopt.skipped}${specNote}`);
       } else if (specNote) {
-        setSuccessMsg(`Integration saved.${specNote}${branchNote}`);
+        setSuccessMsg(`Integration saved.${specNote}`);
       } else {
         setSuccessMsg('Integration saved successfully');
         setTimeout(() => setSuccessMsg(null), 3000);
@@ -224,46 +248,33 @@ export function GitIntegrationModal({
     }
   };
 
-  // R3-1 THE LOADER: git wins — replace the canvas graph with the repo's model
-  // anchor. Explicit invocation only (card button / blocked-push panel). The server
-  // resolves pending model cards and re-baselines; we reload both the card list and
-  // the canvas.
+  // V3 AD.2b: loading the repository's model files it as a proposal: git's
+  // design, keeping positions, file content and values git withheld. Nothing
+  // on the canvas changes until a person accepts it in Proposals; the last
+  // sync moves then.
   const handleRestoreModel = async () => {
     if (!integration) return;
     setError(null);
     setOverwritePrompt(null);
     try {
-      const result = await gitService.restoreModel(integration.id);
-      setSuccessMsg(`Loaded the repo model onto the canvas: ${result.counts.nodes} node(s), ${result.counts.edges} edge(s), ${result.counts.contracts} contract(s). ${result.note ?? ''}`);
-      await onModelRestored?.();
+      const result = await gitService.restoreModel(integration.id, currentBranch);
+      setSuccessMsg(loadModelMessage(result));
       await loadIntegration();
       setView('overview');
     } catch (err: any) {
-      setError(`Restore failed: ${err.message}`);
+      setError(`Loading the repository's model failed: ${err.message}`);
     }
   };
 
-  // R7c: the spec plane's twin. Reports what it did in the terms that matter —
-  // how many requirements arrived or changed, how much EVIDENCE survived, and
-  // which of your requirements the repo does not mention (kept, never deleted).
+  // R7c: the spec plane's twin. Reports what it did in the terms that matter
+  // (loadSpecMessage): what arrived or changed, how much EVIDENCE survived, and
+  // what stayed as it was (kept, never deleted; locked, never written).
   const handleRestoreSpec = async () => {
     if (!integration) return;
     setError(null);
     try {
       const result = await gitService.restoreSpec(integration.id, currentBranch);
-      const c = result.counts ?? {};
-      const parts: string[] = [];
-      if (result.mode === 'adopted') {
-        parts.push(`${c.requirements ?? 0} requirement(s), ${c.criteria ?? 0} acceptance criteria`);
-      } else {
-        if (c.added) parts.push(`${c.added} added`);
-        if (c.updated) parts.push(`${c.updated} updated`);
-        parts.push(`${c.criteriaPreserved ?? 0} met criterion(s) kept their evidence`);
-      }
-      const kept = result.keptLocal?.length
-        ? ` Your ${result.keptLocal.length} requirement(s) the repo does not mention were KEPT, not deleted: ${result.keptLocal.join(', ')}.`
-        : '';
-      setSuccessMsg(`Loaded requirements from the repository — ${parts.join(', ')}.${kept}`);
+      setSuccessMsg(loadSpecMessage(result));
       await loadIntegration();
       setView('overview');
     } catch (err: any) {
@@ -279,10 +290,14 @@ export function GitIntegrationModal({
     setError(null);
     try {
       const result = await gitService.applyCriterionDeltas(integration.id, changeEventId);
+      const tasks = result.tasksApplied ?? 0;
+      const done: string[] = [];
+      if (result.applied > 0) done.push(`marked ${result.applied} acceptance criterion(s) met (${result.requirements.join(', ')})`);
+      if (tasks > 0) done.push(`marked ${tasks} task(s) done`);
       setSuccessMsg(
-        result.applied > 0
-          ? `Marked ${result.applied} acceptance criterion(s) met from this commit (${result.requirements.join(', ')}). The Spec view now shows the evidence.`
-          : 'No criteria were newly met by this commit.',
+        done.length > 0
+          ? `From this commit: ${done.join(' and ')}.`
+          : 'Nothing was newly met or done by this commit.',
       );
       await loadIntegration();
     } catch (err: any) {
@@ -322,7 +337,7 @@ export function GitIntegrationModal({
         : '';
       // R7a: the spec plane now travels too — say whether it did, so a project
       // that simply has no requirements yet is distinguishable from a failure.
-      const specNote = result.specAnchored ? ' Requirements and acceptance criteria included.' : '';
+      const specNote = (result.specAnchored ? ' Requirements and acceptance criteria included.' : '') + pushSkipNote(result) + pushWithheldNote(result);
       // An unchanged tree mints no commit (and opens no PR) — saying
       // "Committed N files" here would be the same false evidence the server
       // fix removed.
@@ -331,7 +346,11 @@ export function GitIntegrationModal({
       // UX-1.1b: in PR mode the target branch has not moved — say where the
       // commit actually went and link the review.
       } else if (result.commitMode === 'pull-request' && result.prUrl) {
-        setSuccessMsg(`Committed ${result.fileCount} files (${result.commitSha.slice(0, 8)}) and opened a pull request${result.prNumber ? ` #${result.prNumber}` : ''}: ${result.prUrl} — the design lands on ${integration.defaultBranch} when it merges.${deleted}${specNote}`);
+        // AD.4 (D14): one pull request stays open; a push adds to it.
+        const pr = `pull request${result.prNumber ? ` #${result.prNumber}` : ''}`;
+        setSuccessMsg(result.prReused
+          ? `Added ${result.fileCount} files (${result.commitSha.slice(0, 8)}) to the open ${pr}: ${result.prUrl}. The design lands on ${integration.defaultBranch} when it merges.${deleted}${specNote}`
+          : `Committed ${result.fileCount} files (${result.commitSha.slice(0, 8)}) and opened ${pr}: ${result.prUrl}. The design lands on ${integration.defaultBranch} when it merges.${deleted}${specNote}`);
       } else {
         setSuccessMsg(`Committed ${result.fileCount} files (${result.commitSha.slice(0, 8)}).${deleted}${specNote}`);
       }
@@ -388,6 +407,7 @@ export function GitIntegrationModal({
         <div style={{ padding: '20px 24px', overflowY: 'auto', flex: 1 }}>
           {error && <StatusBanner type="error" message={error} onDismiss={() => setError(null)} />}
           {successMsg && <StatusBanner type="success" message={successMsg} />}
+          {webhookSetup && view === 'overview' && <WebhookSetupNote provider={provider} webhook={webhookSetup} />}
 
           {/* R2.2: unbaselined-push overwrite guard — the repo already carries a
               NodeSpec model this project never synced with. Explicit choice, never
@@ -453,18 +473,20 @@ export function GitIntegrationModal({
               onViewChanges={() => setView('reconciliation')}
               importJob={importJob}
               importProposalStatus={importProposalStatus}
+              importIntent={intent}
+              canImport={canImport}
               onToggleAutoSync={async (enabled) => {
                 if (!integration) return;
-                // Optimistic; a failed write reverts on the next integration load.
+                // Optimistic; a refused or failed write reverts and says why.
                 setIntegration({ ...integration, autoSync: enabled });
                 try { await gitService.setAutoSync(integration.id, enabled); }
-                catch { setIntegration({ ...integration }); }
+                catch (err) { setIntegration({ ...integration }); setError((err as Error).message); }
               }}
               onSetCommitMode={async (mode) => {
                 if (!integration) return;
                 setIntegration({ ...integration, commitMode: mode });
                 try { await gitService.setCommitMode(integration.id, mode); }
-                catch { setIntegration({ ...integration }); }
+                catch (err) { setIntegration({ ...integration }); setError((err as Error).message); }
               }}
             />
           ) : view === 'setup' ? (
@@ -491,7 +513,11 @@ export function GitIntegrationModal({
               onResolve={async (changeId, resolution) => {
                 try {
                   const resolved = pendingChanges.find(c => c.id === changeId);
-                  await gitService.resolveChangeEvent(changeId, resolution);
+                  if (!integration || !resolved) throw new Error('This change is no longer listed. Close and reopen the panel to see what is pending now.');
+                  // AD.1 (D8): resolves as the version shown here; a card that has
+                  // since moved on to cover new commits is refused, not resolved.
+                  const outcome = await gitService.resolveChangeEvent(integration.id, { id: changeId, commitSha: resolved.commitSha }, resolution);
+                  const baselineNote = outcome?.baseline?.note ? ` ${outcome.baseline.note}` : '';
                   setPendingChanges(prev => prev.filter(c => c.id !== changeId));
                   // R2.2: the mismatch card's effect is invisible bookkeeping (baseline) —
                   // say what actually happened instead of a bare "accepted".
@@ -504,6 +530,8 @@ export function GitIntegrationModal({
                       ? 'Design branch archived — its merged work lives in git.'
                       : 'Kept the design branch and its local change log.');
                     setTimeout(() => setSuccessMsg(null), 4000);
+                  } else if (baselineNote) {
+                    setSuccessMsg(`Change ${resolution === 'accepted' ? 'accepted' : 'dismissed'}.${baselineNote}`);
                   } else {
                     setSuccessMsg(`Change ${resolution === 'accepted' ? 'accepted' : 'dismissed'}`);
                     setTimeout(() => setSuccessMsg(null), 3000);
@@ -511,6 +539,8 @@ export function GitIntegrationModal({
                   if (pendingChanges.length <= 1) setView('overview');
                 } catch (err: any) {
                   setError(err.message);
+                  // The card may have moved on: show it as it is now.
+                  gitService.getPendingChanges(projectId).then(setPendingChanges).catch(() => {});
                 }
               }}
               resolvedChanges={resolvedChanges}
@@ -579,6 +609,46 @@ function StatusBanner({ type, message, onDismiss }: { type: 'error' | 'success';
   );
 }
 
+/** AD.0 (owner 2026-09-24): NodeSpec shows the webhook's URL and secret and
+ *  the person adds them in GitHub or GitLab; it never registers the webhook
+ *  through the provider API. Values select whole on click, for pasting. */
+export function WebhookSetupNote({ provider, webhook }: { provider: string; webhook: WebhookSetup }) {
+  const gitlab = provider === 'gitlab';
+  const rows: Array<[string, string, boolean]> = gitlab
+    ? [['URL', webhook.url, true], ['Secret token', webhook.secret, true], ['Trigger', 'Push events', false]]
+    : [['Payload URL', webhook.url, true], ['Content type', 'application/json', false], ['Secret', webhook.secret, true], ['Events', 'Just the push event', false]];
+  return (
+    <div data-testid="webhook-setup" style={{
+      padding: '14px 16px', marginBottom: '16px', borderRadius: '8px', fontSize: '13px',
+      border: '1px solid rgba(128,128,128,0.3)', backgroundColor: 'rgba(128,128,128,0.06)',
+    }}>
+      <div style={{ fontWeight: 600, marginBottom: '6px' }}>
+        {webhook.created ? 'Add a webhook for pushes' : 'Webhook for pushes'}
+      </div>
+      <div style={{ lineHeight: 1.5, marginBottom: '10px' }}>
+        NodeSpec already checks the repository while this project is open and when an agent asks for pending
+        changes. A webhook tells it the moment someone pushes. In {gitlab ? 'GitLab' : 'GitHub'}, open the
+        repository's Settings, then Webhooks, and enter:
+      </div>
+      <dl style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '6px 12px', margin: 0 }}>
+        {rows.map(([label, value, code]) => (
+          <div key={label} style={{ display: 'contents' }}>
+            <dt style={{ opacity: 0.75 }}>{label}</dt>
+            <dd style={{
+              margin: 0, minWidth: 0, overflowWrap: 'anywhere',
+              ...(code ? { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px', userSelect: 'all' as const } : {}),
+            }}>{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <div style={{ marginTop: '10px', lineHeight: 1.5, opacity: 0.8 }}>
+        NodeSpec refuses any delivery without this secret. Keep it private; saving this integration shows it again.
+        {webhook.created ? '' : ' If you already added the webhook, there is nothing to change.'}
+      </div>
+    </div>
+  );
+}
+
 function LoadingState() {
   return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '48px 0', color: '#6b7280' }}>
@@ -601,14 +671,17 @@ function ProgressState({ message }: { message: string }) {
 // within seconds and renders the provisional component groups WITH their frame
 // verdicts — the user sees what the import thinks the repo is about while the
 // deep scan is still running. Undetermined frames are flagged, never guessed.
-function OverviewView({ integration, onSetup, onPush, pendingChangesCount, onViewChanges, importJob, importProposalStatus, onToggleAutoSync, onSetCommitMode }: {
+function OverviewView({ integration, onSetup, onPush, pendingChangesCount, onViewChanges, importJob, importProposalStatus, importIntent = null, canImport, onToggleAutoSync, onSetCommitMode }: {
   integration: GitIntegration | null;
+  /** Q: the plan carries repo import (Indie and above). */
+  canImport: boolean;
   onSetup: () => void;
   onPush: () => void;
   pendingChangesCount: number;
   onViewChanges: () => void;
   importJob: ImportJobView | null;
   importProposalStatus: string | null;
+  importIntent?: { projectName: string; view: ImportIntentView } | null;
   /** B2: flip client-side auto-accept of content-only change cards. */
   onToggleAutoSync?: (enabled: boolean) => void;
   /** UX-1.1b: how pushes land — direct commit or a pull request. */
@@ -682,7 +755,7 @@ function OverviewView({ integration, onSetup, onPush, pendingChangesCount, onVie
         )}
         {onSetCommitMode && (
           <label
-            title="Direct commit pushes straight to the branch (today's behavior). Pull request commits to a nodespec/push-* work branch and opens a PR — the design lands when it merges, and NodeSpec reconciles automatically. Each push opens a new PR."
+            title="Direct commit pushes straight to the branch. Pull request commits to NodeSpec's work branch for this branch and keeps one pull request open: each push adds to it, and the design lands when it merges."
             style={{
               display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px',
               fontSize: '12px', color: '#374151', width: 'fit-content',
@@ -743,7 +816,7 @@ function OverviewView({ integration, onSetup, onPush, pendingChangesCount, onVie
           color="#059669"
           onClick={onPush}
         />
-        <McpImportSection job={importJob} proposalStatus={importProposalStatus} />
+        {canImport && <McpImportSection job={importJob} proposalStatus={importProposalStatus} intent={importIntent} />}
       </div>
     </div>
   );
@@ -756,9 +829,11 @@ function OverviewView({ integration, onSetup, onPush, pendingChangesCount, onVie
   this section is a copyable trigger prompt plus a live status readout of the
   latest job — the app watches, it never runs.
 */
-function McpImportSection({ job, proposalStatus }: {
+export function McpImportSection({ job, proposalStatus, intent = null }: {
   job: ImportJobView | null;
   proposalStatus: string | null;
+  /** AL.21: what the person chose after the import, as the agent's status read has it. */
+  intent?: { projectName: string; view: ImportIntentView } | null;
 }) {
   const [promoting, setPromoting] = useState(false);
   const proposalService = useProposal();
@@ -780,6 +855,11 @@ function McpImportSection({ job, proposalStatus }: {
     if (stage === 'skeleton') return 'Scanning structure & downloading the repository';
     if (stage === 'fetch' || stage.startsWith('enrich')) return 'Analyzing component groups';
     if (stage === 'synthesize') return 'Assembling the draft architecture';
+    if (stage.startsWith('promote')) {
+      const indexed = job?.metrics?.['promote.indexed'] ?? 0;
+      const total = job?.metrics?.['promote.files'] ?? 0;
+      return `Writing the repository index (${indexed}/${total} files)`;
+    }
     return stage;
   };
 
@@ -791,7 +871,9 @@ function McpImportSection({ job, proposalStatus }: {
   // waiting state, never a spinner (owner bug 2026-08-12: 'Scanning repository
   // structure' span forever on a job no AI had touched).
   const waiting = job?.status === 'pending';
-  const running = job?.status === 'running';
+  // 'promoting' (RI-12): accepted; the chain is writing the repo index in
+  // pages behind the canvas — a spinner with the running count.
+  const running = job?.status === 'running' || job?.status === 'promoting';
   const failed = job?.status === 'failed';
 
   return (
@@ -827,7 +909,7 @@ function McpImportSection({ job, proposalStatus }: {
           {failed && <AlertCircle size={14} style={{ flexShrink: 0 }} />}
           <span style={{ flex: 1, fontWeight: running ? 500 : 600 }}>
             {waiting && 'Not started. Tell your AI to call run_repo_import.'}
-            {ready && 'Proposal ready. Open Changes in the header to review it.'}
+            {ready && 'Proposal ready. Open Agents in the header to review it.'}
             {staged && 'Draft staged. Your AI is finalizing it now.'}
             {running && `${stageLabel(job!.stage)}…`}
             {failed && `Import failed: ${job?.error ?? 'unknown error'}. Ask your AI to retry with restart=true.`}
@@ -848,6 +930,19 @@ function McpImportSection({ job, proposalStatus }: {
         </div>
       )}
 
+      {intent && (() => {
+        const status = importIntentStatus(intent.view);
+        return (
+          <div data-testid="import-intent-status" style={{ marginTop: '10px', fontSize: '12.5px', color: '#374151', lineHeight: 1.5 }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontWeight: 600 }}>
+              {status.prompt ? <AlertCircle size={14} style={{ color: '#b45309', flexShrink: 0, marginTop: '2px' }} /> : <Check size={14} style={{ color: '#15803d', flexShrink: 0, marginTop: '2px' }} />}
+              <span>{status.line}</span>
+            </div>
+            {status.prompt && <PromptBox testId="import-intent-status-prompt" text={buildImportIntentPrompt(intent.projectName, intent.view.label, intent.view.change)} />}
+          </div>
+        );
+      })()}
+
       <div style={{ fontSize: '11px', color: '#9ca3af', marginTop: '8px' }}>
         Requires the NodeSpec MCP connection (Docs, MCP page). If your AI can't see the
         tool, reconnect the server to refresh its tool list.
@@ -855,7 +950,7 @@ function McpImportSection({ job, proposalStatus }: {
     </div>
   );
 }
-function ReconciliationView({ changes, resolvedChanges = [], onResolve, integration, gitService, graphArtifacts, onAcceptArtifact, onDeleteArtifact, onRestoreModel, onRestoreSpec, onApplyCriteria, onArchiveBranch, onBindResidueFile, bindTargetNodes }: {
+export function ReconciliationView({ changes, resolvedChanges = [], onResolve, integration, gitService, graphArtifacts, onAcceptArtifact, onDeleteArtifact, onRestoreModel, onRestoreSpec, onApplyCriteria, onArchiveBranch, onBindResidueFile, bindTargetNodes }: {
   changes: GitChangeEvent[];
   /** Owner 2026-07-30 (recovery lane): recently resolved cards — their content
    *  stays reachable at the recorded commit sha, re-acceptable any time. */
@@ -926,7 +1021,11 @@ function ReconciliationView({ changes, resolvedChanges = [], onResolve, integrat
     for (const p of paths) next.add(appliedKey(change.id, p));
     setApplied(next);
     const actionable = actionablePathsFor(change);
-    if (actionable.length > 0 && actionable.every(p => next.has(appliedKey(change.id, p)))) {
+    // AD.1 (I7): the files answer the card only when files are all it asks.
+    // Ticks nobody applied, or a model or requirements change nobody loaded,
+    // keep it open for the action that answers them.
+    if (actionable.length > 0 && actionable.every(p => next.has(appliedKey(change.id, p)))
+      && cardQuestionsBeyondFiles(change).length === 0) {
       await handleResolve(change.id, 'accepted');
     }
   };
@@ -1301,10 +1400,11 @@ function ReconciliationView({ changes, resolvedChanges = [], onResolve, integrat
                   backgroundColor: '#fffbeb', border: '1px solid #fde68a',
                   fontSize: '12px', color: '#92400e', lineHeight: 1.6,
                 }}>
-                  The git branch bound to design branch <strong>"{change.branchName}"</strong> no
-                  longer exists — typically because its pull request was merged and the branch
-                  deleted. The merged design lives in git: switch to main and sync to see it.
-                  Archiving removes this design branch and its local change log from NodeSpec.
+                  The git branch bound to the old design branch <strong>"{change.branchName}"</strong> no
+                  longer exists, usually because its pull request was merged and the branch
+                  deleted. What it merged is in git on the branch this project tracks, where the
+                  sync check finds it. Archiving removes this old design branch and its local
+                  change log from NodeSpec.
                 </div>
                 <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
                   <button
@@ -1374,7 +1474,20 @@ function ReconciliationView({ changes, resolvedChanges = [], onResolve, integrat
                   maxHeight: '240px', overflowY: 'auto',
                   border: '1px solid #f3f4f6', borderRadius: '6px', marginTop: '8px',
                 }}>
-                  {change.changedFiles.map((file, idx) => {
+                  {/* AD.3 (D23): the files grouped by who changed them. */}
+                  {groupCardFiles(change.changedFiles, change.authors).map((group) => (
+                  <Fragment key={group.label ?? '_unattributed'}>
+                  {group.label !== null && (
+                    <div style={{ padding: '5px 10px', fontSize: '11px', fontWeight: 600, color: '#374151', backgroundColor: '#f9fafb', borderBottom: '1px solid #f3f4f6' }}>
+                      {group.label}
+                    </div>
+                  )}
+                  {group.label === null && (change.authors?.length ?? 0) > 0 && (
+                    <div style={{ padding: '5px 10px', fontSize: '11px', color: '#6b7280', backgroundColor: '#f9fafb', borderBottom: '1px solid #f3f4f6' }}>
+                      Not attributed to a commit this check read
+                    </div>
+                  )}
+                  {group.files.map((file, idx) => {
                     const isMatched = matchedPaths.has(file.path) || artifactByPath.has(file.path);
                     const match = matches.find(m => m.path === file.path);
                     const localArtifact = artifactByPath.get(file.path);
@@ -1384,7 +1497,7 @@ function ReconciliationView({ changes, resolvedChanges = [], onResolve, integrat
                     return (
                       <div key={idx} style={{
                         display: 'flex', alignItems: 'center', gap: '8px',
-                        padding: '6px 10px', borderBottom: idx < change.changedFiles.length - 1 ? '1px solid #f3f4f6' : 'none',
+                        padding: '6px 10px', borderBottom: idx < group.files.length - 1 ? '1px solid #f3f4f6' : 'none',
                         fontSize: '12px', backgroundColor: isMatched ? '#fafff9' : 'transparent',
                       }}>
                         <span style={{
@@ -1433,6 +1546,8 @@ function ReconciliationView({ changes, resolvedChanges = [], onResolve, integrat
                       </div>
                     );
                   })}
+                  </Fragment>
+                  ))}
                 </div>
 
                 {(() => {
@@ -1496,6 +1611,43 @@ function ReconciliationView({ changes, resolvedChanges = [], onResolve, integrat
                     {acceptErrors[change.id]}
                   </div>
                 )}
+
+                {/* RI-9: the repo index (accepted import) diffed this head by blob
+                    sha — which components the repo moved under. Informational:
+                    the index already refreshed what it could; nothing to apply. */}
+                {(() => {
+                  const f = change.indexFreshness;
+                  if (!f || f.status !== 'refreshed') return null;
+                  const moved = (f.modified ?? 0) + (f.deleted ?? 0) + (f.unverified ?? 0) + (f.added ?? 0);
+                  if (moved === 0) return null;
+                  const stale = f.staleNodes?.length ?? 0;
+                  const parts = [
+                    f.modified ? `${f.modified} modified` : null,
+                    f.added ? `${f.added} added` : null,
+                    f.deleted ? `${f.deleted} removed` : null,
+                    f.unverified ? `${f.unverified} unverified` : null,
+                  ].filter(Boolean).join(', ');
+                  return (
+                    <div data-testid="index-freshness" style={{
+                      marginTop: '10px', padding: '10px 12px', borderRadius: '6px',
+                      backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', fontSize: '12px',
+                    }}>
+                      <div style={{ fontWeight: 600, color: '#1e3a8a' }}>
+                        Repo index: {parts} since the imported head{stale > 0 ? ` — ${stale} component${stale === 1 ? '' : 's'} marked stale` : ''}
+                      </div>
+                      {f.pendingRefresh ? (
+                        <div style={{ color: '#1d4ed8', marginTop: '2px' }}>
+                          {f.pendingRefresh} file{f.pendingRefresh === 1 ? '' : 's'} await re-extraction on the next sweep.
+                        </div>
+                      ) : null}
+                      {(f.staleNodes ?? []).slice(0, 4).map((n) => (
+                        <div key={n.nodeId} style={{ color: '#1e40af', marginTop: '4px', fontFamily: 'ui-monospace, monospace', fontSize: '11px' }}>
+                          {n.samples.slice(0, 2).join(', ')}{n.modified + n.deleted > 2 ? ` +${n.modified + n.deleted - 2}` : ''}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
 
                 {/* R3-4c: unattributed files — the amber block IS the difference
                     between "we looked at this and it's fine" and "this file belongs
@@ -1610,56 +1762,87 @@ function ReconciliationView({ changes, resolvedChanges = [], onResolve, integrat
 
                 {/* R5c: acceptance criteria ticked in the changed task docs. A task
                     doc renders per-criterion `met` as checkboxes, so a developer or
-                    an AI ticking one in git IS the completion signal — but it lands
-                    as a PROPOSAL here, never a silent write. */}
-                {change.criterionDeltas && change.criterionDeltas.deltas.some(d => d.direction === 'tick') && (
-                  <div style={{
-                    marginTop: '10px', padding: '10px 12px', borderRadius: '6px',
-                    backgroundColor: 'rgba(5, 150, 105, 0.07)', border: '1px solid rgba(5, 150, 105, 0.3)',
-                    fontSize: '12px', lineHeight: 1.6,
-                  }}>
-                    <div style={{ fontWeight: 600, marginBottom: '4px' }}>
-                      Acceptance criteria ticked in this commit:
+                    an AI ticking one in git IS the completion signal, but it lands
+                    as a PROPOSAL here, never a silent write. AD.1: the task ticks
+                    ride the same box and the same button. */}
+                {(() => {
+                  const criterionTicks = (change.criterionDeltas?.deltas ?? []).filter(d => d.direction === 'tick');
+                  const taskTicks = (change.taskDeltas?.deltas ?? []).filter(d => d.direction === 'tick');
+                  if (criterionTicks.length + taskTicks.length === 0) return null;
+                  const unticked = (change.criterionDeltas?.deltas ?? []).some(d => d.direction === 'untick')
+                    || (change.taskDeltas?.deltas ?? []).some(d => d.direction === 'untick');
+                  const open = unappliedTickCounts(change);
+                  const heading = taskTicks.length === 0
+                    ? 'Acceptance criteria ticked in this commit:'
+                    : criterionTicks.length === 0
+                      ? 'Tasks ticked in this commit:'
+                      : 'Acceptance criteria and tasks ticked in this commit:';
+                  const label = taskTicks.length === 0
+                    ? 'Mark these criteria met'
+                    : criterionTicks.length === 0
+                      ? 'Mark these tasks done'
+                      : 'Mark these criteria met and tasks done';
+                  return (
+                    <div style={{
+                      marginTop: '10px', padding: '10px 12px', borderRadius: '6px',
+                      backgroundColor: 'rgba(5, 150, 105, 0.07)', border: '1px solid rgba(5, 150, 105, 0.3)',
+                      fontSize: '12px', lineHeight: 1.6,
+                    }}>
+                      <div style={{ fontWeight: 600, marginBottom: '4px' }}>{heading}</div>
+                      {criterionTicks.map((d, i) => (
+                        <div key={`${d.requirementId}-${i}`} style={{ paddingLeft: '2px' }}>
+                          ✓ <strong>{d.requirementId}</strong>: {d.text}
+                          {d.verification === 'automated' && open.criteria > 0 && (
+                            <span style={{ opacity: 0.7 }}> (needs a test result)</span>
+                          )}
+                        </div>
+                      ))}
+                      {taskTicks.map((d, i) => (
+                        <div key={`${d.nodeId}-${d.key}-${i}`} style={{ paddingLeft: '2px' }}>
+                          ✓ <strong>{d.displayId}</strong>: {d.title}
+                        </div>
+                      ))}
+                      {unticked && (
+                        <div style={{ marginTop: '4px', opacity: 0.8 }}>
+                          Some boxes are UNticked in the doc. Those are not applied: a stale or
+                          regenerated document must not retract evidence a test proved.
+                        </div>
+                      )}
+                      {open.criteria > 0 && automatedTicksNote(criterionTicks) && (
+                        <div style={{ marginTop: '4px', opacity: 0.8 }}>
+                          {automatedTicksNote(criterionTicks)}
+                        </div>
+                      )}
+                      {change.criterionDeltas && change.criterionDeltas.flagged.length > 0 && (
+                        <div style={{ marginTop: '4px', opacity: 0.8 }}>
+                          {change.criterionDeltas.flagged.length} line(s) did not match any known criterion
+                          (reworded or hand-added): flagged, never guessed.
+                        </div>
+                      )}
+                      {open.criteria + open.tasks === 0 ? (
+                        <div style={{ marginTop: '6px', color: '#059669', fontWeight: 600 }}>
+                          Applied ✓{change.criteriaApplied ? ` ${change.criteriaApplied.count} criterion(s) marked met.` : ''}
+                          {change.ticksApplied ? ` ${change.ticksApplied.count} task(s) marked done.` : ''}
+                        </div>
+                      ) : onApplyCriteria && (
+                        <button
+                          onClick={async () => {
+                            setResolving(change.id);
+                            try { await onApplyCriteria(change.id); } finally { setResolving(null); }
+                          }}
+                          disabled={isResolving}
+                          style={{
+                            marginTop: '6px', padding: '5px 12px', fontSize: '11.5px', fontWeight: 600,
+                            border: 'none', borderRadius: '6px', cursor: isResolving ? 'not-allowed' : 'pointer',
+                            backgroundColor: '#059669', color: '#fff',
+                          }}
+                        >
+                          {label}
+                        </button>
+                      )}
                     </div>
-                    {change.criterionDeltas.deltas.filter(d => d.direction === 'tick').map((d, i) => (
-                      <div key={`${d.requirementId}-${i}`} style={{ paddingLeft: '2px' }}>
-                        ✓ <strong>{d.requirementId}</strong> — {d.text}
-                      </div>
-                    ))}
-                    {change.criterionDeltas.deltas.some(d => d.direction === 'untick') && (
-                      <div style={{ marginTop: '4px', opacity: 0.8 }}>
-                        Some boxes are UNticked in the doc. Those are not applied — a stale or
-                        regenerated document must not retract evidence a test proved.
-                      </div>
-                    )}
-                    {change.criterionDeltas.flagged.length > 0 && (
-                      <div style={{ marginTop: '4px', opacity: 0.8 }}>
-                        {change.criterionDeltas.flagged.length} line(s) did not match any known criterion
-                        (reworded or hand-added) — flagged, never guessed.
-                      </div>
-                    )}
-                    {change.criteriaApplied ? (
-                      <div style={{ marginTop: '6px', color: '#059669', fontWeight: 600 }}>
-                        Applied ✓ — {change.criteriaApplied.count} criterion(s) marked met.
-                      </div>
-                    ) : onApplyCriteria && (
-                      <button
-                        onClick={async () => {
-                          setResolving(change.id);
-                          try { await onApplyCriteria(change.id); } finally { setResolving(null); }
-                        }}
-                        disabled={isResolving}
-                        style={{
-                          marginTop: '6px', padding: '5px 12px', fontSize: '11.5px', fontWeight: 600,
-                          border: 'none', borderRadius: '6px', cursor: isResolving ? 'not-allowed' : 'pointer',
-                          backgroundColor: '#059669', color: '#fff',
-                        }}
-                      >
-                        Mark these criteria met
-                      </button>
-                    )}
-                  </div>
-                )}
+                  );
+                })()}
 
                 {/* R7c: the spec plane's diff. Separate block from the model diff
                     because they answer separate questions and either can be taken
@@ -1701,12 +1884,47 @@ function ReconciliationView({ changes, resolvedChanges = [], onResolve, integrat
                   </div>
                 )}
 
+                {(() => {
+                  // AD.1: what a load already answered, and a proposal an
+                  // agent filed for this change.
+                  const loaded = change.restoredPlanes ?? [];
+                  const lines: string[] = [];
+                  if (loaded.length > 0) {
+                    const names = loaded.map(p => (p === 'spec' ? 'requirements' : p)).join(' and ');
+                    lines.push(`Loaded from the repository: ${names}.`);
+                  }
+                  if (change.reconcileProposalId) {
+                    lines.push('An agent filed a proposal for this change. It resolves when you accept that proposal in Proposals.');
+                  }
+                  if (lines.length === 0) return null;
+                  return (
+                    <div style={{ marginTop: '10px', fontSize: '12px', color: '#374151', lineHeight: 1.6 }}>
+                      {lines.map(l => <div key={l}>{l}</div>)}
+                    </div>
+                  );
+                })()}
+
+                {(() => {
+                  const ticksLeft = unappliedTickCounts(change);
+                  if (ticksLeft.criteria + ticksLeft.tasks === 0) return null;
+                  return (
+                    <div style={{ marginTop: '10px', fontSize: '12px', color: '#92400e', lineHeight: 1.6 }}>
+                      Accept waits for the {ticksPhrase(ticksLeft)} above: apply them, or dismiss to set them aside.
+                    </div>
+                  );
+                })()}
+
                 <div style={{ display: 'flex', gap: '8px', marginTop: matches.length > 0 && onAcceptArtifact ? '8px' : '12px' }}>
                   <button
                     onClick={() => {
                       // Owner 2026-07-30: dismiss = "my canvas wins" — say what
                       // that costs BEFORE it happens, not after the next push.
-                      if (!window.confirm('Dismiss keeps YOUR canvas version: your next push will overwrite this out-of-band change in the repository. The commit itself stays in git history and remains viewable under "Recently resolved". Continue?')) return;
+                      // AD.1: and name the ticks it sets aside.
+                      const ticksLeft = unappliedTickCounts(change);
+                      const ticksLine = ticksLeft.criteria + ticksLeft.tasks > 0
+                        ? ` It also sets aside the ${ticksPhrase(ticksLeft)} nobody applied.`
+                        : '';
+                      if (!window.confirm(`Dismiss keeps YOUR canvas version: your next push will overwrite this out-of-band change in the repository.${ticksLine} The commit itself stays in git history and remains viewable under "Recently resolved". Continue?`)) return;
                       void handleResolve(change.id, 'dismissed');
                     }}
                     disabled={isResolving}
@@ -1721,24 +1939,32 @@ function ReconciliationView({ changes, resolvedChanges = [], onResolve, integrat
                     <XCircle size={14} />
                     Dismiss
                   </button>
-                  <button
-                    onClick={() => handleResolve(change.id, 'accepted')}
-                    disabled={isResolving}
-                    style={{
-                      flex: 1, padding: '8px 12px', fontSize: '12px', fontWeight: 600,
-                      border: 'none', borderRadius: '6px',
-                      backgroundColor: '#059669', color: 'white',
-                      cursor: isResolving ? 'not-allowed' : 'pointer',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
-                    }}
-                  >
-                    <Check size={14} />
-                    Accept
-                  </button>
+                  {(() => {
+                    const ticksLeft = unappliedTickCounts(change);
+                    const blocked = isResolving || ticksLeft.criteria + ticksLeft.tasks > 0;
+                    return (
+                      <button
+                        onClick={() => handleResolve(change.id, 'accepted')}
+                        disabled={blocked}
+                        style={{
+                          flex: 1, padding: '8px 12px', fontSize: '12px', fontWeight: 600,
+                          border: 'none', borderRadius: '6px',
+                          backgroundColor: '#059669', color: 'white',
+                          opacity: blocked && !isResolving ? 0.5 : 1,
+                          cursor: blocked ? 'not-allowed' : 'pointer',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+                        }}
+                      >
+                        <Check size={14} />
+                        Accept
+                      </button>
+                    );
+                  })()}
                   {/* R3-1: the third option — git wins. Only on cards that carry a
                       model question (connect mismatch, or a sweep range that touched
                       model.json). The restore resolves the card server-side. */}
-                  {onRestoreModel && (change.source === 'connect-anchor-mismatch' || change.modelChanged) && (
+                  {onRestoreModel && (change.source === 'connect-anchor-mismatch' || change.modelChanged)
+                    && !(change.restoredPlanes ?? []).includes('model') && (
                     <button
                       onClick={async () => {
                         setResolving(change.id);
@@ -1760,7 +1986,7 @@ function ReconciliationView({ changes, resolvedChanges = [], onResolve, integrat
                   {/* R7c: the spec plane's own question. Separate button because the
                       two anchors move independently — taking the repo's requirements
                       must not force a canvas replacement. */}
-                  {onRestoreSpec && change.specChanged && (
+                  {onRestoreSpec && change.specChanged && !(change.restoredPlanes ?? []).includes('spec') && (
                     <button
                       onClick={async () => {
                         setResolving(change.id);
@@ -1923,7 +2149,9 @@ function ActionButton({ icon, label, description, color, onClick }: {
   );
 }
 
-function SetupView({ provider, onProviderChange, repoOwner, onRepoOwnerChange, repoName, onRepoNameChange, defaultBranch, onDefaultBranchChange, accessToken, onAccessTokenChange, baseUrl, onBaseUrlChange, saving, hasExisting, onSave, gitService }: {
+/** Exported so git-setup-form.test.tsx can DRIVE it (the modal itself needs
+ *  the whole service context; the form is the part a person fills). */
+export function SetupView({ provider, onProviderChange, repoOwner, onRepoOwnerChange, repoName, onRepoNameChange, defaultBranch, onDefaultBranchChange, accessToken, onAccessTokenChange, baseUrl, onBaseUrlChange, saving, hasExisting, onSave, gitService }: {
   provider: Provider; onProviderChange: (p: Provider) => void;
   repoOwner: string; onRepoOwnerChange: (v: string) => void;
   repoName: string; onRepoNameChange: (v: string) => void;
@@ -1933,31 +2161,76 @@ function SetupView({ provider, onProviderChange, repoOwner, onRepoOwnerChange, r
   saving: boolean; hasExisting: boolean; onSave: () => void;
   gitService: GitService;
 }) {
-  const canSave = repoOwner && repoName && accessToken;
-
-  // Owner 2026-07-30 (setup UX): select instead of hand-typing. Both pickers are
-  // OPTIONAL sugar over the text inputs — a fine-grained token whose repo list
-  // reads empty, or a browse failure, degrades to exactly the old manual form.
-  // Selecting a repo also has ZERO side effects beyond filling the form fields
-  // (no baselines, no writes — the R2.2 connect ladder and push guard own
-  // brownfield safety when Save runs, same as manual entry).
-  const [browsing, setBrowsing] = useState(false);
+  // Owner ruling 2026-09-21: the token is the only thing a person types.
+  //
+  // The form used to ask for the owner, the repository and the branch as
+  // three free-text fields, with the token last and two optional "browse"
+  // buttons bolted beside them — so the first thing a person met was three
+  // boxes they had to know the answers to, and the field that could have
+  // answered them sat at the bottom. Connect first: the token names the
+  // owners it can see, the owner names its repositories, the repository
+  // names its branches. Nothing is typed that the provider already knows.
+  //
+  // The API base URL stays at the bottom (owner's word): self-hosted stacks
+  // fill it before connecting, and nobody else ever touches it.
+  //
+  // Manual entry survives as the fall-back it always was — a fine-grained
+  // token that lists nothing, a provider that will not answer — so a
+  // person is never stuck behind a failed browse. The Save path itself is
+  // unchanged: selecting only fills these fields (no writes, no baselines;
+  // the R2.2 connect ladder and the push guard own brownfield safety).
+  const [connecting, setConnecting] = useState(false);
   const [browseError, setBrowseError] = useState<string | null>(null);
   const [repoOptions, setRepoOptions] = useState<Array<{ owner: string; name: string; fullName: string; defaultBranch: string; isPrivate: boolean }> | null>(null);
   const [branchOptions, setBranchOptions] = useState<string[] | null>(null);
   const [detectingBranches, setDetectingBranches] = useState(false);
+  const [manual, setManual] = useState(false);
 
-  const handleBrowseRepos = async () => {
-    setBrowsing(true);
+  const owners = Array.from(new Set((repoOptions ?? []).map((r) => r.owner))).sort((a, b) => a.localeCompare(b));
+  const reposForOwner = (repoOptions ?? []).filter((r) => r.owner === repoOwner).sort((a, b) => a.name.localeCompare(b.name));
+  const connected = (repoOptions?.length ?? 0) > 0;
+  // Settings on an EXISTING integration opens with its repository already in
+  // the form (the modal seeds it). Showing the placeholder there would hide
+  // what is connected behind a step the person has already taken, so the
+  // fields are shown filled and Connect still re-picks from the provider.
+  const alreadyFilled = Boolean(repoOwner || repoName);
+  const canSave = Boolean(repoOwner && repoName && accessToken);
+  const providerName = provider === 'github' ? 'GitHub' : 'GitLab';
+
+  const resetBrowse = () => {
+    setRepoOptions(null);
+    setBranchOptions(null);
     setBrowseError(null);
+  };
+
+  const handleConnect = async () => {
+    setConnecting(true);
+    setBrowseError(null);
+    setBranchOptions(null);
     try {
       const repos = await gitService.listRemoteRepositories(provider, accessToken, baseUrl || undefined);
       setRepoOptions(repos);
-      if (repos.length === 0) setBrowseError('The token sees no repositories — fine-grained tokens list only the repos they were granted. Type the owner/name manually below.');
+      if (repos.length === 0) {
+        setBrowseError(`The token is valid but sees no repositories — a fine-grained token lists only the repositories it was granted. Enter the owner and repository by hand below.`);
+        setManual(true);
+        return;
+      }
+      const seenOwners = Array.from(new Set(repos.map((r) => r.owner)));
+      // One owner is the ordinary case: choose it, so the next question is the
+      // repository. Otherwise keep the one already in the form when the token
+      // can still see it, and clear it when it cannot.
+      const owner = seenOwners.length === 1 ? seenOwners[0] : seenOwners.includes(repoOwner) ? repoOwner : '';
+      if (owner !== repoOwner) onRepoOwnerChange(owner);
+      // A repository that this owner does not have is not this token's to save.
+      if (repoName && !repos.some((r) => r.owner === owner && r.name === repoName)) {
+        onRepoNameChange('');
+        setBranchOptions(null);
+      }
     } catch (err) {
-      setBrowseError(err instanceof Error ? err.message : 'Repository browse failed');
+      setRepoOptions(null);
+      setBrowseError(err instanceof Error ? err.message : 'Could not reach the provider with that token');
     } finally {
-      setBrowsing(false);
+      setConnecting(false);
     }
   };
 
@@ -1973,27 +2246,43 @@ function SetupView({ provider, onProviderChange, repoOwner, onRepoOwnerChange, r
       if (providerDefault) onDefaultBranchChange(providerDefault);
     } catch (err) {
       setBranchOptions(null);
-      setBrowseError(err instanceof Error ? err.message : 'Branch detection failed');
+      setBrowseError(err instanceof Error ? err.message : 'Branch list failed');
     } finally {
       setDetectingBranches(false);
     }
   };
 
-  const handleRepoSelect = (fullName: string) => {
-    const repo = repoOptions?.find(r => r.fullName === fullName);
+  const handleOwnerSelect = (owner: string) => {
+    onRepoOwnerChange(owner);
+    onRepoNameChange('');
+    setBranchOptions(null);
+  };
+
+  const handleRepoSelect = (name: string) => {
+    const repo = reposForOwner.find((r) => r.name === name);
     if (!repo) return;
-    onRepoOwnerChange(repo.owner);
     onRepoNameChange(repo.name);
     if (repo.defaultBranch) onDefaultBranchChange(repo.defaultBranch);
     void handleDetectBranches(repo.owner, repo.name);
   };
+
+  const stepLabel = (n: number, text: string) => (
+    <label style={labelStyle}>
+      <span style={{
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '16px', height: '16px',
+        borderRadius: '50%', backgroundColor: '#111827', color: 'white', fontSize: '10px', fontWeight: 700,
+        marginRight: '7px', verticalAlign: '-2px',
+      }}>{n}</span>
+      {text}
+    </label>
+  );
 
   return (
     <div>
       <label style={labelStyle}>Provider</label>
       <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
         {(['github', 'gitlab'] as const).map((p) => (
-          <button key={p} onClick={() => { onProviderChange(p); setRepoOptions(null); setBranchOptions(null); setBrowseError(null); }} style={{
+          <button key={p} onClick={() => { onProviderChange(p); resetBrowse(); setManual(false); }} style={{
             flex: 1, padding: '10px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: '500',
             border: `1.5px solid ${provider === p ? (p === 'github' ? '#111827' : '#ea580c') : '#e5e7eb'}`,
             backgroundColor: provider === p ? (p === 'github' ? '#111827' : '#ea580c') : '#f9fafb',
@@ -2005,93 +2294,165 @@ function SetupView({ provider, onProviderChange, repoOwner, onRepoOwnerChange, r
         ))}
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
-        <label style={{ ...labelStyle, marginBottom: 0 }}>Repository</label>
+      {/* 1 — the token, the one thing typed */}
+      {stepLabel(1, hasExisting ? 'New access token' : 'Access token')}
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '6px' }}>
+        <input
+          data-testid="git-token"
+          type="password"
+          value={accessToken}
+          onChange={(e) => { onAccessTokenChange(e.target.value); resetBrowse(); }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && accessToken && !connecting) void handleConnect(); }}
+          placeholder={provider === 'github' ? 'ghp_...' : 'glpat_...'}
+          style={{ ...inputStyle, marginBottom: 0, fontFamily: 'monospace' }}
+        />
         <button
-          onClick={handleBrowseRepos}
-          disabled={!accessToken || browsing}
-          title={accessToken ? 'List the repositories this token can see' : 'Enter the access token below first'}
+          data-testid="git-connect"
+          onClick={() => void handleConnect()}
+          disabled={!accessToken || connecting}
+          title={accessToken ? `Read the repositories this token can see` : 'Paste the token first'}
           style={{
-            padding: '4px 12px', fontSize: '12px', fontWeight: 600, borderRadius: '6px',
-            border: '1px solid #d1d5db', backgroundColor: 'white', color: !accessToken || browsing ? '#9ca3af' : '#374151',
-            cursor: !accessToken || browsing ? 'not-allowed' : 'pointer',
+            flexShrink: 0, padding: '9px 16px', fontSize: '13px', fontWeight: 600, borderRadius: '8px',
+            border: 'none', backgroundColor: !accessToken || connecting ? '#e5e7eb' : '#111827',
+            color: !accessToken || connecting ? '#9ca3af' : 'white',
+            cursor: !accessToken || connecting ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
           }}
         >
-          {browsing ? 'Loading…' : 'Browse repositories'}
+          {connecting ? 'Reading…' : connected ? 'Re-read' : 'Connect'}
         </button>
       </div>
-      {repoOptions && repoOptions.length > 0 && (
-        <select
-          value={repoOwner && repoName ? `${repoOwner}/${repoName}` : ''}
-          onChange={(e) => handleRepoSelect(e.target.value)}
-          style={{ ...inputStyle, cursor: 'pointer' }}
-        >
-          <option value="" disabled>Select a repository…</option>
-          {repoOptions.map(r => (
-            <option key={r.fullName} value={r.fullName}>{r.fullName}{r.isPrivate ? ' (private)' : ''}</option>
-          ))}
-        </select>
-      )}
-      {browseError && (
-        <div style={{ fontSize: '12px', color: '#dc2626', marginBottom: '10px' }}>{browseError}</div>
-      )}
-
-      <label style={labelStyle}>Repository Owner</label>
-      <input type="text" value={repoOwner} onChange={(e) => onRepoOwnerChange(e.target.value)}
-        placeholder="username or organization" style={inputStyle} />
-
-      <label style={labelStyle}>Repository Name</label>
-      <input type="text" value={repoName} onChange={(e) => onRepoNameChange(e.target.value)}
-        placeholder="my-project" style={inputStyle} />
-
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
-        <label style={{ ...labelStyle, marginBottom: 0 }}>Default Branch</label>
-        <button
-          onClick={() => void handleDetectBranches()}
-          disabled={!accessToken || !repoOwner || !repoName || detectingBranches}
-          title={!accessToken ? 'Enter the access token below first' : (!repoOwner || !repoName) ? 'Fill in the repository first' : "List the repo's branches and preselect its default"}
-          style={{
-            padding: '4px 12px', fontSize: '12px', fontWeight: 600, borderRadius: '6px',
-            border: '1px solid #d1d5db', backgroundColor: 'white',
-            color: !accessToken || !repoOwner || !repoName || detectingBranches ? '#9ca3af' : '#374151',
-            cursor: !accessToken || !repoOwner || !repoName || detectingBranches ? 'not-allowed' : 'pointer',
-          }}
-        >
-          {detectingBranches ? 'Detecting…' : 'Detect branches'}
-        </button>
-      </div>
-      {branchOptions && branchOptions.length > 0 ? (
-        <select
-          value={branchOptions.includes(defaultBranch) ? defaultBranch : ''}
-          onChange={(e) => onDefaultBranchChange(e.target.value)}
-          style={{ ...inputStyle, cursor: 'pointer' }}
-        >
-          {!branchOptions.includes(defaultBranch) && <option value="" disabled>Select the default branch…</option>}
-          {branchOptions.map(b => <option key={b} value={b}>{b}</option>)}
-        </select>
-      ) : (
-        <input type="text" value={defaultBranch} onChange={(e) => onDefaultBranchChange(e.target.value)}
-          placeholder="main" style={inputStyle} />
-      )}
-
-      <label style={labelStyle}>API Base URL (self-hosted only — leave blank for {provider === 'github' ? 'github.com' : 'gitlab.com'})</label>
-      <input type="text" value={baseUrl} onChange={(e) => onBaseUrlChange(e.target.value)}
-        placeholder={provider === 'github' ? 'https://ghe.example.com/api/v3' : 'https://gitlab.example.com/api/v4'}
-        style={inputStyle} />
-
-      <label style={labelStyle}>
-        {hasExisting ? 'New Access Token' : 'Access Token'}
-      </label>
-      <input type="password" value={accessToken} onChange={(e) => onAccessTokenChange(e.target.value)}
-        placeholder={provider === 'github' ? 'ghp_...' : 'glpat_...'}
-        style={{ ...inputStyle, fontFamily: 'monospace' }} />
-      <div style={{ fontSize: '12px', color: '#9ca3af', marginBottom: '20px', marginTop: '-8px' }}>
+      <div style={{ fontSize: '12px', color: '#9ca3af', marginBottom: '16px' }}>
         {provider === 'github' ? (
           <>Requires <code style={{ backgroundColor: '#f3f4f6', padding: '1px 4px', borderRadius: '3px', fontSize: '11px' }}>repo</code> scope. <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" style={{ color: '#2563eb' }}>Create token</a></>
         ) : (
           <>Requires <code style={{ backgroundColor: '#f3f4f6', padding: '1px 4px', borderRadius: '3px', fontSize: '11px' }}>api</code> scope. Create at GitLab Settings &rarr; Access Tokens</>
         )}
+        {' '}Self-hosted {providerName}: fill the API base URL at the bottom first.
       </div>
+
+      {browseError && (
+        <div data-testid="git-browse-error" style={{ fontSize: '12px', color: '#dc2626', marginBottom: '12px' }}>{browseError}</div>
+      )}
+
+      {/* 2, 3, 4 — what the provider answered */}
+      {connected && !manual ? (
+        <>
+          {stepLabel(2, 'Owner')}
+          <select
+            data-testid="git-owner-select"
+            value={owners.includes(repoOwner) ? repoOwner : ''}
+            onChange={(e) => handleOwnerSelect(e.target.value)}
+            style={{ ...inputStyle, cursor: 'pointer' }}
+          >
+            <option value="" disabled>{owners.length === 1 ? owners[0] : `Select an owner… (${owners.length})`}</option>
+            {owners.map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
+
+          {stepLabel(3, 'Repository')}
+          <select
+            data-testid="git-repo-select"
+            value={reposForOwner.some((r) => r.name === repoName) ? repoName : ''}
+            onChange={(e) => handleRepoSelect(e.target.value)}
+            disabled={!repoOwner}
+            style={{ ...inputStyle, cursor: repoOwner ? 'pointer' : 'not-allowed', color: repoOwner ? '#111827' : '#9ca3af' }}
+          >
+            <option value="" disabled>{repoOwner ? `Select a repository… (${reposForOwner.length})` : 'Choose an owner first'}</option>
+            {reposForOwner.map((r) => <option key={r.fullName} value={r.name}>{r.name}{r.isPrivate ? ' (private)' : ''}</option>)}
+          </select>
+
+          {stepLabel(4, 'Branch')}
+          <select
+            data-testid="git-branch-select"
+            value={branchOptions?.includes(defaultBranch) ? defaultBranch : ''}
+            onChange={(e) => onDefaultBranchChange(e.target.value)}
+            disabled={!repoName || detectingBranches || !branchOptions?.length}
+            style={{ ...inputStyle, cursor: branchOptions?.length ? 'pointer' : 'not-allowed', color: branchOptions?.length ? '#111827' : '#9ca3af' }}
+          >
+            <option value="" disabled>
+              {!repoName ? 'Choose a repository first' : detectingBranches ? 'Reading branches…' : branchOptions?.length ? 'Select a branch…' : 'No branches read'}
+            </option>
+            {(branchOptions ?? []).map((b) => <option key={b} value={b}>{b}</option>)}
+          </select>
+
+          <button
+            data-testid="git-manual-toggle"
+            onClick={() => setManual(true)}
+            style={{ background: 'none', border: 'none', padding: 0, marginBottom: '16px', fontSize: '12px', color: '#2563eb', cursor: 'pointer' }}
+          >
+            The repository is not listed — enter it by hand
+          </button>
+        </>
+      ) : manual || connected || alreadyFilled ? (
+        <>
+          {stepLabel(2, 'Owner')}
+          <input data-testid="git-owner-input" type="text" value={repoOwner} onChange={(e) => onRepoOwnerChange(e.target.value)}
+            placeholder="username or organization" style={inputStyle} />
+
+          {stepLabel(3, 'Repository')}
+          <input data-testid="git-repo-input" type="text" value={repoName} onChange={(e) => { onRepoNameChange(e.target.value); setBranchOptions(null); }}
+            placeholder="my-project" style={inputStyle} />
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+            {stepLabel(4, 'Branch')}
+            <button
+              onClick={() => void handleDetectBranches()}
+              disabled={!accessToken || !repoOwner || !repoName || detectingBranches}
+              style={{
+                padding: '4px 12px', fontSize: '12px', fontWeight: 600, borderRadius: '6px',
+                border: '1px solid #d1d5db', backgroundColor: 'white',
+                color: !accessToken || !repoOwner || !repoName || detectingBranches ? '#9ca3af' : '#374151',
+                cursor: !accessToken || !repoOwner || !repoName || detectingBranches ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {detectingBranches ? 'Reading…' : 'Read branches'}
+            </button>
+          </div>
+          {branchOptions && branchOptions.length > 0 ? (
+            <select
+              data-testid="git-branch-select"
+              value={branchOptions.includes(defaultBranch) ? defaultBranch : ''}
+              onChange={(e) => onDefaultBranchChange(e.target.value)}
+              style={{ ...inputStyle, cursor: 'pointer' }}
+            >
+              {!branchOptions.includes(defaultBranch) && <option value="" disabled>Select a branch…</option>}
+              {branchOptions.map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
+          ) : (
+            <input data-testid="git-branch-input" type="text" value={defaultBranch} onChange={(e) => onDefaultBranchChange(e.target.value)}
+              placeholder="main" style={inputStyle} />
+          )}
+
+          {connected && (
+            <button
+              data-testid="git-manual-toggle"
+              onClick={() => setManual(false)}
+              style={{ background: 'none', border: 'none', padding: 0, marginBottom: '16px', fontSize: '12px', color: '#2563eb', cursor: 'pointer' }}
+            >
+              Choose from the list instead
+            </button>
+          )}
+        </>
+      ) : (
+        <div data-testid="git-awaiting-token" style={{
+          padding: '14px', borderRadius: '8px', border: '1px dashed #d1d5db', backgroundColor: '#f9fafb',
+          fontSize: '12.5px', color: '#6b7280', marginBottom: '16px', lineHeight: 1.55,
+        }}>
+          Connect above and this fills itself: the owners the token can see, then that owner&apos;s repositories, then the repository&apos;s branches.{' '}
+          <button
+            data-testid="git-manual-toggle"
+            onClick={() => setManual(true)}
+            style={{ background: 'none', border: 'none', padding: 0, fontSize: '12.5px', color: '#2563eb', cursor: 'pointer' }}
+          >
+            Or enter them by hand.
+          </button>
+        </div>
+      )}
+
+      {/* the bottom: the field almost nobody fills */}
+      <label style={labelStyle}>API base URL (self-hosted only — leave blank for {provider === 'github' ? 'github.com' : 'gitlab.com'})</label>
+      <input data-testid="git-base-url" type="text" value={baseUrl} onChange={(e) => { onBaseUrlChange(e.target.value); resetBrowse(); }}
+        placeholder={provider === 'github' ? 'https://ghe.example.com/api/v3' : 'https://gitlab.example.com/api/v4'}
+        style={inputStyle} />
 
       <div style={{
         padding: '10px 14px', backgroundColor: '#eff6ff', borderRadius: '8px', fontSize: '12px',
@@ -2100,7 +2461,7 @@ function SetupView({ provider, onProviderChange, repoOwner, onRepoOwnerChange, r
         Your token is encrypted server-side before storage and never returned to the browser.
       </div>
 
-      <button onClick={onSave} disabled={saving || !canSave} style={{
+      <button data-testid="git-save" onClick={onSave} disabled={saving || !canSave} style={{
         width: '100%', padding: '11px', backgroundColor: '#111827', color: 'white',
         border: 'none', borderRadius: '8px', cursor: saving || !canSave ? 'not-allowed' : 'pointer',
         fontSize: '14px', fontWeight: '500', opacity: saving || !canSave ? 0.5 : 1,

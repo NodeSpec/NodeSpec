@@ -8,13 +8,11 @@
 // TRIGGER itself (it rides the artifact-update lane; its pre-existing DB trigger
 // is live since March) — the triage VISIBILITY of staleness is covered here via
 // the failing case.
-import { callFn, github, rest, mcpCall, uid, until, Scenario } from '../lib.mjs';
+import { callFn, github, rest, mcpCall, uid, until, Scenario, parseMcp } from '../lib.mjs';
 import { createProject, connectRepo } from '../fixtures.mjs';
 
-const parse = (r) => {
-  const text = r.data?.result?.content?.[0]?.text;
-  try { return JSON.parse(text); } catch { return { raw: text, isError: r.data?.result?.isError }; }
-};
+// The shared strict reader (lib.mjs): a call that failed below the tool is an error.
+const parse = parseMcp;
 
 export const testPlanLoop = {
   name: 'test-plan-loop',
@@ -68,8 +66,17 @@ export const testPlanLoop = {
       projectId: fx.ids.project, branchName: 'main', integrationId,
     });
     s.check('post-rename push succeeds', push2.data.success, JSON.stringify(push2.data).slice(0, 200));
-    const stablePath = await gh.getFileEventually('.nodespec/tests/REQ-001.tests.md', 'main');
-    s.check('renamed requirement keeps the SAME plan path', !!stablePath);
+    // UAT hardening 2026-09-27: the file already existed from the first push,
+    // so reading main proved nothing. Read the post-rename commit's own tree:
+    // the id-only path is there and no second plan was written beside it.
+    const tree = push2.data.commitSha
+      ? await gh.call('GET', `${gh.repo}/git/trees/${push2.data.commitSha}?recursive=1`)
+      : { status: 0, data: {} };
+    const planPaths = (tree.data.tree ?? []).map((e) => e.path)
+      .filter((p) => p.startsWith('.nodespec/tests/') && /REQ-001|store|renamed/i.test(p));
+    s.check('renamed requirement keeps the SAME plan path, and no second plan appears',
+      planPaths.length === 1 && planPaths[0] === '.nodespec/tests/REQ-001.tests.md',
+      `commit ${push2.data.commitSha ?? 'none'} (tree ${tree.status}): ${JSON.stringify(planPaths)}`);
 
     // C4 box 4: report a pass + a fail with exact criterion binding, plus one
     // deliberately unbindable text (the honesty rule: reported, never guessed).

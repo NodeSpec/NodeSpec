@@ -6,9 +6,7 @@
 // boundary nodes as task-doc-bearing leaves — asserted here so a refactor can't regress it.
 import { computeTaskContextFingerprint, generateTaskDocument } from '../_shared/task-document-generator.ts';
 import { buildNodeContext } from '../_shared/mcp-context-assembly.ts';
-import { inferPlacementKind } from '../_shared/tool-executor.ts';
-import { ensureNodePorts } from '../_shared/catalog-node-normalization.ts';
-import { canContainerAcceptChild } from '../_shared/role-registry.ts';
+import { canContainerAcceptChild, placementFor } from '../_shared/role-registry.ts';
 import { handleGenerateTaskDocs } from '../mcp-server/tools/tasks.ts';
 import { FakeSupabase, assert, assertEquals, completeRole } from './helpers.ts';
 
@@ -22,13 +20,11 @@ const CATALOGS: any = {
       id: 'scheduled-trigger', label: 'Scheduled Trigger', description: 'Time-based automation entry',
       nature: 'engine', palette_category: 'automation', is_container: false,
       container_layer: null, capability_tags: [],
-      default_ports: [{ name: 'trigger-out', direction: 'out' }],
     },
     'backend-service': {
       id: 'backend-service', label: 'Backend Service', description: 'App service',
       nature: 'build', palette_category: 'services', is_container: false,
       container_layer: null, capability_tags: [],
-      default_ports: [{ name: 'input', direction: 'in' }, { name: 'output', direction: 'out' }],
     },
     'domain-module': {
       id: 'domain-module', label: 'Domain Module', description: 'Logical grouping',
@@ -38,7 +34,7 @@ const CATALOGS: any = {
     'k8s-cluster': {
       id: 'k8s-cluster', label: 'Cluster', description: 'Hosting',
       nature: 'host', palette_category: 'infra', is_container: true,
-      container_layer: 'infrastructure', capability_tags: [],
+      container_layer: 'orchestration', capability_tags: [],
     },
     'app-scope': {
       id: 'app-scope', label: 'App Scope', description: 'Plain container (no layer)',
@@ -428,7 +424,6 @@ Deno.test('N2.2: a boundary-engine technology raises a LEAF role to a boundary n
         id: 'data-prep-pipeline', label: 'Data Prep Pipeline', description: 'ETL job',
         nature: 'build', palette_category: 'ai-ml', is_container: false,
         container_layer: null, capability_tags: [],
-        default_ports: [],
       },
     },
     technologies: {
@@ -493,23 +488,21 @@ Deno.test('N2.3: containment — effective-boundary child bypasses hand-enumerat
 
 Deno.test('N2.3: placement inference consults the technology override (leaf role + n8n → scopes)', () => {
   // deno-lint-ignore no-explicit-any
-  const ctx: any = {
-    catalogs: {
-      ...CATALOGS,
-      nodeRoles: {
-        ...CATALOGS.nodeRoles,
-        'data-prep-pipeline': {
-          id: 'data-prep-pipeline', label: 'Data Prep Pipeline', nature: 'build',
-          palette_category: 'ai-ml', is_container: false, container_layer: null,
-          capability_tags: [],
-        },
+  const catalogs: any = {
+    ...CATALOGS,
+    nodeRoles: {
+      ...CATALOGS.nodeRoles,
+      'data-prep-pipeline': {
+        id: 'data-prep-pipeline', label: 'Data Prep Pipeline', nature: 'build',
+        palette_category: 'ai-ml', is_container: false, container_layer: null,
+        capability_tags: [],
       },
-      technologies: { n8n: { id: 'n8n', name: 'n8n', role_affinities: [], ai_context: { treatmentOverride: 'boundary' } } },
     },
+    technologies: { n8n: { id: 'n8n', name: 'n8n', role_affinities: [], ai_context: { treatmentOverride: 'boundary' } } },
   };
-  assertEquals(inferPlacementKind(ctx, 'app-scope', 'data-prep-pipeline', 'n8n'), 'scopes', 'effective boundary scopes into a plain container');
-  assertEquals(inferPlacementKind(ctx, 'k8s-cluster', 'data-prep-pipeline', 'n8n'), 'hosts', 'hosting still wins');
-  assertEquals(inferPlacementKind(ctx, 'app-scope', 'data-prep-pipeline'), 'contains', 'same role hand-coded stays contains');
+  assertEquals(placementFor(catalogs, 'app-scope', 'data-prep-pipeline', 'n8n'), 'scopes', 'effective boundary scopes into a plain container');
+  assertEquals(placementFor(catalogs, 'k8s-cluster', 'data-prep-pipeline', 'n8n'), 'hosts', 'a container that runs it still hosts it');
+  assertEquals(placementFor(catalogs, 'app-scope', 'data-prep-pipeline'), 'contains', 'same role hand-coded stays contains');
 });
 
 Deno.test('boundary task doc leads with interface mode; leaf doc does not', () => {
@@ -560,24 +553,17 @@ Deno.test('buildNodeContext carries treatmentMode (boundary; leaf default when a
   assertEquals(buildNodeContext(g.nodes[N_API], g, legacy).treatmentMode, 'leaf');
 });
 
-Deno.test('inferPlacementKind: boundary child scopes unless genuinely hosted; leaf behavior unchanged', () => {
+Deno.test('placementFor: boundary child scopes unless genuinely hosted; leaf behavior unchanged', () => {
   // deno-lint-ignore no-explicit-any
-  const ctx: any = { catalogs: CATALOGS };
+  const catalogs: any = CATALOGS;
   // Boundary child: engine membership is scoping — except under real hosting infrastructure.
-  assertEquals(inferPlacementKind(ctx, 'domain-module', 'scheduled-trigger'), 'scopes');
-  assertEquals(inferPlacementKind(ctx, 'app-scope', 'scheduled-trigger'), 'scopes', 'plain container: scopes, not contains');
-  assertEquals(inferPlacementKind(ctx, 'k8s-cluster', 'scheduled-trigger'), 'hosts', 'hosted wins over boundary');
+  assertEquals(placementFor(catalogs, 'domain-module', 'scheduled-trigger'), 'scopes');
+  assertEquals(placementFor(catalogs, 'app-scope', 'scheduled-trigger'), 'scopes', 'plain container: scopes, not contains');
+  assertEquals(placementFor(catalogs, 'k8s-cluster', 'scheduled-trigger'), 'hosts', 'run by its container wins over boundary');
   // Leaf child: exactly the pre-N2 rules.
-  assertEquals(inferPlacementKind(ctx, 'domain-module', 'backend-service'), 'scopes');
-  assertEquals(inferPlacementKind(ctx, 'k8s-cluster', 'backend-service'), 'hosts');
-  assertEquals(inferPlacementKind(ctx, 'app-scope', 'backend-service'), 'contains');
-});
-
-Deno.test('port injection: boundary role keeps its default_ports (interface IS the point)', () => {
-  const r = ensureNodePorts(CATALOGS, 'scheduled-trigger', undefined);
-  assertEquals(r.ports.map((p) => `${p.direction}:${p.name}`), ['out:trigger-out'], 'catalog default_ports materialized, not skipped');
-  const c = ensureNodePorts(CATALOGS, 'domain-module', undefined);
-  assertEquals(c.ports, [], 'containers still portless');
+  assertEquals(placementFor(catalogs, 'domain-module', 'backend-service'), 'scopes');
+  assertEquals(placementFor(catalogs, 'k8s-cluster', 'backend-service'), 'hosts');
+  assertEquals(placementFor(catalogs, 'app-scope', 'backend-service'), 'contains');
 });
 
 Deno.test('generate_task_docs: boundary node passes the leaf filter and gets an interface-mode packet', async () => {

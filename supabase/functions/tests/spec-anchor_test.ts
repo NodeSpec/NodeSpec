@@ -44,9 +44,13 @@ const REQS = [
   },
 ];
 
+// Node ids are uuids, as every NodeSpec node's is (specification_mappings.node_id).
+const NODE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const NODE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
 const MAPS = [
-  { requirementId: "REQ-001", nodeId: "node-b", mappingType: "implements" },
-  { requirementId: "REQ-001", nodeId: "node-a" },
+  { requirementId: "REQ-001", nodeId: NODE_B, mappingType: "implements" },
+  { requirementId: "REQ-001", nodeId: NODE_A },
 ];
 
 const parsed = async () => {
@@ -76,7 +80,7 @@ Deno.test("serialize → parse round-trips and the hash verifies", async () => {
 Deno.test("requirements are keyed by the portable REQ id and sorted by it", async () => {
   const spec = await parsed();
   assertEquals(spec.requirements.map((r) => r.requirementId), ["REQ-001", "REQ-002"]);
-  assertEquals(spec.mappings.map((m) => `${m.requirementId}:${m.nodeId}`), ["REQ-001:node-a", "REQ-001:node-b"]);
+  assertEquals(spec.mappings.map((m) => `${m.requirementId}:${m.nodeId}`), [`REQ-001:${NODE_A}`, `REQ-001:${NODE_B}`]);
   assertEquals(spec.mappings[0].mappingType, "implements", "a missing mapping type defaults, never nulls");
 });
 
@@ -153,51 +157,54 @@ Deno.test("a tampered spec fails hash verification", async () => {
 });
 
 // ── R7b adoption ──────────────────────────────────────────────────────────────
+// V3 AD.2c: the load is ONE call to apply_spec_load, so it lands whole or not at
+// all. What the database does with it (criteria unmet, evidence kept, locked
+// rows, mappings kept) is proven on real Postgres in scripts/db-lane/082.
 
-const adoptFake = (existingSpec: unknown = null) => {
-  const fake = new FakeSupabase();
-  fake.script("project_specifications", "select", { data: existingSpec });
-  fake.script("project_specifications", "insert", { data: { id: "spec-1" } });
-  fake.script("specification_requirements", "insert", {
-    data: [{ id: "row-1", requirement_id: "REQ-001" }, { id: "row-2", requirement_id: "REQ-002" }],
-  });
-  fake.script("specification_mappings", "insert", { data: [] });
-  return fake;
-};
+// deno-lint-ignore no-explicit-any
+type Params = Record<string, any>;
+const loadRow = (row: Record<string, unknown> = {}) => ({
+  data: {
+    ok: true, specId: "spec-1", added: 2, updated: 0, criteriaPreserved: 0,
+    mappingsAdded: 2, mappingsRemoved: 0, skippedMappings: 0, locked: [], keptLocal: [], ...row,
+  },
+  error: null,
+});
+const adoptFake = (result: { data: unknown; error: unknown } = loadRow()) =>
+  new FakeSupabase().script("rpc", "apply_spec_load", result as never);
+const loads = (fake: FakeSupabase) => fake.callsTo("rpc", "apply_spec_load");
+const params = (fake: FakeSupabase) => loads(fake)[0].payload as Params;
 
-Deno.test("adopt writes the spec, its requirements and its mappings", async () => {
+Deno.test("adopt sends the spec, its requirements and its mappings in ONE call", async () => {
   const fake = adoptFake();
   const result = await adoptSpecAnchor(fake, {
     projectId: "p1", ownerId: "u1", spec: await parsed(), sourceCommit: "deadbeef",
   });
   assert(result.adopted, `expected adoption, got ${JSON.stringify(result)}`);
   assertEquals(result.counts, { requirements: 2, criteria: 3, mappings: 2 });
+  assertEquals(loads(fake).length, 1);
+  assertEquals(fake.calls.filter((c) => c.table !== "rpc").length, 0, "nothing is written outside the one call");
 
-  const reqInsert = fake.callsTo("specification_requirements", "insert")[0];
-  const rows = reqInsert.payload as Array<Record<string, unknown>>;
-  assertEquals(rows.length, 2);
-  // Criteria arrive UNMET — a fresh adoption carries no evidence, and claiming
-  // otherwise would fabricate the very state R5 exists to prove.
-  assertEquals(rows[0].acceptance_criteria, [{ text: "plain string criterion", met: false }]);
+  const p = params(fake);
+  assertEquals(p.p_mode, "adopt");
+  assertEquals(p.p_actor, "u1");
+  // Criterion TEXTS only: `met` is not in the anchor, so the database brings
+  // each one in unmet. A fresh adoption carries no evidence.
+  assertEquals(p.p_requirements[0].acceptanceCriteria, ["plain string criterion"]);
   // Same two-half provenance convention as the artifact lanes (R3-4b).
-  const prov = (rows[0].metadata as Record<string, unknown>).provenance as Record<string, unknown>;
-  assertEquals(prov.origin, "spec-anchor-adopt");
-  assertEquals(prov.commitSha, "deadbeef");
-
-  const mapRows = fake.callsTo("specification_mappings", "insert")[0].payload as Array<Record<string, unknown>>;
-  assertEquals(mapRows.map((m) => m.node_id), ["node-a", "node-b"]);
-  // Mappings reference the requirement ROW uuid, not the REQ id.
-  assertEquals(mapRows[0].requirement_id, "row-1");
+  assertEquals(p.p_provenance.origin, "spec-anchor-adopt");
+  assertEquals(p.p_provenance.commitSha, "deadbeef");
+  // Mappings name the portable REQ id; the database finds the row.
+  assertEquals(p.p_mappings_add.map((m: Params) => `${m.requirementId}:${m.nodeId}`), [`REQ-001:${NODE_A}`, `REQ-001:${NODE_B}`]);
+  assertEquals(p.p_mappings_remove, [], "an adopt removes nothing");
 });
 
 // The ratchet: adopt-only, never overwrite.
 Deno.test("a project that already has a spec is never overwritten", async () => {
-  const fake = adoptFake({ id: "existing" });
+  const fake = adoptFake({ data: { ok: false, reason: "already-has-spec" }, error: null });
   const result = await adoptSpecAnchor(fake, { projectId: "p1", ownerId: "u1", spec: await parsed() });
-  assert(!result.adopted);
+  assert(!result.adopted, "refused");
   assertEquals((result as { reason: string }).reason, "already-has-spec");
-  assertEquals(fake.callsTo("project_specifications", "insert").length, 0, "nothing may be written");
-  assertEquals(fake.callsTo("specification_requirements", "insert").length, 0);
 });
 
 Deno.test("a tampered spec.json is refused at adopt time, not half-applied", async () => {
@@ -205,37 +212,48 @@ Deno.test("a tampered spec.json is refused at adopt time, not half-applied", asy
   spec.vision = "hand-edited after the hash was computed";
   const fake = adoptFake();
   const result = await adoptSpecAnchor(fake, { projectId: "p1", ownerId: "u1", spec });
-  assert(!result.adopted);
+  assert(!result.adopted, "refused");
   assertEquals((result as { reason: string }).reason, "hash-failed");
-  assertEquals(fake.callsTo("project_specifications", "insert").length, 0);
+  assertEquals(loads(fake).length, 0, "nothing is sent");
 });
 
 Deno.test("adoption needs an owner — specifications.created_by is NOT NULL", async () => {
-  const result = await adoptSpecAnchor(adoptFake(), { projectId: "p1", ownerId: null, spec: await parsed() });
-  assert(!result.adopted);
+  const fake = adoptFake();
+  const result = await adoptSpecAnchor(fake, { projectId: "p1", ownerId: null, spec: await parsed() });
+  assert(!result.adopted, "refused");
   assertEquals((result as { reason: string }).reason, "no-owner");
+  assertEquals(loads(fake).length, 0);
 });
 
 Deno.test("a mapping to an unknown node is DROPPED, never invented", async () => {
-  const fake = adoptFake();
+  const fake = adoptFake(loadRow({ mappingsAdded: 1 }));
   const result = await adoptSpecAnchor(fake, {
     projectId: "p1", ownerId: "u1", spec: await parsed(),
-    liveNodeIds: new Set(["node-a"]),
+    liveNodeIds: new Set([NODE_A]),
   });
-  assert(result.adopted);
+  assert(result.adopted, "adopted");
   assertEquals(result.skippedMappings, 1);
-  const mapRows = fake.callsTo("specification_mappings", "insert")[0].payload as Array<Record<string, unknown>>;
-  assertEquals(mapRows.map((m) => m.node_id), ["node-a"]);
+  assertEquals(params(fake).p_mappings_add.map((m: Params) => m.nodeId), [NODE_A]);
 });
 
-Deno.test("a failed requirements insert reports write-failed instead of a silent empty spec", async () => {
-  const fake = new FakeSupabase();
-  fake.script("project_specifications", "select", { data: null });
-  fake.script("project_specifications", "insert", { data: { id: "spec-1" } });
-  fake.script("specification_requirements", "insert", { data: null, error: { message: "boom" } });
+Deno.test("a failed load reports write-failed and says nothing was written", async () => {
+  const fake = adoptFake({ data: null, error: { message: "boom" } });
   const result = await adoptSpecAnchor(fake, { projectId: "p1", ownerId: "u1", spec: await parsed() });
-  assert(!result.adopted);
-  assert((result as { message?: string }).message?.includes("boom"));
+  assert(!result.adopted, "refused");
+  assertEquals((result as { reason: string }).reason, "write-failed");
+  const message = (result as { message?: string }).message ?? "";
+  assert(message.includes("boom") && message.includes("nothing was written"), message);
+});
+
+Deno.test("a category the database refuses is named before anything is sent", async () => {
+  const p = parseSpec(await serializeSpec(SPEC, [{ ...REQS[0], category: "nonsense" }], []));
+  assert(p.ok, "fixture parses");
+  const fake = adoptFake();
+  const result = await adoptSpecAnchor(fake, { projectId: "p1", ownerId: "u1", spec: (p as { ok: true; spec: SpecAnchor }).spec });
+  assert(!result.adopted, "refused");
+  assertEquals((result as { reason: string }).reason, "invalid-spec");
+  assert((result as { message?: string }).message?.includes('REQ-002 has the category "nonsense"'), "the requirement is named");
+  assertEquals(loads(fake).length, 0);
 });
 
 // ── R7a export-side loading ───────────────────────────────────────────────────
@@ -264,14 +282,16 @@ Deno.test("git-push writes the spec anchor alongside the model anchor", () => {
   assert(src.includes("specAnchored,"), "the flag rides the response and the sync log");
 });
 
-Deno.test("a 422 non-fast-forward ref update retries ONCE on a freshly read head", () => {
+Deno.test("a 422 non-fast-forward ref update reruns the preflight ONCE on a freshly read head", () => {
   // The provider can serve a stale head for seconds after a recent push; two
   // rapid same-ref pushes (bench-caught; R4 auto-push does it in production)
-  // then 422 on the ref PATCH. One full re-attempt rebuilds tree+commit on the
-  // real base; a second 422 is genuine contention and must surface.
+  // then 422 on the ref PATCH. AD.1: the push reports the branch moved and the
+  // handler reruns the whole preflight (head, range, plan) once, so nothing is
+  // built on a stale read; a second 422 is genuine contention and surfaces.
   const src = source("../git-push/index.ts");
-  assert(src.includes("_staleHeadRetry"), "retry flag present");
-  assert(src.includes("updateRefResponse.status === 422 && !_staleHeadRetry"), "retries only once, only on 422");
+  assert(/if \(updateRefResponse\.status === 422\) \{[\s\S]{0,200}moved: true/.test(src), "a 422 reports the branch moved");
+  assert(src.includes("for (let attempt = 0; attempt < 2 && !pushResult; attempt++)"), "the preflight runs at most twice");
+  assert(src.includes("moved twice while pushing"), "a second move surfaces");
 });
 
 Deno.test("a spec-plane failure NEVER fails the push — the architecture anchor must still land", () => {
@@ -286,9 +306,9 @@ Deno.test("a spec-plane failure NEVER fails the push — the architecture anchor
 Deno.test("connect adopts the spec plane and reports it SEPARATELY from the architecture", () => {
   const src = source("../save-git-integration/index.ts");
   assert(src.includes('import { SPEC_ANCHOR_PATH, parseSpec, adoptSpecAnchor }'));
-  // R3-6 widened the response with branchDetect — the separateness claim is the
-  // same, the literal grew a third key.
-  assert(src.includes("anchorAdopt, specAdopt, primaryBranch:") && src.includes("...(branchDetect ? { branchDetect } : {})"),
+  // R3-6 once widened the response with branchDetect; V3 AD.2b retired it. The
+  // separateness claim is the same.
+  assert(src.includes("anchorAdopt, specAdopt, primaryBranch:") && !src.includes("branchDetect"),
     '"nodes came in but requirements did not" must be readable, not inferred');
   // Runs regardless of which architecture branch was taken — "does this project
   // have requirements?" is a separate question from "does its graph match?".
@@ -407,7 +427,7 @@ Deno.test("new spec.json files carry NO features key; LEGACY files still verify 
 
 // ── R7c: spec drift lane ──────────────────────────────────────────────────────
 
-import { diffSpecs, capSpecDiff, mergeCriteria, applySpecAnchor } from "../_shared/spec-anchor.ts";
+import { diffSpecs, capSpecDiff, applySpecAnchor } from "../_shared/spec-anchor.ts";
 import { classifySweepFiles, decideBranchFreshness, cardFlaggedPlanes, cardFullyAnswered } from "../_shared/git-drift.ts";
 
 const specOf = async (
@@ -459,64 +479,17 @@ Deno.test("capSpecDiff keeps counts honest when the name lists truncate", async 
   assertEquals(capped.requirements.added.length, 3);
 });
 
-// ── THE evidence-preservation rule ────────────────────────────────────────────
-
-Deno.test("mergeCriteria: met survives a load when the criterion TEXT is unchanged", () => {
-  const { criteria, preserved } = mergeCriteria(
-    [{ text: "a", met: true }, { text: "b", met: false }],
-    ["a", "b"],
-  );
-  assertEquals(criteria, [{ text: "a", met: true }, { text: "b", met: false }]);
-  assertEquals(preserved, 1);
-});
-
-Deno.test("mergeCriteria: whatever R5 stamped ALONGSIDE met survives too", () => {
-  const { criteria } = mergeCriteria(
-    [{ text: "a", met: true, provenance: { source: "git", commitSha: "abc" } }],
-    ["a"],
-  );
-  assertEquals((criteria[0] as Record<string, unknown>).provenance, { source: "git", commitSha: "abc" });
-});
-
-Deno.test("mergeCriteria: an EDITED criterion arrives unmet — evidence proved the old wording", () => {
-  const { criteria, preserved } = mergeCriteria([{ text: "old wording", met: true }], ["new wording"]);
-  assertEquals(criteria, [{ text: "new wording", met: false }]);
-  assertEquals(preserved, 0);
-});
-
-Deno.test("mergeCriteria: added criteria are unmet, removed ones are gone", () => {
-  const { criteria } = mergeCriteria([{ text: "a", met: true }, { text: "gone", met: true }], ["a", "brand new"]);
-  assertEquals(criteria, [{ text: "a", met: true }, { text: "brand new", met: false }]);
-});
-
-Deno.test("mergeCriteria reads legacy bare-string criteria without crashing", () => {
-  const { criteria, preserved } = mergeCriteria(["a", "b"], ["a"]);
-  assertEquals(criteria, [{ text: "a" }]);
-  assertEquals(preserved, 0, "a bare string carries no met flag to preserve");
-});
-
 // ── applySpecAnchor ───────────────────────────────────────────────────────────
+// The evidence rule (a criterion whose text is unchanged keeps met and whatever
+// R5 stamped beside it; an edited one arrives unmet; bare-string criteria read)
+// lives in apply_spec_load and is proven in scripts/db-lane/082.
 
-const applyFake = () => {
-  const fake = new FakeSupabase();
-  fake.script("project_specifications", "select", { data: { id: "spec-1" } });
-  fake.script("project_specifications", "update", { data: null });
-  fake.script("specification_requirements", "select", {
-    data: [{
-      id: "row-1",
-      requirement_id: "REQ-001",
-      acceptance_criteria: [{ text: "kept criterion", met: true }],
-      metadata: {},
-    }],
-  });
-  fake.script("specification_requirements", "update", { data: null });
-  fake.script("specification_requirements", "insert", { data: { id: "row-2" } });
-  fake.script("specification_mappings", "delete", { data: null });
-  fake.script("specification_mappings", "insert", { data: null });
-  return fake;
-};
+const applyFake = (row: Record<string, unknown> = {}) => new FakeSupabase().script(
+  "rpc", "apply_spec_load",
+  loadRow({ added: 1, updated: 1, criteriaPreserved: 1, mappingsAdded: 1, mappingsRemoved: 1, keptLocal: ["REQ-001"], locked: ["REQ-007"], ...row }) as never,
+);
 
-Deno.test("apply: an existing requirement is updated and keeps its evidence", async () => {
+Deno.test("apply: one call in apply mode; the counts, the kept and the locked come from the database", async () => {
   const fake = applyFake();
   const result = await applySpecAnchor(fake, {
     projectId: "p1", ownerId: "u1", sourceCommit: "sha1",
@@ -526,38 +499,25 @@ Deno.test("apply: an existing requirement is updated and keeps its evidence", as
     ]),
   });
   assert(result.applied, `expected apply, got ${JSON.stringify(result)}`);
-  assertEquals(result.counts.updated, 1);
-  assertEquals(result.counts.added, 1);
-  assertEquals(result.counts.criteriaPreserved, 1);
-
-  const upd = fake.callsTo("specification_requirements", "update")[0].payload as Record<string, unknown>;
-  assertEquals(upd.acceptance_criteria, [
-    { text: "kept criterion", met: true },
-    { text: "new criterion", met: false },
-  ]);
-});
-
-// Non-destructive by design.
-Deno.test("apply: a requirement the repo does not mention is KEPT and reported", async () => {
-  const fake = applyFake();
-  const result = await applySpecAnchor(fake, {
-    projectId: "p1", ownerId: "u1",
-    spec: await specOf([{ requirement_id: "REQ-050", name: "Repo only" }]),
-  });
-  assert(result.applied);
+  assertEquals(result.counts, { added: 1, updated: 1, criteriaPreserved: 1, mappings: 1, mappingsRemoved: 1 });
+  // Non-destructive by design: reported, never deleted.
   assertEquals(result.keptLocal, ["REQ-001"]);
-  assertEquals(fake.callsTo("specification_requirements", "delete").length, 0, "requirements are never deleted by a sync");
+  assertEquals(result.locked, ["REQ-007"]);
+  assertEquals(fake.calls.map((c) => `${c.table}.${c.op}`), ["rpc.apply_spec_load"], "nothing is written outside the one call");
+  const p = params(fake);
+  assertEquals(p.p_mode, "apply");
+  assertEquals(p.p_provenance.origin, "spec-anchor-load");
+  assertEquals(p.p_requirements.map((r: Params) => r.acceptanceCriteria), [["kept criterion", "new criterion"], []]);
 });
 
-Deno.test("apply: mappings are replaced ONLY for the requirements the repo mentions", async () => {
+Deno.test("apply: without git's spec at the last sync, a load removes no mapping", async () => {
   const fake = applyFake();
   await applySpecAnchor(fake, {
     projectId: "p1", ownerId: "u1",
-    spec: await specOf([{ requirement_id: "REQ-001", name: "R" }], "v", [{ requirementId: "REQ-001", nodeId: "n1" }]),
+    spec: await specOf([{ requirement_id: "REQ-001", name: "R" }], "v", [{ requirementId: "REQ-001", nodeId: NODE_A }]),
   });
-  const del = fake.callsTo("specification_mappings", "delete")[0];
-  // Scoped by requirement_id IN (touched rows) — untouched requirements' mappings survive.
-  assert(del.filters.some((f) => f.method === "in" && f.args[0] === "requirement_id"), "delete must be scoped");
+  assertEquals(params(fake).p_mappings_remove, []);
+  assertEquals(params(fake).p_mappings_add, [{ requirementId: "REQ-001", nodeId: NODE_A, mappingType: "implements" }]);
 });
 
 Deno.test("apply refuses a tampered spec before touching anything", async () => {
@@ -565,9 +525,16 @@ Deno.test("apply refuses a tampered spec before touching anything", async () => 
   spec.vision = "hand-edited";
   const fake = applyFake();
   const result = await applySpecAnchor(fake, { projectId: "p1", ownerId: "u1", spec });
-  assert(!result.applied);
+  assert(!result.applied, "refused");
   assertEquals((result as { reason: string }).reason, "hash-failed");
-  assertEquals(fake.callsTo("project_specifications", "update").length, 0);
+  assertEquals(loads(fake).length, 0);
+});
+
+Deno.test("apply on a project without a spec says so", async () => {
+  const fake = adoptFake({ data: { ok: false, reason: "no-spec" }, error: null });
+  const result = await applySpecAnchor(fake, { projectId: "p1", ownerId: "u1", spec: await specOf([]) });
+  assert(!result.applied, "refused");
+  assertEquals((result as { reason: string }).reason, "no-spec");
 });
 
 // ── Sweep integration ─────────────────────────────────────────────────────────
@@ -688,8 +655,9 @@ Deno.test("R4: a custom commit subject NEVER loses the self-push prefix", () => 
   // webhook skip, the sweep fast-forward and the merge-arrival detector all key on
   // this prefix.
   assert(src.includes("`${SELF_PUSH_PREFIX} ${reasonText}`"), "custom subject is prefixed");
+  // AD.1: the default subject counts the files the push actually writes.
   assert(
-    src.includes("`${SELF_PUSH_PREFIX} ${files.length} files from ${branchName}`"),
+    src.includes("`${SELF_PUSH_PREFIX} ${fileCount} files from ${branchName}`"),
     "the default subject is unchanged",
   );
   // Precise, not a substring: `commitMessage = reasonText` legitimately contains
@@ -722,8 +690,6 @@ Deno.test("R4 loop stitching: status surfaces unreconciled changes and points at
 // the branches do not detect. When I create a new branch in the new project…
 // it wants to push to main."
 
-import { detectRepoDesignBranches } from "../_shared/git-drift.ts";
-
 Deno.test("R3-6: an unbound non-main branch NEVER pushes to the repository default", () => {
   const src = source("../git-push/index.ts");
   // The self-heal exists…
@@ -746,57 +712,9 @@ Deno.test("R3-6: main keeps its default-ref fallback (connect binds it anyway)",
     "the fallback line survives for main");
 });
 
-Deno.test("R3-6: detection skips existing rows, the default branch, and respects the cap", async () => {
-  const fake = new FakeSupabase();
-  fake.script("branches", "select", { data: [{ name: "main" }, { name: "already-here" }] });
-  // Candidate 'feature-x': insert succeeds, then the restore inside fails fast
-  // (no integration scripted → no-integration) → row rolled back, skip recorded.
-  fake.script("branches", "insert", { data: { id: "row-new" } });
-  fake.script("git_integrations", "select", { data: null });
-  fake.script("branches", "delete", { data: null });
-
-  const result = await detectRepoDesignBranches(fake, {
-    projectId: "p1", ownerId: "u1", defaultBranch: "main",
-    branchNames: ["main", "already-here", "feature-x"],
-  });
-  assertEquals(result.created, []);
-  assertEquals(result.skipped.length, 1);
-  assertEquals(result.skipped[0].name, "feature-x");
-  assert(result.skipped[0].reason.includes("not a design branch"));
-  // The failed candidate's row was rolled back — no phantom design branch.
-  assertEquals(fake.callsTo("branches", "delete").length, 1);
-  // main and already-here were never inserted.
-  assertEquals(fake.callsTo("branches", "insert").length, 1);
-});
-
-Deno.test("R3-6: the cap is reported, never silent", async () => {
-  const fake = new FakeSupabase();
-  fake.script("branches", "select", { data: [{ name: "main" }] });
-  // 12 candidates; every insert fails immediately so the test stays cheap.
-  for (let i = 0; i < 10; i++) fake.script("branches", "insert", { data: null, error: { message: "nope" } });
-  const names = ["main", ...Array.from({ length: 12 }, (_, i) => `b${String(i).padStart(2, "0")}`)];
-  const result = await detectRepoDesignBranches(fake, {
-    projectId: "p1", ownerId: "u1", defaultBranch: "main", branchNames: names,
-  });
-  assertEquals(result.capped, 2, "12 candidates − cap 10 = 2 reported, not dropped silently");
-  assertEquals(result.skipped.length, 10);
-});
-
-Deno.test("R3-6: connect wires detection AFTER the adopt blocks, best-effort, reported separately", () => {
-  const src = source("../save-git-integration/index.ts");
-  assert(src.includes("detectRepoDesignBranches(serviceClient"), "detection runs");
-  assert(src.includes("branch detection failed (save still succeeded)"), "best-effort by contract");
-  assert(src.includes("anchorAdopt, specAdopt, primaryBranch:") && src.includes("...(branchDetect ? { branchDetect } : {})"),
-    "reported on its own key");
-});
-
-Deno.test("R3-6: detection's restore never resolves cards; every other caller keeps the default", () => {
+Deno.test("V3 AD.2b: connect materializes no design branch from the repository (R3-6 detection retired)", () => {
+  const save = source("../save-git-integration/index.ts");
+  assert(!save.includes("detectRepoDesignBranches") && !save.includes("listRemoteBranchNames"), "no detection at connect");
   const drift = source("../_shared/git-drift.ts");
-  assert(drift.includes("{ resolveCards: false }"),
-    "detection opts out — it must not swallow the main mismatch card the same connect raised");
-  assert(drift.includes('if (opts?.resolveCards !== false) {'),
-    "default TRUE — pre-existing restore callers keep resolving");
-  // The two auto-restore lanes (sweep merge-arrival + webhook) pass only the
-  // baseline guard — they inherit resolveCards default.
-  assert(!drift.includes("requireCanvasMatchesBaseline: true, resolveCards"), "auto lanes untouched");
+  assert(!drift.includes("export async function detectRepoDesignBranches("), "the detector is gone");
 });

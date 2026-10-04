@@ -7,8 +7,12 @@
 #      (NODESPEC_DEPLOYMENT, license, encryption secret — the functions read
 #      env from that file on this stack),
 #   3. starts the Supabase stack; on FIRST run applies the schema,
-#   4. fills VITE_SUPABASE_ANON_KEY from the running stack when left empty,
-#   5. builds + starts the frontend container (port ${FRONTEND_PORT:-8080}).
+#   4. seeds the vendored icon set into THIS stack's storage and repoints
+#      the catalog at it (scripts/icons/seed-icons.sh — re-run safe; it also
+#      re-localizes rows that a catalog migration re-pointed at the hosted
+#      bucket, which is why it runs on every invocation),
+#   5. fills VITE_SUPABASE_ANON_KEY from the running stack when left empty,
+#   6. builds + starts the frontend container (port ${FRONTEND_PORT:-8080}).
 #
 # Re-running is safe: an already-running stack is left alone (config changes
 # need `supabase stop && supabase start`), and the frontend is rebuilt only
@@ -59,7 +63,6 @@ say "writing $FUNC_ENV from selfhost.env"
   [ -n "${VITE_SUPABASE_URL:-}" ] && echo "PUBLIC_SUPABASE_URL=${VITE_SUPABASE_URL}"
   [ -n "${VITE_TURNSTILE_SITE_KEY:-}" ] && echo "TURNSTILE_SITE_KEY=${VITE_TURNSTILE_SITE_KEY}"
   echo "STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-sk_test_dummy_never_called_selfhost}"
-  [ -n "${OPENAI_API_KEY:-}" ] && echo "OPENAI_API_KEY=${OPENAI_API_KEY}"
 } > "$FUNC_ENV"
 
 # 3 · the Supabase stack
@@ -85,7 +88,31 @@ else
   fi
 fi
 
-# 4 · anon key for the frontend build, from the running stack when unset
+# 3b · V3 Q: mark this database self-hosted, on every run. The plan checks in
+#      the database (migration 20260922110000) defer to the licence the
+#      functions verify when public.deployment_settings says so; absent, the
+#      database assumes hosted. Written on every bootstrap so an install that
+#      predates the migration is marked once it has it.
+DB_CONTAINER="${DB_CONTAINER:-$(docker ps --format '{{.Names}}' | grep '^supabase_db_' | head -1)}"
+if [ -n "$DB_CONTAINER" ] && [ "$(docker exec "$DB_CONTAINER" psql -U postgres -d postgres -tAc "select to_regclass('public.deployment_settings') is not null;" 2>/dev/null | tr -d '[:space:]')" = "t" ]; then
+  docker exec "$DB_CONTAINER" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -qc \
+    "INSERT INTO public.deployment_settings (id, mode) VALUES (true, 'self-hosted') ON CONFLICT (id) DO UPDATE SET mode = 'self-hosted', updated_at = now();" \
+    && say "marked this database self-hosted"
+else
+  say "WARNING: could not mark the database self-hosted (apply the migrations, then re-run this script)"
+fi
+
+# 4 · icons: seed this stack's own storage from assets/icons and localize
+#     technology_catalog.icon_url (no deployment hotlinks the hosted bucket —
+#     air-gapped enterprise ruling 2026-09-01). Non-fatal: a failed seed
+#     leaves icons missing, not the app broken.
+if bash "$ROOT/scripts/icons/seed-icons.sh"; then
+  :
+else
+  say "WARNING: icon seed failed — the app runs, but technology icons may be missing (re-run scripts/icons/seed-icons.sh)"
+fi
+
+# 5 · anon key for the frontend build, from the running stack when unset
 if [ -z "${VITE_SUPABASE_ANON_KEY:-}" ]; then
   say "filling VITE_SUPABASE_ANON_KEY from the running stack"
   # env-format output parses with sed alone — the VM needs no Node runtime
@@ -103,7 +130,7 @@ if [ -z "${VITE_SUPABASE_ANON_KEY:-}" ]; then
   sed -i "s|^VITE_SUPABASE_ANON_KEY=.*|VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY|" "$ENV_FILE"
 fi
 
-# 5 · frontend
+# 6 · frontend
 say "building + starting the frontend container"
 docker compose --env-file "$ENV_FILE" -f "$HERE/docker-compose.frontend.yml" up -d --build
 

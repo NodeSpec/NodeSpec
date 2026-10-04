@@ -4,14 +4,6 @@ export type ObligationSeverity = 'error' | 'warning';
 
 export type Obligation =
   | {
-      kind: 'contract_required';
-      severity: ObligationSeverity;
-      nodeId: string;
-      portId: string;
-      contractId: string;
-      message: string;
-    }
-  | {
       kind: 'artifact_required';
       severity: ObligationSeverity;
       nodeId: string;
@@ -50,33 +42,6 @@ export function deriveNodeObligations(graph: Graph, nodeId: string): Obligation[
   const connectedEdges = Object.values(graph.edges).filter(
     (edge) => edge.source === nodeId || edge.target === nodeId
   );
-
-  const portContractMap = new Map<string, string>();
-  for (const edge of connectedEdges) {
-    if (edge.source === nodeId && edge.sourcePortId) {
-      portContractMap.set(edge.sourcePortId, edge.contractId);
-    }
-    if (edge.target === nodeId && edge.targetPortId) {
-      portContractMap.set(edge.targetPortId, edge.contractId);
-    }
-  }
-
-  if (node.ports && node.ports.length > 0) {
-    for (const port of node.ports) {
-      const contractId = portContractMap.get(port.id);
-      if (contractId) {
-        const contract = graph.contracts[contractId];
-        obligations.push({
-          kind: 'contract_required',
-          severity: 'warning',
-          nodeId,
-          portId: port.id,
-          contractId,
-          message: `Port "${port.name}" uses contract "${contract?.name || 'Unknown'}"`,
-        });
-      }
-    }
-  }
 
   const restContracts: string[] = [];
   for (const edge of connectedEdges) {

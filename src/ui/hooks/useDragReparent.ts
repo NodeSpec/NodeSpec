@@ -9,12 +9,15 @@ import type { CatalogResolver } from '../../persistence/supabase/catalog-reposit
 import type { ActorType, PlacementKind } from '@nodespec/core/types.js';
 
 // N2/N2.3: client mirror of the server-side rule in
-// supabase/functions/_shared/tool-executor.ts::inferPlacementKind — the two paths (canvas
-// drag here; AI/MCP set_parent there) MUST agree, so both take the child type + technology
-// and apply the EFFECTIVE-boundary rule (role default, or raised by a boundary-engine
-// technology like n8n — effectiveTreatment). A boundary child scopes into any non-hosting
-// container; hosting infrastructure still hosts it.
-function inferPlacementKindFromCatalog(
+// supabase/functions/_shared/role-registry.ts::placementFor. The two paths (canvas drag
+// here; propose_patches there) MUST agree, so both take the child type and technology and
+// apply the EFFECTIVE-boundary rule (role default, or raised by a boundary-engine
+// technology like n8n, via effectiveTreatment).
+// AG.11c (owner 2026-09-28): the container's layer says how it holds. Runtime and
+// orchestration run what they hold (hosts), even a boundary child; infrastructure places it
+// (contains: a VPC, a subnet, a cloud account); logical groups it (scopes), as does any
+// container for a boundary child it does not run.
+export function inferPlacementKindFromCatalog(
   catalog: CatalogResolver | null,
   containerType: string,
   childType?: string,
@@ -23,7 +26,7 @@ function inferPlacementKindFromCatalog(
   if (!catalog) return 'contains';
   const role = catalog.getRole(containerType);
   if (!role) return 'contains';
-  if (role.containerLayer === 'infrastructure') return 'hosts';
+  if (role.containerLayer === 'runtime' || role.containerLayer === 'orchestration') return 'hosts';
   if (childType) {
     const childRole = catalog.getRole(childType);
     const override = childTechnology

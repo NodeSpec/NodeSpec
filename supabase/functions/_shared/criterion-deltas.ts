@@ -89,6 +89,13 @@ export interface CriterionDelta {
    * the deciding one.
    */
   direction: "tick" | "untick";
+  /**
+   * AD.3: the criterion's lane. An automated criterion is proven by a test
+   * result, so a tick on one shows on the card as needing a test result; a
+   * person may still mark it met, recorded as theirs. Absent on cards written
+   * before the lane rode along.
+   */
+  verification?: "automated" | "manual";
 }
 
 export interface CriterionFlag {
@@ -106,6 +113,7 @@ export interface CriterionDeltaResult {
 export interface CurrentCriterion {
   text: string;
   met?: boolean;
+  verification?: "automated" | "manual";
 }
 
 /**
@@ -162,8 +170,9 @@ export function computeCriterionDeltas(
       // database's wording, so a delta carrying the doc's suffixed rendering
       // would silently apply to nothing.
       const met = match.met === true;
-      if (box.checked && !met) deltas.push({ requirementId, text: storedText, direction: "tick" });
-      else if (!box.checked && met) deltas.push({ requirementId, text: storedText, direction: "untick" });
+      const verification = match.verification === "manual" ? "manual" : "automated";
+      if (box.checked && !met) deltas.push({ requirementId, text: storedText, direction: "tick", verification });
+      else if (!box.checked && met) deltas.push({ requirementId, text: storedText, direction: "untick", verification });
     }
   }
   return { deltas, flagged };
@@ -195,7 +204,7 @@ export function summarizeDeltas(result: CriterionDeltaResult): string {
 export function applyTickDeltas(
   stored: unknown,
   ticks: CriterionDelta[],
-  provenance: { source: "git"; commitSha?: string; actor?: string; at: string },
+  provenance: { source: "git"; commitSha?: string; actor?: string; appliedBy?: string; at: string },
 ): { criteria: Array<Record<string, unknown>>; applied: number } {
   const wanted = new Set(ticks.map((d) => d.text));
   let applied = 0;

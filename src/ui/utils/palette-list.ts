@@ -4,7 +4,7 @@
 // Categories, bands, and the lens chip are gone from the sidebar; this module is the
 // pure, testable core of the new browse.
 import type { CatalogResolver, NodeRole, TechnologyCatalogEntry } from '../../persistence/supabase/catalog-repository.js';
-import { paletteChip, deriveNodeNature, providerPlatformRoleId } from './node-nature.js';
+import { providerPlatformRoleId } from './node-nature.js';
 
 export interface PaletteListItem {
   key: string;
@@ -13,9 +13,6 @@ export interface PaletteListItem {
   id: string;
   name: string;
   caption: string | null;
-  chip: string | null;
-  /** Full nature sentence — tooltip truth. */
-  natureLine: string;
   /** Lucide icon name for role/structure rows. */
   iconName: string | null;
   color: string | null;
@@ -149,7 +146,7 @@ export function liveDropAffinities(tech: TechnologyCatalogEntry, resolver: Catal
   return leaves.length > 0 ? leaves : live.filter(r => r.isContainer);
 }
 
-/** One row per recognizable technology (N3.7 discipline): name + purpose + chip. */
+/** One row per recognizable technology (N3.7 discipline): name and purpose. */
 /** N8.4s (owner bench 2026-07-27: "there's a Structure Google Cloud Platform overall
  *  node … then there's the branded actual node"): the provider PLATFORM container is one
  *  thing and the Structure section already lists it (from the `aws`/`azure`/`gcp` ROLE).
@@ -162,23 +159,29 @@ function isPlatformOnlyTechnology(roles: NodeRole[]): boolean {
   return roles.length > 0 && roles.every(r => r.nature === 'host');
 }
 
-export function buildTechnologyListItems(resolver: CatalogResolver): PaletteListItem[] {
+/** AG.6c (2026-09-28): a custom technology row belongs to one project. RLS already hides
+ *  other projects' rows from most people, but an admin (and a member of two projects)
+ *  reads them all, so every list a person picks a technology from shows a custom row
+ *  only inside its own project. */
+export function technologyVisibleInProject(tech: TechnologyCatalogEntry, projectId: string | null | undefined): boolean {
+  return !tech.isUserContributed || (!!projectId && tech.projectId === projectId);
+}
+
+export function buildTechnologyListItems(resolver: CatalogResolver, projectId?: string | null): PaletteListItem[] {
   const items: PaletteListItem[] = [];
   for (const tech of resolver.getAllTechnologies()) {
+    if (!technologyVisibleInProject(tech, projectId)) continue;
     const liveRoles = liveDropAffinities(tech, resolver);
     if (liveRoles.length === 0) continue;
     if (isPlatformOnlyTechnology(liveRoles)) continue;
     const primary = liveRoles[0];
     const aiCtx = tech.aiContext as Record<string, unknown> | undefined;
-    const nature = deriveNodeNature(primary, tech);
     items.push({
       key: `tech:${tech.id}`,
       kind: 'technology',
       id: tech.id,
       name: tech.displayName || tech.name,
-      caption: firstSentence(aiCtx?.purpose as string) ?? nature.line,
-      chip: paletteChip(primary, tech),
-      natureLine: nature.line,
+      caption: firstSentence(aiCtx?.purpose as string),
       iconName: null,
       color: null,
       brandColor: tech.brandColor,
@@ -200,8 +203,6 @@ export function buildRoleListItems(resolver: CatalogResolver): PaletteListItem[]
       id: role.id,
       name: role.label,
       caption: firstSentence(role.description),
-      chip: paletteChip(role),
-      natureLine: deriveNodeNature(role).line,
       iconName: role.iconName,
       color: role.color,
       brandColor: null,
@@ -238,9 +239,13 @@ function roleTechnologyStats(resolver: CatalogResolver): Map<string, { total: nu
   return stats;
 }
 
+/** AG.1 (owner 2026-09-28): the Node types section, functional leaves only. Hosts,
+ *  platforms and devices list under Platforms and hosts; groups under Structure.
+ *  AG.2: each row's caption is the type's own first sentence, then how many
+ *  technologies it has, so no two types read alike. */
 export function buildFunctionalRoleItems(resolver: CatalogResolver): PaletteListItem[] {
   const stats = roleTechnologyStats(resolver);
-  const leaves = buildRoleListItems(resolver)
+  return buildRoleListItems(resolver)
     .filter(item => {
       const role = resolver.getRole(item.id);
       if (!role) return false;
@@ -253,18 +258,14 @@ export function buildFunctionalRoleItems(resolver: CatalogResolver): PaletteList
       if (!s && role.nature !== 'call' && role.nature !== 'engine' && role.paletteCategory !== 'Hardware') return false; // RULE B
       return true;
     })
-    .map(item => {
-      const s = stats.get(item.id);
-      const caption = s && s.total > 0
-        ? `generic — pick technology later (${s.total} available)`
-        : item.caption;
-      return { ...item, caption };
-    });
-  // Owner ruling 2026-08-05: generic hosting/hardware container concepts browse HERE,
-  // not beside the brand platforms. RULE A/B are leaf rules — a container drop always
-  // leads to a provisioning deliverable, never a dead end.
-  return [...leaves, ...buildGenericContainerItems(resolver)]
+    .map(item => ({ ...item, caption: withTechnologyCount(item.caption, stats.get(item.id)?.total ?? 0) }))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function withTechnologyCount(sentence: string | null, count: number): string | null {
+  if (count === 0) return sentence;
+  const tally = `${count} ${count === 1 ? 'technology' : 'technologies'}`;
+  return sentence ? `${sentence.replace(/[.!?]$/, '')} · ${tally}` : tally;
 }
 
 /** The Structure set (owner ruling 2026-08-05, supersedes N4.4's single-Group collapse
@@ -287,10 +288,8 @@ export function buildStructureListItems(resolver: CatalogResolver): PaletteListI
     id: role.id,
     name: role.label,
     caption: role.id === 'application-module'
-      ? 'Optional — organizes related nodes; nothing runs here'
+      ? 'Optional: organizes related nodes; nothing runs here'
       : firstSentence(role.description),
-    chip: 'Group',
-    natureLine: deriveNodeNature(role).line,
     iconName: role.iconName,
     color: role.color,
     brandColor: null,
@@ -316,8 +315,6 @@ export function buildPlatformListItems(resolver: CatalogResolver): PaletteListIt
       id: role.id,
       name: role.label,
       caption: firstSentence(role.description),
-      chip: 'Host',
-      natureLine: deriveNodeNature(role).line,
       iconName: role.iconName,
       color: role.color,
       brandColor: null,
@@ -326,12 +323,22 @@ export function buildPlatformListItems(resolver: CatalogResolver): PaletteListIt
     }));
 }
 
-/** Generic hosting/hardware container CONCEPTS — Virtual Machine, Kubernetes Cluster,
- *  Docker Container, VPC, Robot, IoT Gateway… You provision these yourself (nature
- *  'build'; a real deliverable per N5.16), so they browse beside the other functional
- *  concepts. Provider-BRANDED non-platform containers (ecs-cluster → aws) are excluded:
- *  they are reachable via their technology row and search, never as a loose generic. */
-function buildGenericContainerItems(resolver: CatalogResolver): PaletteListItem[] {
+/** AG.1 (owner 2026-09-28, the section named "Platforms and hosts"): where a node runs.
+ *  Brand platforms first, then generic hosts and devices, each A to Z. A provider filter
+ *  narrows it to that provider's platform, as it narrowed Platforms; generic hosts and
+ *  devices belong to no provider and leave under a filter. */
+export function buildPlatformsAndHostsItems(resolver: CatalogResolver, family?: string | null): PaletteListItem[] {
+  const platforms = buildPlatformListItems(resolver);
+  if (family) return platforms.filter(p => familyPlatformRoleIds(family).includes(p.id));
+  return [...platforms, ...buildHostListItems(resolver).sort((a, b) => a.name.localeCompare(b.name))];
+}
+
+/** Generic hosts and devices: Virtual Machine, Kubernetes Cluster, Container or App
+ *  Runtime, VPC, Robot, IoT Gateway and the rest. You provision these yourself (nature
+ *  'build'; a real deliverable per N5.16); AG.1 lists them under Platforms and hosts,
+ *  after the brand platforms. Provider-branded non-platform containers (ecs-cluster on
+ *  aws) are left out: they are reached through their technology row and search. */
+export function buildHostListItems(resolver: CatalogResolver): PaletteListItem[] {
   return resolver.getAllRoles()
     .filter(r => !r.deprecated && r.isContainer && r.containerStyle !== 'logical-boundary'
       && r.nature !== 'host' && !r.provider)
@@ -341,8 +348,6 @@ function buildGenericContainerItems(resolver: CatalogResolver): PaletteListItem[
       id: role.id,
       name: role.label,
       caption: firstSentence(role.description),
-      chip: 'Host',
-      natureLine: deriveNodeNature(role).line,
       iconName: role.iconName,
       color: role.color,
       brandColor: null,
@@ -353,8 +358,8 @@ function buildGenericContainerItems(resolver: CatalogResolver): PaletteListItem[
 
 /** N4.7: the A–Z stream is TECHNOLOGY-ONLY — generic roles moved to their own browse
  *  section (Functional Node Types), per the owner's three-section sidebar. */
-export function buildAlphabeticalPalette(resolver: CatalogResolver): PaletteListItem[] {
-  return buildTechnologyListItems(resolver);
+export function buildAlphabeticalPalette(resolver: CatalogResolver, projectId?: string | null): PaletteListItem[] {
+  return buildTechnologyListItems(resolver, projectId);
 }
 
 export interface LetterGroup {

@@ -287,6 +287,22 @@ export function computeRemainingBindings(
   return { remaining, consumed };
 }
 
+/**
+ * B3: the manifest a push writes back, derived from git's own content: the
+ * declarations the pushed graph binds leave, everything else stays. Null
+ * (nothing to write) when the file is absent or empty, when nothing is
+ * consumed (a no-op push must not churn the file), or when any row is
+ * flagged (rewriting from the parsed rows would silently delete a malformed
+ * row before its author saw the flag).
+ */
+export function manifestAfterBinds(raw: string | null, boundPaths: ReadonlySet<string>): string | null {
+  if (!raw) return null;
+  const parsed = parseBindingManifest(raw);
+  if (parsed.flagged.length > 0 || parsed.entries.length === 0) return null;
+  const { remaining, consumed } = computeRemainingBindings(parsed, boundPaths);
+  return consumed.length > 0 ? renderBindingManifest(remaining) : null;
+}
+
 /** One-line human summary for a change card. */
 export function summarizeBindings(resolution: BindingResolution): string {
   const parts: string[] = [];

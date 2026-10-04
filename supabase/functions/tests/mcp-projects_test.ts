@@ -5,10 +5,8 @@
 // is the live edge runtime, per the S1-2 lesson.)
 import {
   handleListProjects,
-  handleListBranches,
   handleGetProjectStatus,
-  handleCreateProject,
-} from '../mcp-server/tools/projects.ts';
+  handleCreateProject, readStagedSpecification } from '../mcp-server/tools/projects.ts';
 import type { AuthResult } from '../mcp-server/shared.ts';
 import { FakeSupabase, assert, assertEquals } from './helpers.ts';
 
@@ -44,34 +42,6 @@ Deno.test('list_projects: maps rows, pulling description out of metadata', async
   assertEquals(projects[0].description, 'first');
   assertEquals(projects[1].description, null);
 });
-
-// ── list_branches ────────────────────────────────────────────────────────────────────
-
-Deno.test('list_branches: flags the main branch', async () => {
-  const sb = new FakeSupabase();
-  sb.script('projects', 'select', projectRow());
-  sb.script('branches', 'select', {
-    data: [
-      { id: 'b1', name: 'main', created_at: 't' },
-      { id: 'b2', name: 'feature', created_at: 't' },
-    ],
-    error: null,
-  });
-  const r = await handleListBranches(sb as never, READ, { project_id: PROJECT.id });
-  assertEquals(r.success, true);
-  const branches = (r.data as { branches: Array<{ name: string; isMain: boolean }> }).branches;
-  assertEquals(branches.map((b) => [b.name, b.isMain]), [['main', true], ['feature', false]]);
-});
-
-Deno.test('list_branches: unknown project surfaced as error', async () => {
-  const sb = new FakeSupabase();
-  sb.script('projects', 'select', { data: null, error: null });
-  const r = await handleListBranches(sb as never, READ, { project_id: PROJECT.id });
-  assertEquals(r.success, false);
-  assert((r.error ?? '').includes('not found or access denied'));
-});
-
-// ── get_project_status ───────────────────────────────────────────────────────────────
 
 Deno.test('get_project_status: aggregates counts and derives nextAction', async () => {
   const sb = new FakeSupabase();
@@ -161,8 +131,8 @@ Deno.test('create_project: hosted Free tier is capped at TWO projects (owner 202
   const sb = new FakeSupabase();
   // getUserTier → community (no subscription), not admin, project count already at the cap.
   sb.script('stripe_subscriptions', 'select', { data: null, error: null });
-  sb.script('user_settings', 'select', { data: null, error: null });
-  sb.script('projects', 'select', { count: 2, data: null, error: null });
+  sb.script('auth', 'getUserById', { data: { user: { id: 'u1', app_metadata: {} } }, error: null });
+  sb.script('projects', 'select', { data: [{ id: 'p1', metadata: {} }, { id: 'p2', metadata: null }], error: null });
   const r = await handleCreateProject(sb as never, WRITE, { name: 'Third' });
   assertEquals(r.success, false);
   assert((r.error ?? '').includes('Free accounts include 2 projects'));
@@ -173,22 +143,59 @@ Deno.test('create_project: hosted Free tier is capped at TWO projects (owner 202
 Deno.test('create_project: community tier below the cap proceeds past the limit check', async () => {
   const sb = new FakeSupabase();
   sb.script('stripe_subscriptions', 'select', { data: null, error: null });
-  sb.script('user_settings', 'select', { data: null, error: null });
-  sb.script('projects', 'select', { count: 0, data: null, error: null }); // 0 of 2 used
+  sb.script('auth', 'getUserById', { data: { user: { id: 'u1', app_metadata: {} } }, error: null });
+  sb.script('projects', 'select', { data: [], error: null }); // 0 of 2 used
   sb.script('projects', 'select', { data: { id: 'existing' }, error: null }); // duplicate-name check hits
   const r = await handleCreateProject(sb as never, WRITE, { name: 'First' });
   assertEquals(r.success, false);
   assert((r.error ?? '').includes('already exists'), 'reached the duplicate-name check, not the cap');
 });
 
+// AJ.6 (owner 2026-09-30): the example project every account gets does not
+// count against the two projects Free includes.
+Deno.test('create_project: the account\'s example project is not counted against the Free cap', async () => {
+  const example = { id: 'ex', metadata: { example: 'harbor-lane-bakery', exampleTeam: [] } };
+  const below = new FakeSupabase();
+  below.script('stripe_subscriptions', 'select', { data: null, error: null });
+  below.script('auth', 'getUserById', { data: { user: { id: 'u1', app_metadata: {} } }, error: null });
+  below.script('projects', 'select', { data: [example, { id: 'p1', metadata: {} }], error: null }); // the example and one of their own
+  below.script('projects', 'select', { data: { id: 'existing' }, error: null }); // duplicate-name check hits
+  const r1 = await handleCreateProject(below as never, WRITE, { name: 'Second' });
+  assertEquals(r1.success, false);
+  assert((r1.error ?? '').includes('already exists'), `one of their own and the example leave room for a second: ${r1.error}`);
+
+  const at = new FakeSupabase();
+  at.script('stripe_subscriptions', 'select', { data: null, error: null });
+  at.script('auth', 'getUserById', { data: { user: { id: 'u1', app_metadata: {} } }, error: null });
+  at.script('projects', 'select', { data: [example, { id: 'p1', metadata: {} }, { id: 'p2', metadata: { kept: 1 } }], error: null });
+  const r2 = await handleCreateProject(at as never, WRITE, { name: 'Third' });
+  assertEquals(r2.success, false);
+  assert((r2.error ?? '').includes('already has 2.'), `two of their own are the cap, the example aside: ${r2.error}`);
+  assertEquals(at.callsTo('projects', 'insert').length, 0);
+});
+
 Deno.test('create_project: admins are exempt from the community cap', async () => {
   const sb = new FakeSupabase();
   sb.script('stripe_subscriptions', 'select', { data: null, error: null });
-  sb.script('user_settings', 'select', { data: { is_admin: true }, error: null });
+  sb.script('auth', 'getUserById', { data: { user: { id: 'u1', app_metadata: { is_admin: true } } }, error: null });
   sb.script('projects', 'select', { data: { id: 'existing' }, error: null }); // duplicate-name check hits
   const r = await handleCreateProject(sb as never, WRITE, { name: 'Demo' });
   assertEquals(r.success, false);
-  assert((r.error ?? '').includes('already exists'), 'no cap query for admins — straight to duplicate-name');
+  assert((r.error ?? '').includes('already exists'), 'no cap query for admins, straight to duplicate-name');
+  assertEquals(sb.callsTo('auth', 'getUserById')[0].payload, WRITE.userId, 'admin is read from the caller\'s own account');
+});
+
+Deno.test('RLS audit: a settings row saying is_admin does not lift the Free cap; only the account\'s app_metadata does', async () => {
+  const sb = new FakeSupabase();
+  sb.script('stripe_subscriptions', 'select', { data: null, error: null });
+  sb.script('user_settings', 'select', { data: { is_admin: true }, error: null }); // a person writes their own row
+  sb.script('auth', 'getUserById', { data: { user: { id: 'u1', app_metadata: {} } }, error: null });
+  sb.script('projects', 'select', { data: [{ id: 'p1', metadata: {} }, { id: 'p2', metadata: null }], error: null });
+  const r = await handleCreateProject(sb as never, WRITE, { name: 'Third' });
+  assertEquals(r.success, false);
+  assert((r.error ?? '').includes('Free accounts include 2 projects'), r.error);
+  assertEquals(sb.callsTo('projects', 'insert').length, 0);
+  assertEquals(sb.callsTo('user_settings').length, 0, 'the settings row is not consulted');
 });
 
 Deno.test('create_project: duplicate name rejected', async () => {
@@ -262,12 +269,50 @@ Deno.test('spec-import origin + empty spec → nextAction leads with the documen
   assert(next.includes('Do not invent content'), 'faithfulness rule rides the lead');
 });
 
+Deno.test('staged specification (owner spike 2026-09-04) → the document rides the response and the lead says convert it now', async () => {
+  const sb = new FakeSupabase();
+  sb.script('projects', 'select', projectRow());
+  sb.script('project_specifications', 'select', { data: { id: 'spec-1', phase_status: 'drafting_requirements', vision: null }, error: null });
+  sb.script('specification_requirements', 'select', { count: 0, data: null, error: null });
+  // The app's import window staged the document; origin rides alongside.
+  const text = '# Product\n\n## Requirements\n- Users can register\n- Users can log in';
+  sb.script('projects', 'select', {
+    data: { metadata: { workflowOrigin: 'import-spec', stagedSpecImport: { text, chars: text.length, stagedAt: '2026-09-04T10:00:00.000Z' } } },
+    error: null,
+  });
+  sb.script('branches', 'select', { data: { id: 'main-b' }, error: null });
+  sb.script('graph_snapshots', 'select', { data: { graph_data: { nodes: {}, artifacts: {} } }, error: null });
+  sb.script('test_cases', 'select', { count: 0, data: null, error: null });
+  sb.script('test_cases', 'select', { count: 0, data: null, error: null });
+
+  const r = await handleGetProjectStatus(sb as never, READ, { project_id: PROJECT.id });
+  assertEquals(r.success, true);
+  const data = r.data as { nextAction: string; stagedSpecification?: { text: string; chars: number; stagedAt: string | null } };
+  assert(data.nextAction.includes('SPECIFICATION DOCUMENT IS STAGED'), data.nextAction.slice(0, 160));
+  assert(data.nextAction.includes('do not ask the user to paste it again'), 'the staged lead never re-asks for the document');
+  assert(data.nextAction.includes('update_vision') && data.nextAction.includes('create_requirement'), 'names the conversion tools');
+  assert(data.nextAction.includes('Do not invent content'), 'faithfulness rule rides the staged lead too');
+  assert(!data.nextAction.includes('IMPORT AN EXISTING SPECIFICATION'), 'the bare-origin lead yields to the staged one');
+  assertEquals(data.stagedSpecification?.text, text);
+  assertEquals(data.stagedSpecification?.chars, text.length);
+  assertEquals(data.stagedSpecification?.stagedAt, '2026-09-04T10:00:00.000Z');
+});
+
+Deno.test('readStagedSpecification tolerates junk and fills chars from the text', () => {
+  assertEquals(readStagedSpecification(null), null);
+  assertEquals(readStagedSpecification({}), null);
+  assertEquals(readStagedSpecification({ stagedSpecImport: 'nope' }), null);
+  assertEquals(readStagedSpecification({ stagedSpecImport: { text: '   ' } }), null);
+  assertEquals(readStagedSpecification({ stagedSpecImport: { text: 'abc' } }), { text: 'abc', chars: 3, stagedAt: null });
+});
+
 Deno.test('spec-import origin with requirements already present → no import lead (work done)', async () => {
   const sb = new FakeSupabase();
   sb.script('projects', 'select', projectRow());
   sb.script('project_specifications', 'select', { data: { id: 'spec-1', phase_status: 'drafting_requirements', vision: 'V' }, error: null });
   sb.script('specification_requirements', 'select', { count: 4, data: null, error: null });
-  // reqCount>0 → the metadata read is SKIPPED entirely
+  // reqCount>0 → the metadata is read once, for the staged explode requests
+  // (AE.6), and the spec-import lanes never look at it
   sb.script('branches', 'select', { data: { id: 'main-b' }, error: null });
   sb.script('graph_snapshots', 'select', { data: { graph_data: { nodes: {}, artifacts: {} } }, error: null });
   sb.script('test_cases', 'select', { count: 0, data: null, error: null });
@@ -277,7 +322,7 @@ Deno.test('spec-import origin with requirements already present → no import le
   assertEquals(r.success, true);
   const next = (r.data as { nextAction: string }).nextAction;
   assert(!next.includes('IMPORT AN EXISTING SPECIFICATION'), next.slice(0, 160));
-  assertEquals(sb.callsTo('projects', 'select').length, 1, 'no second projects read once requirements exist');
+  assertEquals(sb.callsTo('projects', 'select').length, 2, 'the project row, then one metadata read (AE.6); nothing more once requirements exist');
 });
 
 // ── D4: the test-budget gauge ────────────────────────────────────────────────────────
@@ -380,4 +425,62 @@ Deno.test('stale-phase fix: storedPhaseStatus is OMITTED when the column already
   const data = r.data as { phaseStatus: string; storedPhaseStatus?: string };
   assertEquals(data.phaseStatus, 'drafting_requirements');
   assertEquals(data.storedPhaseStatus, undefined);
+});
+
+// ── 7.0: seats ride along ──────────────────────────────────────────────────
+Deno.test('list_projects (7.0): owned ∪ seats, role per row, newest first, no duplicate for a project owned and seated; a seat below Team is not listed', async () => {
+  const sb = new FakeSupabase();
+  sb.script('projects', 'select', { data: [{ id: 'p1', name: 'Mine', metadata: null, created_at: 't', updated_at: '2026-09-10' }], error: null });
+  sb.script('project_members', 'select', { data: [
+    { role: 'contributor', projects: { id: 'p2', name: 'Theirs', owner_id: 'team-owner', metadata: { description: 'shared' }, created_at: 't', updated_at: '2026-09-14' } },
+    { role: 'viewer', projects: { id: 'p1', name: 'Mine', owner_id: 'user-1', metadata: null, created_at: 't', updated_at: '2026-09-10' } },
+    // decision 1: held on an Indie owner's project, which is its owner's alone
+    { role: 'contributor', projects: { id: 'p3', name: 'Held', owner_id: 'indie-owner', metadata: null, created_at: 't', updated_at: '2026-09-20' } },
+  ], error: null });
+  sb.script('stripe_subscriptions', 'select', { data: [
+    { user_id: 'team-owner', plan_name: 'team', status: 'active', current_period_end: '2099-01-01' },
+    { user_id: 'indie-owner', plan_name: 'indie', status: 'active', current_period_end: '2099-01-01' },
+  ], error: null });
+  const r = await handleListProjects(sb as never, READ);
+  assertEquals(r.success, true);
+  const projects = (r.data as { projects: Array<{ projectId: string; role: string; description: string | null }> }).projects;
+  assertEquals(projects.map((p) => [p.projectId, p.role]), [['p2', 'contributor'], ['p1', 'owner']]);
+  assertEquals(projects[0].description, 'shared');
+  const seats = sb.callsTo('project_members', 'select')[0];
+  assert(seats.filters.some((f) => f.method === 'eq' && f.args[0] === 'user_id' && f.args[1] === 'user-1'), JSON.stringify(seats.filters));
+});
+
+// Q (owner 2026-09-22): repo import is Indie and above. A job left from a
+// paid period (or created before the gate) never points a Free agent at
+// run_repo_import; on Indie the lead is unchanged.
+function emptyProjectWithImportJob(sb: FakeSupabase, plan: string | null) {
+  sb.script('stripe_subscriptions', 'select', { data: plan ? { plan_name: plan, status: 'active' } : null, error: null });
+  sb.script('projects', 'select', projectRow());
+  sb.script('project_specifications', 'select', { data: { id: 'spec-1', phase_status: 'drafting_requirements', vision: 'V' }, error: null });
+  sb.script('specification_requirements', 'select', { count: 0, data: null, error: null });
+  sb.script('projects', 'select', { data: { metadata: {} }, error: null });
+  sb.script('branches', 'select', { data: { id: 'main-b' }, error: null });
+  sb.script('graph_snapshots', 'select', { data: { graph_data: { nodes: {}, artifacts: {} } }, error: null });
+  sb.script('test_cases', 'select', { count: 0, data: null, error: null });
+  sb.script('test_cases', 'select', { count: 0, data: null, error: null });
+  sb.script('import_jobs', 'select', { data: { id: 'job-1', status: 'pending', stage: 'skeleton', proposal_id: null }, error: null });
+}
+
+Deno.test('Q get_project_status: below Indie a pending import job is never read and the lead never names run_repo_import', async () => {
+  const sb = new FakeSupabase();
+  emptyProjectWithImportJob(sb, null);
+  const r = await handleGetProjectStatus(sb as never, READ, { project_id: PROJECT.id });
+  assertEquals(r.success, true);
+  const next = (r.data as { nextAction: string }).nextAction;
+  assert(!next.includes('run_repo_import') && !next.includes('repository import'), next.slice(0, 200));
+  assertEquals(sb.callsTo('import_jobs').length, 0, 'the job table is not read below Indie');
+});
+
+Deno.test('Q get_project_status: on Indie the pending import still leads', async () => {
+  const sb = new FakeSupabase();
+  emptyProjectWithImportJob(sb, 'indie');
+  const r = await handleGetProjectStatus(sb as never, READ, { project_id: PROJECT.id });
+  assertEquals(r.success, true);
+  const next = (r.data as { nextAction: string }).nextAction;
+  assert(next.startsWith('A repository import is waiting to be driven (stage: skeleton)'), next.slice(0, 200));
 });

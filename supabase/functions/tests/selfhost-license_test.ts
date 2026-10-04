@@ -133,7 +133,12 @@ Deno.test('deployment seam: self-hosted resolves tier from the LICENSE and never
   const sb = new FakeSupabase();
   const tier = await getEffectiveTier(sb as never, 'user-1', env);
   assertEquals(tier, 'team');
-  assertEquals(sb.calls.length, 0, 'the license is the source — stripe_subscriptions is never read');
+  assertEquals(sb.callsTo('stripe_subscriptions').length, 0, 'the license is the source — stripe_subscriptions is never read');
+  // V3 Q: the one write is the self-hosted mark the database's plan checks defer to
+  assertEquals(sb.calls.map((c) => `${c.table}.${c.op}`), ['deployment_settings.upsert']);
+  assertEquals(sb.calls[0].payload, { id: true, mode: 'self-hosted', updated_at: (sb.calls[0].payload as { updated_at: string }).updated_at });
+  await getEffectiveTier(sb as never, 'user-2', env);
+  assertEquals(sb.calls.length, 1, 'marked once per isolate, not per call');
   // Second resolve rides the per-isolate cache (deployment-wide, not per-user).
   const again = await getLicenseTier(env, NOW);
   assertEquals(again.licensee, 'Acme Corp');
@@ -149,6 +154,43 @@ Deno.test('deployment seam: hosted (flag unset) keeps reading the Stripe subscri
   const tier = await getEffectiveTier(sb as never, 'user-1', env);
   assertEquals(tier, 'team');
   assertEquals(sb.callsTo('stripe_subscriptions', 'select').length, 1);
+  assertEquals(sb.callsTo('deployment_settings').length, 0, 'hosted never marks itself self-hosted');
+});
+
+// Audit (owner 2026-09-27): the mark opens every plan check in the database
+// and is never cleared; a managed project is never marked, whatever its flag.
+Deno.test('deployment seam: a self-hosted flag on a managed Supabase project never marks the database', async () => {
+  resetLicenseTierCache();
+  const env = envOf({ NODESPEC_DEPLOYMENT: 'self-hosted', SUPABASE_URL: 'https://abcdefghijklmnop.supabase.co' });
+  const sb = new FakeSupabase();
+  const tier = await getEffectiveTier(sb as never, 'user-1', env);
+  assertEquals(tier, 'community', 'still fails closed to the licence');
+  assertEquals(sb.callsTo('deployment_settings').length, 0, 'the managed database is not marked self-hosted');
+  resetLicenseTierCache();
+  for (const url of ['http://kong:8000', 'http://127.0.0.1:54321', 'https://supabase.co.example.org', '']) {
+    resetLicenseTierCache();
+    const own = new FakeSupabase();
+    await getEffectiveTier(own as never, 'user-1', envOf({ NODESPEC_DEPLOYMENT: 'self-hosted', SUPABASE_URL: url }));
+    assertEquals(own.callsTo('deployment_settings', 'upsert').length, 1, `a self-hosted stack at ${url || 'no URL'} is marked`);
+  }
+  resetLicenseTierCache();
+});
+
+// Audit (owner 2026-09-27): the managed site sells Free, Indie and Team;
+// Enterprise and Government are licensed installs. A hosted plan never
+// resolves above Team, whatever its plan_name says; a licence still can.
+Deno.test('deployment seam: a hosted plan never resolves above Team; a licence does', async () => {
+  for (const [plan, want] of [['government', 'team'], ['Enterprise Annual', 'team'], ['team', 'team'], ['indie', 'indie'], ['free', 'community']] as const) {
+    resetLicenseTierCache();
+    const sb = new FakeSupabase();
+    sb.script('stripe_subscriptions', 'select', { data: { plan_name: plan, status: 'active' }, error: null });
+    assertEquals(await getEffectiveTier(sb as never, 'user-1', envOf({})), want, plan);
+  }
+  resetLicenseTierCache();
+  const { license, publicKeyB64 } = await makeSigned({ ...GOOD, tier: 'government', expires: '2099-12-31' });
+  const tier = await getEffectiveTier(new FakeSupabase() as never, 'user-1', envOf({ NODESPEC_DEPLOYMENT: 'self-hosted', NODESPEC_LICENSE: license, NODESPEC_LICENSE_PUBLIC_KEY: publicKeyB64 }));
+  assertEquals(tier, 'government');
+  resetLicenseTierCache();
 });
 
 Deno.test('deployment seam: self-hosted with NO license fails closed to community', async () => {
@@ -157,6 +199,7 @@ Deno.test('deployment seam: self-hosted with NO license fails closed to communit
   const sb = new FakeSupabase();
   const tier = await getEffectiveTier(sb as never, 'user-1', env);
   assertEquals(tier, 'community');
-  assertEquals(sb.calls.length, 0);
+  assertEquals(sb.callsTo('stripe_subscriptions').length, 0);
+  assertEquals(sb.callsTo('deployment_settings', 'upsert').length, 1, 'an unlicensed self-host is still self-hosted');
   resetLicenseTierCache();
 });

@@ -7,7 +7,6 @@ import type {
   ArtifactRepository,
   AIRunRepository,
   ProposalRepository,
-  CodeStructureRepository,
   TemplateRepository,
 } from '../../persistence/ports.js';
 import type { TestCaseRepository } from '../../persistence/supabase/test-case-repository.js';
@@ -23,7 +22,6 @@ export class PersistenceService {
     artifacts: ArtifactRepository;
     aiRuns: AIRunRepository;
     proposals: ProposalRepository;
-    codeStructures: CodeStructureRepository;
     testCases: TestCaseRepository;
     templates: TemplateRepository;
     specifications: any;
@@ -47,7 +45,6 @@ export class PersistenceService {
       artifacts: factory.createArtifactRepository(),
       aiRuns: factory.createAIRunRepository(),
       proposals: factory.createProposalRepository(),
-      codeStructures: factory.createCodeStructureRepository(),
       testCases: createSupabaseTestCaseRepository(supabaseClient),
       templates: factory.createTemplateRepository(),
       specifications: factory.createSpecificationRepository(),
@@ -86,10 +83,6 @@ export class PersistenceService {
     return this.repos.proposals;
   }
 
-  getCodeStructureRepository(): CodeStructureRepository {
-    return this.repos.codeStructures;
-  }
-
   getTemplateRepository(): TemplateRepository {
     return this.repos.templates;
   }
@@ -120,21 +113,6 @@ export class PersistenceService {
 
   getSupabaseClient(): SupabaseClient {
     return this.supabase;
-  }
-
-  async registerForLaunch(email: string): Promise<{ success: boolean; error?: string }> {
-    const { error } = await this.supabase
-      .from('launch_registrations')
-      .insert({ email });
-
-    if (error) {
-      if (error.code === '23505') {
-        return { success: false, error: 'This email is already registered!' };
-      }
-      return { success: false, error: error.message };
-    }
-
-    return { success: true };
   }
 
   async getGitIntegration(projectId: string): Promise<any> {

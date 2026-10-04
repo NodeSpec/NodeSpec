@@ -28,3 +28,6 @@ supabase/snippets/
 # migration chain on fresh replays; regenerate deliberately, never commit.
 supabase/migrations/*_remote_schema.sql
 vite.config.ts.timestamp-*
+
+# RI-12 bench measurement output (per-run JSON)
+scripts/bench/out/

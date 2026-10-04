@@ -285,8 +285,3 @@ Deno.test('C4 wiring: test-plan generation + parking live ONLY in get_test_plan;
     'a failed persist degrades to the pre-C4 read, never fails get_test_plan');
 });
 
-Deno.test('C4 wiring: agent-loop lane finds plans through findExistingTestArtifact and stamps requirementId', () => {
-  const src = source('../_shared/agent-loop-v4.ts');
-  assert(src.includes('findExistingTestArtifact('), 'no recomputed-path lookup left in the agent loop');
-  assert(src.includes('requirementId: requirement.requirementId'), 'new/updated plans gain the rename-proof key');
-});

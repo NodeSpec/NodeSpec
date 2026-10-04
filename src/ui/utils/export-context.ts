@@ -321,7 +321,8 @@ export interface ProjectExportSpecification {
     sectionName?: string;
     acceptanceCriteria: Array<{ text: string; met?: boolean }>;
   }>;
-  constraints: Array<{
+  /** AC: absent below Indie, where constraints do not exist. */
+  constraints?: Array<{
     type: string;
     description: string;
   }>;
@@ -489,6 +490,42 @@ export function buildProjectExport(
     artifacts,
     testSuite: tests,
   };
+}
+
+/** V3 4.5: the four counts the export modal shows beside the files: what
+ *  the architecture holds, what the specification asks, how much of it is
+ *  proven, and how many tests stand behind that. Pure. */
+/** The design's four counts on the Export board: the criteria still open,
+ *  the criteria proven, the nodes, the constraints (AC: only where the plan
+ *  carries them). "Proven" is the app's word for a criterion a test result
+ *  flipped met. */
+export function exportCounts(data: ProjectExportData): Array<{ value: string | number; label: string }> {
+  const reqs = data.specification?.requirements ?? [];
+  const criteria = reqs.flatMap((r) => r.acceptanceCriteria ?? []);
+  const met = criteria.filter((k) => k.met === true).length;
+  return [
+    { value: criteria.length - met, label: 'criteria open' },
+    { value: met, label: 'criteria proven' },
+    { value: data.meta.nodeCount, label: 'nodes' },
+    ...(data.specification?.constraints ? [{ value: data.specification.constraints.length, label: 'constraints' }] : []),
+  ];
+}
+
+/** The design's line over a previewed file: what it says about the work.
+ *  The files that carry the criteria say the proof count; the diagram says
+ *  its size; a bundle says nothing here. Pure. */
+export function exportPreviewLine(optionId: string, data: ProjectExportData): string | null {
+  const reqs = data.specification?.requirements ?? [];
+  const criteria = reqs.flatMap((r) => r.acceptanceCriteria ?? []);
+  const met = criteria.filter((k) => k.met === true).length;
+  switch (optionId) {
+    case 'spec': case 'claude': case 'agents': case 'cursor':
+      return `${met} of ${criteria.length} criteria proven`;
+    case 'mermaid':
+      return `${data.meta.nodeCount} node${data.meta.nodeCount === 1 ? '' : 's'}, ${data.meta.edgeCount} edge${data.meta.edgeCount === 1 ? '' : 's'}`;
+    default:
+      return null;
+  }
 }
 
 export function formatProjectExportAsMarkdown(data: ProjectExportData): string {

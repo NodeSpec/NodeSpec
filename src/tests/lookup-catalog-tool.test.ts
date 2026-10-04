@@ -6,63 +6,8 @@ function loadFile(relativePath: string): string {
   return readFileSync(resolve(__dirname, relativePath), 'utf-8');
 }
 
-describe('lookup_catalog Tool Definition', () => {
-  const toolExecutorSource = loadFile('../../supabase/functions/_shared/tool-executor.ts');
-
-  it('defines lookup_catalog in ARCHITECTURE_TOOLS', () => {
-    expect(toolExecutorSource).toContain("name: 'lookup_catalog'");
-  });
-
-  it('has category parameter', () => {
-    expect(toolExecutorSource).toContain("category: { type: 'string'");
-  });
-
-  it('has roleId parameter', () => {
-    expect(toolExecutorSource).toContain("roleId: { type: 'string'");
-  });
-
-  it('has technologyId parameter', () => {
-    expect(toolExecutorSource).toContain("technologyId: { type: 'string'");
-  });
-
-  it('has no required parameters (all optional)', () => {
-    expect(toolExecutorSource).toMatch(/name: 'lookup_catalog'[\s\S]*?required: \[\]/);
-  });
-
-  it('imports lookupCatalog from role-registry', () => {
-    expect(toolExecutorSource).toContain('lookupCatalog');
-    expect(toolExecutorSource).toContain('from "./role-registry.ts"');
-  });
-});
-
-describe('toolLookupCatalog Implementation', () => {
-  const toolExecutorSource = loadFile('../../supabase/functions/_shared/tool-executor.ts');
-
-  it('extracts category from args', () => {
-    expect(toolExecutorSource).toContain("args.category ? String(args.category)");
-  });
-
-  it('extracts roleId from args', () => {
-    expect(toolExecutorSource).toContain("args.roleId ? String(args.roleId)");
-  });
-
-  it('extracts technologyId from args', () => {
-    expect(toolExecutorSource).toContain("args.technologyId ? String(args.technologyId)");
-  });
-
-  it('supports legacy categoryOrRole fallback', () => {
-    expect(toolExecutorSource).toContain('args.categoryOrRole');
-  });
-
-  it('returns error when catalog is not loaded', () => {
-    expect(toolExecutorSource).toContain("error: 'Catalog not loaded'");
-  });
-
-  it('returns error when no parameters provided', () => {
-    expect(toolExecutorSource).toContain('Provide at least one of: category, roleId, or technologyId');
-  });
-});
-
+// AH.2: the in-app agent's lookup_catalog tool went with the old agent; the MCP tool
+// of the same name reads lookupCatalog below (ag12a-placement-over-mcp_test.ts runs it).
 describe('lookupCatalog Function in role-registry.ts', () => {
   const registrySource = loadFile('../../supabase/functions/_shared/role-registry.ts');
 
@@ -94,10 +39,6 @@ describe('lookupCatalog Function in role-registry.ts', () => {
   it('dispatches to lookupCategory when category provided', () => {
     expect(registrySource).toContain('if (params.category)');
     expect(registrySource).toContain('return lookupCategory(catalogs, params.category');
-  });
-
-  it('preserves backward-compatible lookupCatalogCategory', () => {
-    expect(registrySource).toContain('export function lookupCatalogCategory(');
   });
 });
 
@@ -148,12 +89,8 @@ describe('lookupRole Returns Rich Data', () => {
     expect(registrySource).toContain('Category: ${categoryLabel(role.palette_category)}');
   });
 
-  it('returns container info when applicable', () => {
-    // M1c/M2: the flat [CONTAINER] tag became containerTag(role), which distinguishes
-    // hosting containers from logical boundaries.
-    expect(registrySource).toContain('${containerTag(role)} - layer:');
-    expect(registrySource).toContain('Can contain:');
-  });
+  // AG.12c: how a role holds and what it may hold is read through the real lookup in
+  // Deno (ag12a-placement-over-mcp_test.ts), not pinned in this file's source.
 
   it('returns capability_tags', () => {
     expect(registrySource).toContain('Capabilities: ${role.capability_tags.join');
@@ -184,23 +121,8 @@ describe('lookupCategory Returns Rich Data', () => {
     expect(registrySource).toContain("Capabilities: ${row.capability_tags.join(', ')}");
   });
 
-  it('marks container roles', () => {
-    expect(registrySource).toContain('containerTag(row)');
-  });
-
   it('respects project relevance filter', () => {
     expect(registrySource).toContain('relevantRoleIds');
   });
 });
 
-describe('agent-loop-v4 lookup_catalog integration', () => {
-  const agentSource = loadFile('../../supabase/functions/_shared/agent-loop-v4.ts');
-
-  it('has lookup_catalog in TOOL_DISPLAY_NAMES', () => {
-    expect(agentSource).toContain('lookup_catalog: "Looking up catalog details..."');
-  });
-
-  it('references lookup_catalog in catalog summary prompt', () => {
-    expect(agentSource).toContain('lookup_catalog');
-  });
-});

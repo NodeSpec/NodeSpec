@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { NotificationCenter } from '../common/NotificationCenter.js';
 import { AccountPanel } from './AccountPanel.js';
-import { BranchManager } from './BranchManager.js';
+import { BranchChip } from './BranchChip.js';
 import { GitIntegrationModal } from './GitIntegrationModal.js';
 import { SkillsMenu } from './SkillsMenu.js';
 import { McpStatusIndicator } from './McpStatusIndicator.js';
@@ -18,9 +18,7 @@ import logoDark from '../../assets/darkmode_nodal.png';
 interface TopBarProps {
   branchName: string;
   /** The trunk's REAL name (may differ from 'main' after a connect rename). */
-  primaryBranchName?: string;
   hasUnsavedChanges?: boolean;
-  branches?: string[];
   onUndo?: () => void;
   onRedo?: () => void;
   canUndo?: boolean;
@@ -32,19 +30,20 @@ interface TopBarProps {
   onOpenProjects?: () => void;
   /** P1-7 C1.2: persists any unsaved canvas patches; push waits on it so the snapshot is current. */
   ensureDraftSaved?: () => Promise<boolean>;
-  onSwitchBranch?: (branchId: string, branchName: string) => void;
-  onCreateBranch?: () => void;
-  /** R3-3b: opens the merge dialog (PR default / direct secondary) — never merges directly. */
-  onMergeBranch?: () => void;
-  onDeleteBranch?: (branchId: string, branchName: string) => void;
-  availableBranches?: Array<{ id: string; name: string; patchCount: number }>;
-  /** R3-1: canvas reload after restore-from-anchor (git wins). */
-  onModelRestored?: () => void | Promise<void>;
+  availableBranches?: Array<{ id: string; name: string; isPrimary?: boolean }>;
   /** R3-3c: the ref-deleted lifecycle card's Archive action (deletes the design branch). */
   onArchiveBranch?: (branchName: string) => Promise<void>;
-  /** N6.2(c) rev 2: pending proposal count for the Changes button badge. */
+  /** The Agents button's badge: everything waiting for a decision. */
   pendingProposals?: number;
+  /** Opens the Agents panel: proposals, autonomy, repository, history. */
   onOpenChanges?: () => void;
+  /** AK.1: the MCP button's fix opens Agents, Connected. */
+  onOpenConnected?: () => void;
+  /** AE.4: opens the Team popup (who is on the project, a seat by email); drawn on a Team plan only. */
+  onOpenTeam?: () => void;
+  /** AL.3: the owner's plan lapsed below Team while people still hold
+   *  seats: the Team button stays, to remove them or hand the project over. */
+  teamBelowPlan?: boolean;
   openGitIntegration?: boolean;
   onGitIntegrationOpened?: () => void;
   /** Fired when the git panel closes — a connect may have RENAMED the trunk
@@ -166,7 +165,6 @@ function ProjectNameButton({
 
 function TopBarComponent({
   branchName,
-  primaryBranchName,
   hasUnsavedChanges = false,
   onUndo,
   onRedo,
@@ -178,15 +176,13 @@ function TopBarComponent({
   projectId,
   onOpenProjects,
   ensureDraftSaved,
-  onSwitchBranch,
-  onMergeBranch,
-  onCreateBranch,
-  onDeleteBranch,
   availableBranches = [],
-  onModelRestored,
   onArchiveBranch,
   pendingProposals = 0,
   onOpenChanges,
+  onOpenConnected,
+  onOpenTeam,
+  teamBelowPlan = false,
   openGitIntegration,
   onGitIntegrationOpened,
   onGitIntegrationClosed,
@@ -366,51 +362,6 @@ function TopBarComponent({
           </svg>
         </button>
         )}
-        {!onSwitchBranch && (
-          <div style={branchBadgeStyles}>
-            <svg style={branchIconStyles} viewBox="0 0 24 24" fill="currentColor">
-              <path d="M21 3v2h-2V3H5v2H3V3a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2zm0 18v-2h-2v2H5v-2H3v2a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2zM3 9h2v6H3V9zm16 0h2v6h-2V9zm-8-3a6 6 0 0 0-6 6 6 6 0 0 0 6 6 6 6 0 0 0 6-6 6 6 0 0 0-6-6zm0 2c2.22 0 4 1.79 4 4s-1.78 4-4 4-4-1.79-4-4 1.78-4 4-4z" />
-            </svg>
-            {branchName}
-            {hasUnsavedChanges && <span style={{ color: '#f59e0b', marginLeft: '4px' }}>●</span>}
-          </div>
-        )}
-        {branchName !== (primaryBranchName ?? 'main') && onMergeBranch && (
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            {(
-              <button
-                style={{
-                  padding: '6px 12px',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  borderRadius: '6px',
-                  border: 'none',
-                  backgroundColor: '#10b981',
-                  color: '#fff',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s',
-                  boxShadow: '0 2px 4px rgba(16, 185, 129, 0.3)',
-                }}
-                onClick={onMergeBranch}
-                title="Merge this design branch into main — opens a pull request (default) or merges directly in git"
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = '#059669';
-                  e.currentTarget.style.transform = 'translateY(-1px)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = '#10b981';
-                  e.currentTarget.style.transform = 'translateY(0)';
-                }}
-              >
-                {/* Owner ruling 2026-07-30: the ellipsis is the fix — the button
-                    OPENS the PR-or-direct chooser, it does not merge on click.
-                    The verb stays "Merge" because both dialog paths ARE merges
-                    (the PR is the review-first vehicle). */}
-                ↑ Merge to Main…
-              </button>
-            )}
-          </div>
-        )}
       </div>
 
       <div style={rightStyles}>
@@ -419,28 +370,39 @@ function TopBarComponent({
             used to exist only while changes were pending (invisible otherwise) and
             Git Integration was buried in the Branches dropdown. Amber + badge when
             changes are pending; neutral otherwise. */}
-        {onSwitchBranch && onDeleteBranch && (
-          <BranchManager
-            currentBranch={branchName}
-            availableBranches={availableBranches}
-            onSwitchBranch={onSwitchBranch}
-            onDeleteBranch={onDeleteBranch}
-            onCreateBranch={onCreateBranch}
-            gitDefaultBranch={gitDefaultBranch}
-          />
-        )}
-        <McpStatusIndicator buttonStyle={themeToggleStyles} />
+        {/* V3 1.2: one branch, one chip. Switch, create, delete and Merge to
+            Main retired with multi-branch (docs/V3_OVERHAUL_PLAN.md, 2.2). */}
+        <BranchChip
+          currentBranch={branchName}
+          availableBranches={availableBranches}
+          gitDefaultBranch={gitDefaultBranch}
+          hasUnsavedChanges={hasUnsavedChanges}
+        />
+        <McpStatusIndicator buttonStyle={themeToggleStyles} onOpenConnected={onOpenConnected} />
         <SkillsMenu buttonStyle={themeToggleStyles} />
+        {/* Owner 2026-09-20: ONE Agents surface. This button opens the side
+            panel that holds everything about the project's agents: the
+            proposals waiting for a decision, their autonomy settings, the
+            repository lane and the history. The autonomy popover that used
+            to sit here and the separate Proposals button were two panes over
+            the same thing. */}
         {onOpenChanges && (
           <button
             onClick={onOpenChanges}
             data-tour="changes"
+            data-testid="agents-button"
+            aria-label="Agents"
             title={pendingProposals > 0
-              ? `Changes — ${pendingProposals} pending proposal${pendingProposals !== 1 ? 's' : ''} to review`
-              : 'Changes — pending proposals & history'}
+              ? `Agents · ${pendingProposals} proposal${pendingProposals === 1 ? '' : 's'} waiting for a decision`
+              : 'Agents · proposals, autonomy, repository and history'}
             style={{
               ...themeToggleStyles,
               position: 'relative',
+              width: 'auto',
+              padding: '0 12px',
+              fontSize: '12px',
+              fontWeight: 600,
+              whiteSpace: 'nowrap',
               ...(pendingProposals > 0 ? {
                 backgroundColor: 'rgba(37, 99, 235, 0.08)',
                 borderColor: '#2563eb',
@@ -448,11 +410,7 @@ function TopBarComponent({
               } : {}),
             }}
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-              <path d="M3 3v5h5" />
-              <path d="M12 7v5l4 2" />
-            </svg>
+            Agents
             {pendingProposals > 0 && (
               <span style={{
                 position: 'absolute', top: '-4px', right: '-4px',
@@ -465,6 +423,22 @@ function TopBarComponent({
                 {pendingProposals > 9 ? '9+' : pendingProposals}
               </span>
             )}
+          </button>
+        )}
+        {/* AE.4 (owner 2026-09-25): the Team popup, one button beside Agents
+            on a Team plan: who is on the project, and a seat added by an
+            account's exact email. Below Team the button is not drawn, unless
+            the owner still has seats to remove or hand over to (AL.3). */}
+        {onOpenTeam && featureGate && !featureGate.loading && (featureGate.can('team_lanes') || teamBelowPlan) && (
+          <button
+            onClick={onOpenTeam}
+            data-testid="team-button"
+            data-tour="team"
+            aria-label="Team"
+            title="Team: who is on this project, and a seat by email"
+            style={{ ...themeToggleStyles, width: 'auto', padding: '0 12px', fontSize: '12px', fontWeight: 600, whiteSpace: 'nowrap' }}
+          >
+            Team
           </button>
         )}
         <button
@@ -526,7 +500,7 @@ function TopBarComponent({
             style={themeToggleStyles}
             onClick={onShowHelp}
             data-tour="help"
-            title="Help & Terminology"
+            title="Help: the walkthrough"
           >
             ?
           </button>
@@ -594,7 +568,6 @@ function TopBarComponent({
           onClose={() => { setGitIntegrationOpen(false); onGitIntegrationClosed?.(); }}
           projectId={projectId}
           currentBranch={branchName}
-          onModelRestored={onModelRestored}
           onArchiveBranch={onArchiveBranch}
           featureGate={featureGate}
           onAcceptChange={onAcceptGitChange}

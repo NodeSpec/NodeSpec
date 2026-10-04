@@ -30,7 +30,7 @@ export interface ImportJobSkeleton {
 
 export interface ImportJobView {
   id: string;
-  status: 'pending' | 'running' | 'awaiting_review' | 'completed' | 'failed' | 'cancelled';
+  status: 'pending' | 'running' | 'awaiting_review' | 'promoting' | 'completed' | 'failed' | 'cancelled';
   stage: string;
   skeleton: ImportJobSkeleton | null;
   open_questions: Array<{ kind: string; group: string; detail: string }>;
@@ -57,6 +57,10 @@ export class ImportJobService {
 
   getLatestJobForProject(_projectId: string): Promise<ImportJobView | null> {
     return Promise.resolve(null);
+  }
+
+  startChain(_jobId: string, _stage: 'skeleton' | 'promote' = 'skeleton'): Promise<{ started: boolean; owner: string; leaseHeld?: boolean }> {
+    return Promise.reject(new Error(NOT_INCLUDED));
   }
 
   drive(_jobId: string, _onProgress?: (p: ImportDriveProgress) => void): Promise<ImportJobView> {

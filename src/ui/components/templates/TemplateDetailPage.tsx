@@ -132,14 +132,12 @@ export function TemplateDetailPage() {
         .delete()
         .eq('template_id', template.id)
         .eq('user_id', user.id);
-      await supabase.rpc('decrement_template_upvote_count', { tid: template.id });
       setUpvoted(false);
       setTemplate(prev => prev ? { ...prev, upvoteCount: Math.max(((prev as ProjectTemplate & { upvoteCount?: number }).upvoteCount ?? 0) - 1, 0) } as ProjectTemplate : prev);
     } else {
       await supabase
         .from('template_upvotes')
         .insert({ template_id: template.id, user_id: user.id });
-      await supabase.rpc('increment_template_upvote_count', { tid: template.id });
       setUpvoted(true);
       setTemplate(prev => prev ? { ...prev, upvoteCount: ((prev as ProjectTemplate & { upvoteCount?: number }).upvoteCount ?? 0) + 1 } as ProjectTemplate : prev);
     }

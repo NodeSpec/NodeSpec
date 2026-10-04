@@ -15,13 +15,6 @@ export { ContainerNode } from './ContainerNode.js';
 export { EnhancedDatabaseNode } from './EnhancedDatabaseNode.js';
 export { EventBusNode } from './EventBusNode.js';
 export { IconNode } from './IconNode.js';
-export {
-  ClassNode,
-  FunctionNode,
-  MethodNode,
-  InterfaceNode,
-  ModuleNode,
-} from './CodeEntityNodes.js';
 export { RequirementNode } from './RequirementNode.js';
 export { AddSectionButtonNode } from './AddSectionButtonNode.js';
 export { ContainerBadge } from './ContainerBadge.js';

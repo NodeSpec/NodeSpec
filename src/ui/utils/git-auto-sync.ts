@@ -40,6 +40,7 @@ export interface AutoSyncDecision {
   reason:
     | 'eligible'
     | 'not-pending'
+    | 'proposal-pending'
     | 'ineligible-source'
     | 'other-branch'
     | 'model-changed'
@@ -61,10 +62,15 @@ export function isAutoSyncEligible(
   artifactsById: Record<string, AutoSyncArtifactView | undefined>,
 ): AutoSyncDecision {
   if (change.status !== 'pending') return { eligible: false, reason: 'not-pending' };
+  // AD.1: an agent's proposal answers this card; it resolves when a person
+  // accepts that proposal, never here.
+  if (change.reconcileProposalId) return { eligible: false, reason: 'proposal-pending' };
   if (!ELIGIBLE_SOURCES.has(change.source)) return { eligible: false, reason: 'ineligible-source' };
   // The accept lane patches the OPEN canvas; a card for another branch waits
   // until that branch is open (or a human/AI resolves it explicitly).
-  if ((change.branchName ?? 'main') !== currentBranchName) {
+  // AD.4 (D15): GitService names a legacy card after the primary branch; one
+  // that names none belongs to no branch.
+  if (!change.branchName || change.branchName !== currentBranchName) {
     return { eligible: false, reason: 'other-branch' };
   }
   if (change.modelChanged) return { eligible: false, reason: 'model-changed' };
@@ -132,4 +138,40 @@ export function isAutoSyncEligible(
   }
 
   return { eligible: true, reason: 'eligible' };
+}
+
+/** AD.1 (D6): the ticks on a card nobody applied. Mirrors
+ *  `supabase/functions/_shared/card-resolve.ts` (`unappliedTicks`): a
+ *  criterion tick counts until `criteriaApplied`, a task tick until
+ *  `ticksApplied`, and an untick never counts. */
+export function unappliedTickCounts(change: GitChangeEvent): { criteria: number; tasks: number } {
+  const criteria = change.criteriaApplied
+    ? 0
+    : (change.criterionDeltas?.deltas ?? []).filter((d) => d.direction === 'tick').length;
+  const tasks = change.ticksApplied
+    ? 0
+    : (change.taskDeltas?.deltas ?? []).filter((d) => d.direction === 'tick').length;
+  return { criteria, tasks };
+}
+
+/** "2 criterion ticks and 1 task tick". */
+export function ticksPhrase(t: { criteria: number; tasks: number }): string {
+  const parts: string[] = [];
+  if (t.criteria > 0) parts.push(`${t.criteria} criterion tick${t.criteria === 1 ? '' : 's'}`);
+  if (t.tasks > 0) parts.push(`${t.tasks} task tick${t.tasks === 1 ? '' : 's'}`);
+  return parts.join(' and ');
+}
+
+/** AD.1 (I7): what a card asks beyond its bound files. Accepting every file
+ *  resolves the card only when this is empty: ticks nobody applied, or a
+ *  model or requirements change nobody loaded (and the project does not
+ *  already match), keep it open for the action that answers them. */
+export function cardQuestionsBeyondFiles(change: GitChangeEvent): Array<'ticks' | 'model' | 'spec'> {
+  const questions: Array<'ticks' | 'model' | 'spec'> = [];
+  const ticks = unappliedTickCounts(change);
+  if (ticks.criteria + ticks.tasks > 0) questions.push('ticks');
+  const loaded = new Set(change.restoredPlanes ?? []);
+  if (change.modelChanged && !loaded.has('model') && !change.modelDiff?.identical) questions.push('model');
+  if (change.specChanged && !loaded.has('spec') && !change.specDiff?.identical) questions.push('spec');
+  return questions;
 }

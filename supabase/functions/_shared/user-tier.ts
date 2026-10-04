@@ -5,7 +5,7 @@
   The client is a structural parameter (no jsr import) — pure module, offline-testable.
 */
 import type { PlanTier } from './tiers.ts';
-import { canonicalizeTier } from './tiers.ts';
+import { canonicalizeTier, hostedTier } from './tiers.ts';
 
 interface SubscriptionQueryClient {
   from(table: string): {
@@ -36,5 +36,7 @@ export async function getUserTier(supabase: SubscriptionQueryClient, userId: str
   // One shared resolver for canonical AND legacy plan_name values — the old
   // hand-rolled substring ladder here had drifted from the client's
   // exact-equality version; canonicalizeTier is now the single behavior.
-  return canonicalizeTier(data?.plan_name) ?? 'community';
+  // Audit (owner 2026-09-27): the managed site sells Free, Indie and Team;
+  // a hosted plan never resolves above Team.
+  return hostedTier(canonicalizeTier(data?.plan_name) ?? 'community');
 }

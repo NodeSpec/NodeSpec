@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 import {
   formatProvenance,
@@ -12,11 +12,11 @@ import {
 import type { WorkBoardRow } from '../ui/components/board/useWorkBoardData.js';
 import type { WorkStatus } from '../ui/components/board/derive-status.js';
 
-// D3 (docs/WORK_LOOP_PLAN.md, owner refinement 2026-08-21): the Work Board is
-// a SUB-VIEW of the Specification view — the board's rows ARE requirements,
-// so tracking lives one toggle from authoring. The table renders the rows
-// useWorkBoardData shapes (the identical assembly BOARD.md projects) and
-// never re-derives a status.
+// D3 (docs/WORK_LOOP_PLAN.md) built the Work Board as a sub-view of the
+// Specification view. V3 ruling R4 retired BOTH views; what these pins now
+// protect is the data layer that outlived them — useWorkBoardData's D1
+// assembly (the identical shape BOARD.md projects), derive-status, and the
+// pure board-view-utils Trace (P5) and Priority (P6) reuse.
 
 function row(status: WorkStatus, overrides: Partial<{ id: string; name: string; nodeLabel: string; tier: 'smoke' | 'deep' }> = {}): WorkBoardRow {
   return {
@@ -75,83 +75,38 @@ describe('board-view-utils', () => {
   });
 });
 
-describe('D3 wiring contracts', () => {
-  const specView = readFileSync(resolve(__dirname, '../ui/components/layout/SpecificationMarkdownView.tsx'), 'utf-8');
-  const board = readFileSync(resolve(__dirname, '../ui/components/board/WorkBoardView.tsx'), 'utf-8');
-
-  it('the Specification view hosts the board as a sub-view toggle', () => {
-    expect(specView).toContain("useState<'spec' | 'board'>");
-    expect(specView).toContain('<WorkBoardView');
-    expect(specView).toContain('Work Board');
-    // The board reads the same realtime spec the view already holds.
-    expect(specView).toContain('specificationId={specRealtimeData.specification?.id ?? null}');
+// ── V3 P3 (R4): the Work Board VIEW retired with the specification view —
+// these pins now guard the surviving DATA LAYER (useWorkBoardData,
+// board-view-utils, board-alignment, board-generator), which Trace (P5)
+// and Priority (P6) build on and BOARD.md still projects. ──────────────────
+describe('work-board data layer survives the view retirement (R4)', () => {
+  it('the retired views are gone; the assembly they rendered is not', () => {
+    expect(existsSync(resolve(__dirname, '../ui/components/board/WorkBoardView.tsx'))).toBe(false);
+    expect(existsSync(resolve(__dirname, '../ui/components/layout/SpecificationMarkdownView.tsx'))).toBe(false);
+    expect(existsSync(resolve(__dirname, '../ui/components/board/useWorkBoardData.ts'))).toBe(true);
+    expect(existsSync(resolve(__dirname, '../ui/components/board/board-view-utils.ts'))).toBe(true);
+    expect(existsSync(resolve(__dirname, '../ui/components/board/derive-status.ts'))).toBe(true);
   });
 
-  it('the board renders the D1 assembly verbatim — no local status derivation', () => {
-    expect(board).toContain('useWorkBoardData({ projectId, specificationId, graph })');
-    expect(board).not.toContain('deriveWorkStatus(');
-    expect(board).toContain('row.status.driver');
-    expect(board).toContain('formatProvenance');
-  });
-
-  it('criteria read LATERALLY: the row renders the SAME annotation text BOARD.md prints (one function)', () => {
-    expect(board).toContain("from '../../../../supabase/functions/_shared/board-alignment.js'");
-    expect(board).toContain('row.alignment.byCriterion.get(ac.text)');
-    expect(board).toContain('formatCriterionAnnotation(lanes)');
-    // Owner refinement 2026-08-22: the expansion is ONE aligned table —
-    // Criterion | Architecture | Tasks | Tests — replacing stacked note
-    // blocks; unclaimed work/evidence lands on a Requirement-wide row.
-    expect(board).toContain("ith('Criterion')");
-    expect(board).toContain("ith('Architecture'");
-    expect(board).toContain("ith('Tests'");
-    expect(board).toContain('Requirement-wide');
-    expect(board).toContain('row.alignment.generalTasks.map');
+  it('the D1 assembly keeps the lateral criterion alignment (one function with BOARD.md)', () => {
     const hook = readFileSync(resolve(__dirname, '../ui/components/board/useWorkBoardData.ts'), 'utf-8');
     expect(hook).toContain('alignCriterionLanes({');
     expect(hook).toContain('testId: ac.testId');
-  });
-
-  it('the row expansion carries the third lane — read-only test cases + the plan path (BOARD.md parity)', () => {
-    expect(board).toContain('row.alignment.otherTests.map');
-    expect(board).toContain('row.planPath');
-    expect(board).toContain('Plan exists — no results reported yet.');
-    // Read-only: the view carries no test write path of any kind.
-    expect(board).not.toContain("from('test_cases')");
-    expect(board).not.toMatch(/update\(|upsert\(|insert\(/);
-    const hook = readFileSync(resolve(__dirname, '../ui/components/board/useWorkBoardData.ts'), 'utf-8');
     expect(hook).toContain('findTestPlanArtifact');
     expect(hook).toContain("select('id, requirement_id, test_id, name, status, stale')");
   });
-
-  it('per-section collapse and the derived-status facet bar are present', () => {
-    expect(board).toContain('setCollapsed');
-    expect(board).toContain('STATUS_ORDER.map');
-    expect(board).toContain('filterBoardRows(rows, filters)');
-  });
-
-  it('D4: the Tests cell carries the sprawl gauge — the SAME assessTestBudget the MCP surfaces flag with', () => {
-    expect(board).toContain('assessTestBudget({ criteriaTotal: k.criteriaTotal, testsTotal: k.testsTotal })');
-    expect(board).toContain('formatTestBudgetNudge(budget)');
-    expect(board).toContain('sprawl');
-  });
 });
 
-// ── Owner bug 2026-09-01: long boards must scroll, not clip ──────────────────
-describe('board scroll chain', () => {
-  it('every flex link between GraphEditor and the board scroll region can shrink (min-height: 0)', () => {
-    // A flex item's min-height is AUTO — one link without minHeight: 0 lets
-    // tall board content inflate the chain past the overflow-hidden ancestor:
-    // clipped rows, no scrollbar (headless-repro-proven: 4322px unscrollable
-    // without the GraphEditor link, 634px scrollable with it). Monaco and
-    // ReactFlow have no intrinsic height, so only the board exposes a break.
-    const board = readFileSync(resolve(__dirname, '../ui/components/board/WorkBoardView.tsx'), 'utf-8');
-    expect(board).toContain("flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column'");
-    expect(board).toContain("flex: 1, overflowY: 'auto'");
+// ── Owner bug 2026-09-01: tall content must scroll, not clip ────────────────
+describe('scroll chain', () => {
+  it('the GraphEditor flex link can shrink (min-height: 0)', () => {
+    // A flex item's min-height is AUTO — without minHeight: 0 tall intrinsic
+    // content inflates the chain past the overflow-hidden ancestor: clipped
+    // rows, no scrollbar (headless-repro-proven on the old board). The V3
+    // ideation panes scroll through the same link.
     const editor = readFileSync(resolve(__dirname, '../ui/components/GraphEditor.tsx'), 'utf-8');
     const wrapper = editor.slice(editor.indexOf("filter: isRefreshing ? 'blur(2px)' : 'none'") - 900);
     expect(wrapper.slice(0, 900)).toContain('minHeight: 0');
-    const spec = readFileSync(resolve(__dirname, '../ui/components/layout/SpecificationMarkdownView.tsx'), 'utf-8');
-    expect(spec).toContain('minHeight: 0');
   });
 });
 
@@ -166,8 +121,6 @@ describe('evidence-derived task completion', () => {
     expect(hook).toContain('done: t.done || t.evidenceDone,');
     // …and the raw tick state is never overwritten (derivation is display-only).
     expect(hook).toContain("done: state?.done ?? docTask.checked");
-    const view = readFileSync(resolve(__dirname, '../ui/components/board/WorkBoardView.tsx'), 'utf-8');
-    expect(view).toContain('proven by criterion evidence — no tick recorded');
   });
 
   it('the server projection keeps the tick surface raw while counts/annotations derive', () => {

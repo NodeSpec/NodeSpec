@@ -10,7 +10,9 @@
 
 /** Resolve the project's primary (trunk) branch row. Prefers the is_primary
  *  flag; falls back to the legacy naming convention so pre-migration rows
- *  (and fixtures that insert bare 'main' rows) keep resolving. */
+ *  (and fixtures that insert bare 'main' rows) keep resolving. AD.4: templates
+ *  created their row without the flag until 2026-09-25; migration
+ *  20260925120000 flags those, and this fallback stays for rows it cannot. */
 export async function getPrimaryBranch(
   supabase: any,
   projectId: string,

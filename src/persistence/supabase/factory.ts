@@ -7,7 +7,6 @@ import { createSupabasePatchRepository } from './patch-repository.js';
 import { createSupabaseArtifactRepository } from './artifact-repository.js';
 import { createSupabaseAIRunRepository } from './ai-run-repository.js';
 import { createSupabaseProposalRepository } from './proposal-repository.js';
-import { createCodeStructureRepository } from './code-structure-repository.js';
 import { createSupabaseSpecificationRepository } from './specification-repository.js';
 import { createSupabaseRequirementsRepository } from './requirements-repository.js';
 import { createSupabaseMappingsRepository } from './mappings-repository.js';
@@ -24,7 +23,6 @@ export function createSupabaseRepositoryFactory(client: SupabaseClient): Reposit
     createArtifactRepository: () => createSupabaseArtifactRepository(client),
     createAIRunRepository: () => createSupabaseAIRunRepository(client),
     createProposalRepository: () => createSupabaseProposalRepository(client),
-    createCodeStructureRepository: () => createCodeStructureRepository(client),
     createTemplateRepository: () => createSupabaseTemplateRepository(client),
     createSpecificationRepository: () => createSupabaseSpecificationRepository(client),
     createRequirementsRepository: () => createSupabaseRequirementsRepository(client),

@@ -14,8 +14,10 @@ export interface AcceptanceCriterionRecord {
   provenance?: { source: string; commitSha?: string; actor?: string; at: string };
   evidenceStale?: { at: string; commitSha?: string; reason: string };
   /** C4/WS4: how this criterion is verified. 'manual' marks criteria the test
-   *  lane deliberately skips — read-only jsonb passenger, no UI writer yet. */
-  verification?: string;
+   *  lane deliberately skips — read-only jsonb passenger, no UI writer yet.
+   *  V3 task 0.9: narrowed to the union the wire validator admits, matching
+   *  the now-declared field on core's AcceptanceCriterionSchema. */
+  verification?: 'automated' | 'manual';
 }
 
 export interface Requirement {
@@ -29,6 +31,8 @@ export interface Requirement {
   sectionId: string | null;
   source: 'manual' | 'ai-generated' | 'imported';
   locked: boolean;
+  /** 9.8 (v3y): the explicit archive — a human act. */
+  archivedAt?: string | null;
   /** R6 (Discovered #7 adjacent): the DB column existed since 20260126 but
    *  neither mapper carried it — reads silently dropped it. */
   confirmed?: boolean;
@@ -62,6 +66,8 @@ export interface UpdateRequirementInput {
   category?: Requirement['category'];
   status?: Requirement['status'];
   locked?: boolean;
+  /** 9.8: the explicit archive — true sets archived_at, false clears it. */
+  archived?: boolean;
   sectionId?: string | null;
   acceptanceCriteria?: Requirement['acceptanceCriteria'];
   architectureTrace?: string[];
@@ -91,6 +97,7 @@ function mapDbToRequirement(row: any): Requirement {
     sectionId: row.section_id || null,
     source: row.source || 'manual',
     locked: row.locked ?? false,
+    archivedAt: row.archived_at ?? null,
     confirmed: row.confirmed ?? false,
     acceptanceCriteria: row.acceptance_criteria || [],
     architectureTrace: row.architecture_trace || [],
@@ -376,6 +383,8 @@ export function createSupabaseRequirementsRepository(
         if (input.status !== undefined) updates.status = input.status;
         if (input.acceptanceCriteria !== undefined) updates.acceptance_criteria = input.acceptanceCriteria;
         if (input.locked !== undefined) updates.locked = input.locked;
+        // 9.8 (v3y): the explicit archive is the only archive the app writes.
+        if (input.archived !== undefined) updates.archived_at = input.archived ? new Date().toISOString() : null;
         if (input.sectionId !== undefined) updates.section_id = input.sectionId;
         if (input.architectureTrace !== undefined) updates.architecture_trace = input.architectureTrace;
         if (input.metadata !== undefined) updates.metadata = input.metadata;

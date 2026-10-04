@@ -225,7 +225,7 @@ export function SkillsMenu({ buttonStyle }: { buttonStyle: React.CSSProperties }
           role="menu"
           style={{
             position: 'absolute', top: 'calc(100% + 8px)', right: 0,
-            width: '320px', maxHeight: '420px', overflowY: 'auto',
+            width: '320px', maxWidth: 'calc(100vw - 32px)', maxHeight: 'min(420px, calc(100vh - 80px))', overflowY: 'auto',
             backgroundColor: c.surface, border: `1px solid ${c.border}`,
             borderRadius: '10px', boxShadow: '0 10px 30px rgba(0,0,0,0.18)',
             zIndex: 1000, padding: '8px',

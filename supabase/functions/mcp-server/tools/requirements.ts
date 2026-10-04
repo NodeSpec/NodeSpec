@@ -6,11 +6,32 @@
 // requirements-ish tool but is assembly-heavy — it stays in index.ts for the later heavy
 // chunk.
 import type { SupabaseClient } from "jsr:@supabase/supabase-js@2";
+import { NO_ORIGIN_NOTE } from "../../_shared/chain.ts";
 import type { AuthResult, MCPResponse } from "../shared.ts";
 import { checkScope, resolveProjectByName, UUID_RE } from "../shared.ts";
+import { getProjectTier, serverEdition } from "../../_shared/deployment.ts";
+import { requireFeature } from "../../_shared/feature-rules.ts";
+import { normalizeMark } from "../../_shared/classification.ts";
+
+/** 7.3: a mark is Government, refused by name below it; the syntax is the columns' CHECK.
+ *  Audit (owner 2026-09-27): and only in the Government build. */
+async function markInput(supabase: SupabaseClient, auth: AuthResult, projectId: string, role: string, raw: unknown, tool: string): Promise<{ mark: string | null } | { error: MCPResponse }> {
+  const n = normalizeMark(raw);
+  if ('error' in n) return { error: { success: false, error: n.error } };
+  // Decision 1: classification is the project's plan (its owner's).
+  const tier = await getProjectTier(supabase, projectId, auth.userId, { role });
+  const gate = requireFeature(tier, 'classification', { surface: `Classification marks (mark on ${tool})`, seat: role !== 'owner', edition: serverEdition() });
+  if (!gate.ok) return { error: { success: false, error: gate.error } };
+  return { mark: n.mark };
+}
 // R6: cross-bucket import (same precedent as git.ts → proposals.ts) — lineage
 // recorded at creation rides the relations bucket's resolver.
 import { createRelationsForNewRequirement } from "./relations.ts";
+// v3u: list_requirements serves each criterion WITH its v3l identity — the
+// id checkout_task (level criterion) and apply_criteria_ops selectors take.
+// Rows drafted before v3l store no id; theirs derives (h + FNV-1a of the
+// normalized text), so the served id always resolves server-side.
+import { criterionIdOf } from "../../_shared/criterion-identity.ts";
 import { getPrimaryBranch } from "../../_shared/primary-branch.ts";
 
 // Owner bench 2026-07-29 (requirements pushed over MCP, UI showed only one): this
@@ -55,16 +76,24 @@ export async function nextRequirementId(supabase: SupabaseClient, specId: string
 }
 
 // Accepts either the row uuid or the human-readable requirement_id ("REQ-001").
+// v3x (doctrine 6, owner 2026-09-16): ONE refusal sentence for every lock,
+// the same one the database raises (public.requirement_lock_message), so the
+// app, the tools and the bench read the same door. Unlock is a human act in
+// the app, on the user's own session; no tool unlocks.
+export function lockedRefusal(requirementRef: string): string {
+  return `${requirementRef} is locked. Unlock it in the app (the lock toggle on its rail under Work), then retry. No tool unlocks.`;
+}
+
 // C4: exported for test-results.ts (report_test_results).
 export async function resolveRequirementRow(
   supabase: SupabaseClient,
   specificationId: string,
   requirementRef: string,
-): Promise<{ id: string; requirement_id: string; name: string; locked: boolean; acceptance_criteria?: unknown } | null> {
+): Promise<{ id: string; requirement_id: string; name: string; locked: boolean; acceptance_criteria?: unknown; updated_at?: string | null } | null> {
   const column = UUID_RE.test(requirementRef) ? 'id' : 'requirement_id';
   const { data } = await supabase
     .from('specification_requirements')
-    .select('id, requirement_id, name, locked, acceptance_criteria')
+    .select('id, requirement_id, name, locked, acceptance_criteria, updated_at')
     .eq('specification_id', specificationId)
     .eq(column, requirementRef)
     .maybeSingle();
@@ -157,6 +186,8 @@ export async function handleCreateRequirement(
     /** R6: record lineage AT creation (source 'ai'); unresolvable targets are
      *  reported, never fatal. */
     relations?: Array<{ to: string; type: string; notes?: string }>;
+    /** 7.3 (Government): a classification mark such as 'CUI' or 'CUI//SP-PRVCY'. */
+    mark?: string | null;
   }
 ): Promise<MCPResponse> {
   if (!checkScope(auth, 'write')) {
@@ -216,6 +247,14 @@ export async function handleCreateRequirement(
     specId = (converged?.id as string) ?? (newSpec.id as string);
   }
 
+  // 7.3: the mark rides in at creation (Government; refused by name below it).
+  let mark: string | null = null;
+  if (args.mark !== undefined) {
+    const m = await markInput(supabase, auth, projectId, resolved.project.role, args.mark, 'create_requirement');
+    if ('error' in m) return m.error;
+    mark = m.mark;
+  }
+
   const explicitId = (args.requirement_id || '').trim();
   if (explicitId) {
     const clash = await resolveRequirementRow(supabase, specId, explicitId);
@@ -263,6 +302,7 @@ export async function handleCreateRequirement(
         source: 'manual',
         locked: false,
         ...(section ? { section_id: section.id } : {}),
+        ...(mark ? { mark } : {}),
       })
       .select('id, requirement_id, name, category, status')
       .single();
@@ -298,8 +338,32 @@ export async function handleCreateRequirement(
       ...(section ? { section: section.name } : {}),
       ...(relationsCreated.length > 0 ? { relationsCreated } : {}),
       ...(relationsFailed.length > 0 ? { relationsFailed } : {}),
+      // AA.1: a requirement written directly has no outcome behind it yet.
+      originGap: NO_ORIGIN_NOTE,
     },
   };
+}
+
+/** The new criteria list over the stored one: an exact-text match carries
+ *  the prior entry's evidence and lane state forward (met, testId,
+ *  provenance, verification); only new text starts unmet. 'manual' sets the
+ *  lane, 'automated' clears it (absent is the stored default). */
+export function carryCriteriaForward(list: Array<{ text: string; verification?: 'automated' | 'manual' }>, stored: unknown): Array<Record<string, unknown>> {
+  const existing = Array.isArray(stored) ? (stored as Array<Record<string, unknown>>) : [];
+  const byText = new Map<string, Record<string, unknown>>();
+  for (const c of existing) {
+    if (c && typeof c.text === 'string' && !byText.has(c.text)) byText.set(c.text, c);
+  }
+  return list.map((c) => {
+    const prior = byText.get(c.text);
+    const base: Record<string, unknown> = prior ? { ...prior, text: c.text } : { text: c.text, met: false };
+    if (c.verification === 'manual') return { ...base, verification: 'manual' };
+    if (c.verification === 'automated') {
+      const { verification: _cleared, ...rest } = base;
+      return rest;
+    }
+    return base;
+  });
 }
 
 export async function handleUpdateRequirement(
@@ -311,11 +375,17 @@ export async function handleUpdateRequirement(
     name?: string;
     description?: string;
     category?: string;
+    /** LEGACY: the stored status is read-only in the app (9.8); the derived
+     *  ladder is the status. Accepted for old integrations. */
     status?: string;
     acceptance_criteria?: CriterionInput[];
+    /** 9.8 (v3y): the explicit archive — true sets archived_at, false clears it. */
+    archived?: boolean;
     /** Section NAME to move the requirement to (resolved case-insensitively,
      *  created when absent); null clears the section. */
     section?: string | null;
+    /** 7.3 (Government): a classification mark; null clears it. */
+    mark?: string | null;
   }
 ): Promise<MCPResponse> {
   if (!checkScope(auth, 'write')) {
@@ -330,15 +400,21 @@ export async function handleUpdateRequirement(
     return { success: false, error: 'No specification found for this project.' };
   }
 
-  const requirement = await resolveRequirementRow(supabase, spec.id, args.requirement_id);
+  let requirement = await resolveRequirementRow(supabase, spec.id, args.requirement_id);
   if (!requirement) {
     return { success: false, error: `Requirement not found: ${args.requirement_id}` };
   }
   if (requirement.locked) {
-    return { success: false, error: `Requirement ${requirement.requirement_id} is locked. Unlock it first with set_requirement_lock.` };
+    return { success: false, error: lockedRefusal(requirement.requirement_id) };
   }
 
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  // 7.3: a mark change is Government; null clears the mark.
+  if (args.mark !== undefined) {
+    const m = await markInput(supabase, auth, resolved.project.id, resolved.project.role, args.mark, 'update_requirement');
+    if ('error' in m) return m.error;
+    updates.mark = m.mark;
+  }
   if (args.name !== undefined) updates.name = args.name;
   if (args.description !== undefined) updates.description = args.description;
   if (args.category !== undefined) {
@@ -355,6 +431,13 @@ export async function handleUpdateRequirement(
     }
     updates.status = args.status;
   }
+  // 9.8 (v3y): the human archive act. Done stays derived; only the archive is written.
+  if (args.archived !== undefined) {
+    if (typeof args.archived !== 'boolean') {
+      return { success: false, error: 'archived must be a boolean.' };
+    }
+    updates.archived_at = args.archived ? new Date().toISOString() : null;
+  }
   let movedToSection: string | null = null;
   if (args.section !== undefined) {
     if (args.section === null) {
@@ -368,6 +451,7 @@ export async function handleUpdateRequirement(
       movedToSection = resolvedSection.name;
     }
   }
+  let parsedList: Array<{ text: string; verification?: 'automated' | 'manual' }> | null = null;
   if (args.acceptance_criteria !== undefined) {
     // Replacing the criteria list must not erase completion truth: `met`/`testId`/
     // `provenance`/`verification` are evidence + lane state (flipped by test results,
@@ -380,35 +464,44 @@ export async function handleUpdateRequirement(
     if ('error' in parsedCriteria) {
       return { success: false, error: parsedCriteria.error };
     }
-    const existing = Array.isArray(requirement.acceptance_criteria)
-      ? (requirement.acceptance_criteria as Array<Record<string, unknown>>)
-      : [];
-    const byText = new Map<string, Record<string, unknown>>();
-    for (const c of existing) {
-      if (c && typeof c.text === 'string' && !byText.has(c.text)) byText.set(c.text, c);
-    }
-    updates.acceptance_criteria = parsedCriteria.criteria.map((c) => {
-      const prior = byText.get(c.text);
-      const base = prior ? { ...prior, text: c.text } : { text: c.text, met: false };
-      if (c.verification === 'manual') return { ...base, verification: 'manual' };
-      if (c.verification === 'automated') {
-        const { verification: _cleared, ...rest } = base;
-        return rest;
-      }
-      return base;
-    });
+    parsedList = parsedCriteria.criteria;
+    updates.acceptance_criteria = carryCriteriaForward(parsedList, requirement.acceptance_criteria);
   }
 
   if (Object.keys(updates).length === 1) {
     return { success: false, error: 'No fields to update. Provide at least one of: name, description, category, status, acceptance_criteria, section.' };
   }
 
-  const { error: updateError } = await supabase
-    .from('specification_requirements')
-    .update(updates)
-    .eq('id', requirement.id);
-  if (updateError) {
-    return { success: false, error: `Failed to update requirement: ${updateError.message}` };
+  if (!parsedList) {
+    const { error: updateError } = await supabase
+      .from('specification_requirements')
+      .update(updates)
+      .eq('id', requirement.id);
+    if (updateError) {
+      return { success: false, error: `Failed to update requirement: ${updateError.message}` };
+    }
+  } else {
+    // AL.10 (owner 2026-10-01): the criteria are one list, so the write lands
+    // only on the row as it was read. A test result, a binding or a tick that
+    // landed in between moved it: read it again, carry that evidence forward
+    // and write once more. Three tries, then refuse; never write over it.
+    for (let attempt = 1; ; attempt++) {
+      const write = supabase.from('specification_requirements').update(updates).eq('id', requirement.id);
+      const guarded = requirement.updated_at ? write.eq('updated_at', requirement.updated_at) : write.is('updated_at', null);
+      const { data: wrote, error: updateError } = await guarded.select('id');
+      if (updateError) {
+        return { success: false, error: `Failed to update requirement: ${updateError.message}` };
+      }
+      if (!(Array.isArray(wrote) && wrote.length === 0)) break;
+      if (attempt === 3) {
+        return { success: false, error: `${requirement.requirement_id} kept changing while this was written (test results or ticks landing on it); nothing was changed. Read it again with list_requirements and retry.` };
+      }
+      const again = await resolveRequirementRow(supabase, spec.id, requirement.id);
+      if (!again) return { success: false, error: `Requirement not found: ${args.requirement_id}` };
+      if (again.locked) return { success: false, error: lockedRefusal(again.requirement_id) };
+      requirement = again;
+      updates.acceptance_criteria = carryCriteriaForward(parsedList, requirement.acceptance_criteria);
+    }
   }
 
   return {
@@ -443,7 +536,7 @@ export async function handleDeleteRequirement(
     return { success: false, error: `Requirement not found: ${args.requirement_id}` };
   }
   if (requirement.locked) {
-    return { success: false, error: `Requirement ${requirement.requirement_id} is locked. Unlock it first with set_requirement_lock.` };
+    return { success: false, error: lockedRefusal(requirement.requirement_id) };
   }
 
   // Mirror the app's delete semantics: refuse when architecture mappings
@@ -507,52 +600,6 @@ export async function handleDeleteRequirement(
       name: requirement.name,
       deletedMappings: mappingCount ?? 0,
       deletedTestCases: evidenceCount ?? 0,
-    },
-  };
-}
-
-export async function handleSetRequirementLock(
-  supabase: SupabaseClient,
-  auth: AuthResult,
-  args: { project_id: string; requirement_id: string; locked: boolean }
-): Promise<MCPResponse> {
-  if (!checkScope(auth, 'write')) {
-    return { success: false, error: 'Insufficient permissions: write scope required' };
-  }
-
-  const resolved = await resolveProjectByName(supabase, auth.userId, args.project_id);
-  if ('error' in resolved) return resolved.error;
-
-  const spec = await resolveSpecForProject(supabase, resolved.project.id);
-  if (!spec) {
-    return { success: false, error: 'No specification found for this project.' };
-  }
-
-  const requirement = await resolveRequirementRow(supabase, spec.id, args.requirement_id);
-  if (!requirement) {
-    return { success: false, error: `Requirement not found: ${args.requirement_id}` };
-  }
-
-  if (typeof args.locked !== 'boolean') {
-    return { success: false, error: 'locked must be a boolean.' };
-  }
-
-  const { error: updateError } = await supabase
-    .from('specification_requirements')
-    .update({ locked: args.locked, updated_at: new Date().toISOString() })
-    .eq('id', requirement.id);
-  if (updateError) {
-    return { success: false, error: `Failed to ${args.locked ? 'lock' : 'unlock'} requirement: ${updateError.message}` };
-  }
-
-  return {
-    success: true,
-    data: {
-      requirementId: requirement.requirement_id,
-      locked: args.locked,
-      message: args.locked
-        ? `Requirement ${requirement.requirement_id} is now locked; update_requirement and delete_requirement will refuse it until unlocked.`
-        : `Requirement ${requirement.requirement_id} is now unlocked and can be modified.`,
     },
   };
 }
@@ -665,7 +712,7 @@ export async function handleListRequirements(
 
   let reqQuery = supabase
     .from('specification_requirements')
-    .select('id, requirement_id, name, description, category, status, acceptance_criteria, locked, section_id, architecture_trace, confirmed, created_at, updated_at')
+    .select('id, requirement_id, name, description, category, status, acceptance_criteria, locked, section_id, architecture_trace, confirmed, mark, created_at, updated_at, archived_at')
     .eq('specification_id', spec.id)
     .order('requirement_id'); // stable pre-sort; the natural sort below is authoritative
 
@@ -753,7 +800,65 @@ export async function handleListRequirements(
     const nodeIds = mappedNodesByRowId.get(r.id);
     if (nodeIds?.length) mappingsByReqId[r.requirement_id] = nodeIds;
   }
+  // V3 (task 2.5): the lighter "in play" marker — an agent holds a TASK on
+  // one of this requirement's mapped nodes right now. Derived at read time
+  // from active task-level leases (lease -> task_items.node_id -> mapping),
+  // never stored twice (pinned semantics). Advisory display state only.
+  const inPlayByNode = new Map<string, Set<string>>();
+  {
+    const { data: activeLeases } = await supabase
+      .from('agent_checkouts')
+      .select('task_item_id, holder_label')
+      .eq('project_id', projectId)
+      .eq('level', 'task')
+      .is('released_at', null);
+    const leases = (activeLeases ?? []) as Array<{ task_item_id: string; holder_label: string }>;
+    if (leases.length > 0) {
+      const { data: heldTasks } = await supabase
+        .from('task_items')
+        .select('id, node_id')
+        .in('id', leases.map((l) => l.task_item_id));
+      const nodeByTask = new Map(((heldTasks ?? []) as Array<{ id: string; node_id: string }>).map((task) => [task.id, task.node_id]));
+      for (const l of leases) {
+        const nodeId = nodeByTask.get(l.task_item_id);
+        if (!nodeId) continue;
+        if (!inPlayByNode.has(nodeId)) inPlayByNode.set(nodeId, new Set());
+        inPlayByNode.get(nodeId)!.add(l.holder_label);
+      }
+    }
+  }
+  const inPlayHoldersFor = (rowId: string): string[] => {
+    const holders = new Set<string>();
+    for (const n of mappedNodesByRowId.get(rowId) || []) {
+      for (const h of inPlayByNode.get(n) ?? []) holders.add(h);
+    }
+    return [...holders];
+  };
+
   const coupling = computeRequirementCoupling(mappingsByReqId, graph);
+
+  // AL.13: the outcomes behind each requirement. outcome_derivations is many
+  // to many (attach_candidate puts a second outcome behind one requirement),
+  // so a requirement names every outcome, each with its workflow. Best
+  // effort: a failed read leaves the list empty.
+  const derivedFromByRowId = new Map<string, Array<{ candidateId: string; name: string; workflowId: string | null }>>();
+  if (reqRows.length > 0) {
+    const { data: derivationRows } = await supabase
+      .from('outcome_derivations')
+      .select('candidate_id, requirement_row_id, created_at, requirement_candidates(name, workflow_id)')
+      .eq('project_id', projectId)
+      .in('requirement_row_id', reqRows.map((r) => r.id))
+      .order('created_at', { ascending: true });
+    type DerivationRow = { candidate_id: string; requirement_row_id: string; requirement_candidates: { name: string; workflow_id: string | null } | Array<{ name: string; workflow_id: string | null }> | null };
+    for (const d of (derivationRows ?? []) as DerivationRow[]) {
+      const cand = Array.isArray(d.requirement_candidates) ? d.requirement_candidates[0] ?? null : d.requirement_candidates;
+      if (!cand) continue;
+      const list = derivedFromByRowId.get(d.requirement_row_id) ?? [];
+      if (list.some((x) => x.candidateId === d.candidate_id)) continue;
+      list.push({ candidateId: d.candidate_id, name: cand.name, workflowId: cand.workflow_id ?? null });
+      derivedFromByRowId.set(d.requirement_row_id, list);
+    }
+  }
 
   return {
     success: true,
@@ -775,27 +880,43 @@ export async function handleListRequirements(
         section_id: string | null;
         architecture_trace: unknown;
         confirmed: boolean | null;
+        mark?: string | null;
         created_at: string;
         updated_at: string;
+        archived_at?: string | null;
       }) => ({
         id: r.id,
         requirementId: r.requirement_id,
+        // 7.3: the mark travels with the item so the boundary can withhold it
+        mark: r.mark ?? null,
         name: r.name,
         description: r.description,
         category: r.category,
         status: r.status,
-        acceptanceCriteria: r.acceptance_criteria || [],
+        acceptanceCriteria: (Array.isArray(r.acceptance_criteria) ? r.acceptance_criteria : []).map((c: unknown) =>
+          c && typeof c === 'object'
+            ? { ...(c as Record<string, unknown>), id: criterionIdOf(c as { id?: unknown; text?: unknown }) }
+            // legacy plain-string criteria normalize to the object shape so
+            // they too carry a claimable id
+            : typeof c === 'string' ? { text: c, id: criterionIdOf({ text: c }) } : c),
         locked: r.locked ?? false,
+        // 9.8: the explicit archive; the lineage archive is derived by the app and BOARD.md
+        archivedAt: r.archived_at ?? null,
+        archived: !!r.archived_at,
         sectionId: r.section_id ?? null,
         sectionName: r.section_id ? (sectionNameById.get(r.section_id) ?? null) : null,
         confirmed: r.confirmed ?? false,
         architectureTrace: r.architecture_trace ?? [],
         mappedNodeIds: mappedNodesByRowId.get(r.id) || [],
+        inPlay: inPlayHoldersFor(r.id).length > 0,
+        heldBy: inPlayHoldersFor(r.id),
         relations: {
           from: relationsFromByRowId.get(r.id) || [],
           to: relationsToByRowId.get(r.id) || [],
         },
         coupling: coupling[r.requirement_id] || [],
+        // AL.13: every outcome behind it, oldest first, each with its workflow
+        derivedFrom: derivedFromByRowId.get(r.id) ?? [],
         createdAt: r.created_at,
         updatedAt: r.updated_at,
       })),
@@ -855,6 +976,10 @@ export async function handleMapRequirement(
   if (!requirement) {
     return { success: false, error: `Requirement not found: ${args.requirement_id}` };
   }
+  // v3x (doctrine 6): a mapping is a write on the requirement.
+  if (requirement.locked) {
+    return { success: false, error: lockedRefusal(requirement.requirement_id) };
+  }
 
   // Resolve the target branch (default: main) and load its latest graph snapshot, so node_ids
   // can be validated against real nodes. The Decomposition canvas reads the main branch, so a
@@ -899,7 +1024,7 @@ export async function handleMapRequirement(
     if (unknownIds.length > 0) {
       return {
         success: false,
-        error: `These node_ids are not in the '${branchName}' branch graph: ${unknownIds.join(', ')}. Use get_architecture_overview to list valid node ids, or pass branch_id for a different branch.`,
+        error: `These node_ids are not in the '${branchName}' branch graph: ${unknownIds.join(', ')}. Use get_architecture_overview to list valid node ids.`,
       };
     }
   }

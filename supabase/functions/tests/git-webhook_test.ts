@@ -12,7 +12,9 @@ const SECRET = 'whsec_test_secret';
 // selects it — the fixture omitted it, which only worked while the handler guessed
 // `?? "main"`. That guess is gone (it mismapped master-default repos), so the
 // fixture now carries the column a real row always has.
-const INTEGRATION = { id: 'int-1', project_id: 'proj-1', provider: 'github', webhook_secret: SECRET, default_branch: 'main' };
+// AD.0: a delivery must name the integration's repository, so the fixture
+// carries the two columns a real row always has and the payloads name them.
+const INTEGRATION = { id: 'int-1', project_id: 'proj-1', provider: 'github', webhook_secret: SECRET, default_branch: 'main', repo_owner: 'acme', repo_name: 'store' };
 
 async function realSignature(payload: string, secret: string): Promise<string> {
   const encoder = new TextEncoder();
@@ -28,6 +30,7 @@ function pushPayload(message: string, files: string[] = ['src/index.ts']) {
     ref: 'refs/heads/main',
     after: 'abc123',
     head_commit: { id: 'abc123', message, author: { username: 'dev' }, modified: files },
+    repository: { full_name: 'acme/store' },
   });
 }
 
@@ -39,15 +42,22 @@ function webhookRequest(body: string, headers: Record<string, string>) {
   });
 }
 
-function dbWithIntegration(graphData: unknown = null) {
+function dbWithIntegration(integration: Record<string, unknown> = INTEGRATION) {
   const db = new FakeSupabase();
-  db.script('git_integrations', 'select', { data: INTEGRATION });
-  // R3-4a: the handler's first branches query is the ref→branch mapping (list);
-  // the second is the matcher's single-row lookup for the mapped branch.
+  db.script('git_integrations', 'select', { data: integration });
+  // R3-4a: the ref→branch mapping (list).
   db.script('branches', 'select', { data: [{ name: 'main', git_ref: null }] });
-  db.script('branches', 'select', { data: { id: 'branch-main' } });
-  db.script('graph_snapshots', 'select', { data: graphData ? { graph_data: graphData } : null });
   return db;
+}
+
+// AD.1: a delivery wakes the sync check; tests see what it was asked.
+function fakeSweep() {
+  const calls: Array<{ projectId: string; opts: unknown }> = [];
+  const runDriftSweep = ((_sb: unknown, projectId: string, opts?: unknown) => {
+    calls.push({ projectId, opts });
+    return Promise.resolve({ status: 'drift', eventId: 'card-1' });
+  }) as never;
+  return { calls, deps: { runDriftSweep } };
 }
 
 // ── HMAC verifier ───────────────────────────────────────────────────────────────────
@@ -78,67 +88,100 @@ Deno.test('bad signature: rejected 401 BEFORE any DB write', async () => {
   assertEquals(db.calls.filter((c) => c.op !== 'select').length, 0, 'zero writes of any kind');
 });
 
-Deno.test('valid push: creates a pending git_change_events row with matches in metadata', async () => {
-  const db = dbWithIntegration({
-    nodes: { n1: { id: 'n1', label: 'API Service' } },
-    artifacts: { a1: { id: 'a1', nodeId: 'n1', path: '/src/index.ts' } },
-  });
+Deno.test('AD.1: a verified push runs the sync check for the mapped branch, forced, and writes no card itself', async () => {
+  const db = dbWithIntegration();
+  const sweep = fakeSweep();
   const body = pushPayload('feat: real work', ['src/index.ts', 'README.md']);
   const res = await processWebhook(db, webhookRequest(body, {
     'X-GitHub-Event': 'push',
     'X-Hub-Signature-256': await realSignature(body, SECRET),
-  }));
+  }), sweep.deps);
 
   assertEquals(res.status, 200);
-  const inserts = db.callsTo('git_change_events', 'insert');
-  assertEquals(inserts.length, 1);
-  const row = inserts[0].payload as Record<string, unknown>;
-  assertEquals(row.status, 'pending');
-  assertEquals(row.commit_sha, 'abc123');
-  assertEquals(row.project_id, 'proj-1');
-  const meta = row.metadata as Record<string, unknown>;
-  assertEquals(meta.fileCount, 2);
-  assertEquals((meta.artifactMatches as unknown[]).length, 1);
-  // R3-4a webhook parity: the same classification signals sweep cards carry.
-  assertEquals(meta.modelChanged, false);
-  assertEquals(meta.residuePaths, ['README.md'], 'unmatched file reads as residue');
-  assertEquals(meta.branchName, 'main', 'pushed default-branch ref maps to the main NodeSpec branch');
+  assertEquals(sweep.calls, [{ projectId: 'proj-1', opts: { branchName: 'main', force: true } }]);
+  const json = await res.json();
+  assertEquals(json.sweep, { status: 'drift', eventId: 'card-1' });
+  assertEquals(db.calls.filter((c) => c.op !== 'select').length, 0, 'the sync check is the only writer');
 });
 
-Deno.test('self-push ("Update from NodeSpec:") is skipped with 200 and no row', async () => {
+// AD.1 (D12): the old self-push skip trusted the head commit's message, which
+// hid any commits under it and let anyone's commit pass as NodeSpec's. The
+// sync check now tells NodeSpec's writing apart by recorded sha and blob.
+Deno.test('AD.1 (D12): a head commit that says "Update from NodeSpec" is not trusted; the sync check still runs', async () => {
+  for (const message of ['Update from NodeSpec: 3 files from main', 'Update from Nodal: 3 files from main']) {
+    const db = dbWithIntegration();
+    const sweep = fakeSweep();
+    const body = pushPayload(message);
+    const res = await processWebhook(db, webhookRequest(body, {
+      'X-GitHub-Event': 'push',
+      'X-Hub-Signature-256': await realSignature(body, SECRET),
+    }), sweep.deps);
+    assertEquals(res.status, 200);
+    assertEquals(sweep.calls.length, 1, message);
+  }
+});
+
+Deno.test('AD.1: a push to a ref no NodeSpec branch is bound to is ignored, nothing run or written', async () => {
   const db = dbWithIntegration();
-  const body = pushPayload('Update from NodeSpec: 3 files from main');
+  const sweep = fakeSweep();
+  const body = JSON.stringify({ ...JSON.parse(pushPayload('topic work')), ref: 'refs/heads/topic' });
   const res = await processWebhook(db, webhookRequest(body, {
     'X-GitHub-Event': 'push',
     'X-Hub-Signature-256': await realSignature(body, SECRET),
-  }));
-
+  }), sweep.deps);
   assertEquals(res.status, 200);
-  assertEquals((await res.json()).message, 'Self-push ignored');
-  assertEquals(db.callsTo('git_change_events', 'insert').length, 0);
-});
-
-// Rebrand 2026-07-30 compat pin: existing repos carry history under the OLD app
-// name — the legacy prefix must stay recognized FOREVER or old self-pushes would
-// start raising false drift cards.
-Deno.test('LEGACY self-push ("Update from Nodal:") is still skipped', async () => {
-  const db = dbWithIntegration();
-  const body = pushPayload('Update from Nodal: 3 files from main');
-  const res = await processWebhook(db, webhookRequest(body, {
-    'X-GitHub-Event': 'push',
-    'X-Hub-Signature-256': await realSignature(body, SECRET),
-  }));
-
-  assertEquals(res.status, 200);
-  assertEquals((await res.json()).message, 'Self-push ignored');
-  assertEquals(db.callsTo('git_change_events', 'insert').length, 0);
+  assert(/not bound to a NodeSpec branch/.test((await res.json()).message));
+  assertEquals(sweep.calls.length, 0);
+  assertEquals(db.calls.filter((c) => c.op !== 'select').length, 0);
 });
 
 Deno.test('ping event acknowledges without writing', async () => {
   const db = dbWithIntegration();
-  const res = await processWebhook(db, webhookRequest('{}', { 'X-GitHub-Event': 'ping' }));
+  // AD.0: GitHub signs its ping once a secret is set, and an unsigned one is refused.
+  const res = await processWebhook(db, webhookRequest('{}', {
+    'X-GitHub-Event': 'ping', 'X-Hub-Signature-256': await realSignature('{}', SECRET),
+  }));
   assertEquals(res.status, 200);
   assertEquals(db.callsTo('git_change_events', 'insert').length, 0);
+});
+
+// ── AD.0 (S2): every delivery proves it knows the secret ────────────────────────────
+
+Deno.test('AD.0: an integration with no secret on file refuses every delivery, nothing written', async () => {
+  const db = new FakeSupabase();
+  db.script('git_integrations', 'select', { data: { ...INTEGRATION, webhook_secret: null } });
+  const body = pushPayload('feat: forged');
+  const res = await processWebhook(db, webhookRequest(body, {
+    'X-GitHub-Event': 'push', 'X-Hub-Signature-256': await realSignature(body, 'anything'),
+  }));
+  assertEquals(res.status, 401);
+  assert(/Save the integration in NodeSpec/.test((await res.json()).error), 'says how to get a secret');
+  assertEquals(db.calls.filter((c) => c.op !== 'select').length, 0);
+});
+
+Deno.test('AD.0: a delivery with no signature is refused, nothing written', async () => {
+  const db = dbWithIntegration();
+  const res = await processWebhook(db, webhookRequest(pushPayload('feat: unsigned'), { 'X-GitHub-Event': 'push' }));
+  assertEquals(res.status, 401);
+  assertEquals(db.calls.filter((c) => c.op !== 'select').length, 0);
+});
+
+Deno.test('AD.0: a signed delivery for another repository is refused, nothing written', async () => {
+  const db = dbWithIntegration();
+  const body = JSON.stringify({ ...JSON.parse(pushPayload('feat: elsewhere')), repository: { full_name: 'acme/other' } });
+  const res = await processWebhook(db, webhookRequest(body, {
+    'X-GitHub-Event': 'push', 'X-Hub-Signature-256': await realSignature(body, SECRET),
+  }));
+  assertEquals(res.status, 401);
+  assertEquals(db.callsTo('git_change_events', 'insert').length, 0);
+});
+
+Deno.test('AD.0: gitlab without a token is refused', async () => {
+  const db = new FakeSupabase();
+  db.script('git_integrations', 'select', { data: { ...INTEGRATION, provider: 'gitlab' } });
+  const res = await processWebhook(db, webhookRequest('{}', { 'X-Gitlab-Event': 'Push Hook' }));
+  assertEquals(res.status, 401);
+  assertEquals(db.calls.filter((c) => c.op !== 'select').length, 0);
 });
 
 Deno.test('gitlab: token mismatch rejected, matching token accepted', async () => {
@@ -146,6 +189,7 @@ Deno.test('gitlab: token mismatch rejected, matching token accepted', async () =
   const body = JSON.stringify({
     ref: 'refs/heads/main', after: 'sha9',
     commits: [{ id: 'sha9', message: 'work', author: { name: 'dev' }, modified: ['a.ts'] }],
+    project: { path_with_namespace: 'acme/store' },
   });
 
   const dbBad = new FakeSupabase();
@@ -156,14 +200,13 @@ Deno.test('gitlab: token mismatch rejected, matching token accepted', async () =
   assertEquals(bad.status, 401);
   assertEquals(dbBad.callsTo('git_change_events', 'insert').length, 0);
 
-  const dbGood = new FakeSupabase();
-  dbGood.script('git_integrations', 'select', { data: gitlabIntegration });
-  dbGood.script('branches', 'select', { data: null });
+  const dbGood = dbWithIntegration(gitlabIntegration);
+  const sweep = fakeSweep();
   const good = await processWebhook(dbGood, webhookRequest(body, {
     'X-Gitlab-Event': 'Push Hook', 'X-Gitlab-Token': SECRET,
-  }));
+  }), sweep.deps);
   assertEquals(good.status, 200);
-  assertEquals(dbGood.callsTo('git_change_events', 'insert').length, 1);
+  assertEquals(sweep.calls.length, 1, 'a verified GitLab push runs the sync check');
 });
 
 Deno.test('unknown integration id -> 404, nothing written', async () => {
@@ -217,59 +260,16 @@ Deno.test('matching: no main branch or no snapshot -> empty result, no error', a
   assertEquals((await matchFilesToArtifacts(noSnap, 'p', [{ path: 'x', action: 'added' }])).matches, []);
 });
 
-// ── A3: webhook-time criterion deltas (docs/WORK_LOOP_PLAN.md) ────────────────
-// Before A3 only the 60s drift sweep computed deltas — a tick arriving by
-// webhook waited for a later sweep. These pins hold the webhook to the sweep's
-// exact semantics: task-kind matches only, best-effort (a delta failure never
-// drops the card), and the same metadata shape either producer writes.
+// ── AD.1: the webhook is a wake-up, never a second card producer ──────────────
+// A3 had the webhook compute ticks, bindings and board deltas itself, a second
+// producer beside the sync check. Both now come from the one sync check, whose
+// own tests pin them (git-drift-sweep, board-generator, binding-manifest).
 
 const handlerSource = Deno.readTextFileSync(new URL('../git-webhook/handlers.ts', import.meta.url));
-const driftSource = Deno.readTextFileSync(new URL('../_shared/git-drift.ts', import.meta.url));
 
-Deno.test('A3: webhook selects the columns delta computation needs', () => {
-  assert(handlerSource.includes('access_token_encrypted'), 'token column not selected');
-  assert(handlerSource.includes('repo_owner, repo_name, base_url'), 'repo columns not selected');
-});
-
-Deno.test('A3: only TASK-kind matches are read, mirroring the R5b sweep rule', () => {
-  assert(handlerSource.includes('.filter((m) => m.kind === "task")'),
-    'a ticked box in ordinary source is prose, not evidence');
-});
-
-Deno.test('A3: delta computation is best-effort — a failure never drops the card', () => {
-  assert(/try\s*\{[\s\S]{0,400}computeWebhookCriterionDeltas[\s\S]{0,600}card still lands/.test(handlerSource),
-    'the delta block must be guarded so the change event always inserts');
-});
-
-Deno.test('A3: webhook cards carry criterionDeltas in the same shape as sweep cards', () => {
-  const spread = 'criterionDeltas.deltas.length > 0 || criterionDeltas.flagged.length > 0';
-  assert(handlerSource.includes(spread), 'webhook metadata spread missing');
-  assert(driftSource.includes(spread), 'sweep metadata spread missing');
-});
-
-Deno.test('A3: the wrapper reuses the sweep computation (no second matcher)', () => {
-  assert(/computeWebhookCriterionDeltas[\s\S]{0,900}computeSweepCriterionDeltas\(/.test(driftSource),
-    'webhook deltas must delegate to the sweep path, not fork it');
-  assert(/computeWebhookCriterionDeltas[\s\S]{0,600}isEncrypted\(token\)/.test(driftSource),
-    'the wrapper owns token decryption');
-});
-
-Deno.test('A3: a push with NO task-doc matches still creates a plain pending card', async () => {
-  // Regression guard for the wiring itself: source-kind match only — the delta
-  // block must not run (no network, no token needed) and the card must land
-  // without a criterionDeltas key.
-  const db = dbWithIntegration({
-    nodes: { n1: { id: 'n1', label: 'API Service' } },
-    artifacts: { a1: { id: 'a1', nodeId: 'n1', path: '/src/index.ts' } },
-  });
-  const body = pushPayload('external edit', ['src/index.ts']);
-  const res = await processWebhook(db, webhookRequest(body, {
-    'X-GitHub-Event': 'push',
-    'X-Hub-Signature-256': await realSignature(body, SECRET),
-  }));
-  assertEquals(res.status, 200);
-  const inserts = db.callsTo('git_change_events', 'insert');
-  assertEquals(inserts.length, 1, 'pending card must insert');
-  const metadata = (inserts[0].payload as { metadata: Record<string, unknown> }).metadata;
-  assert(!('criterionDeltas' in metadata), 'no task docs -> no deltas key');
+Deno.test('AD.1 (D13, D20): the webhook writes no card and loads no model; it runs the sync check', () => {
+  assert(!handlerSource.includes('from("git_change_events")'), 'no card written by the webhook');
+  assert(!handlerSource.includes('restoreBranchModelFromRef'), 'no model loaded by the webhook');
+  assert(!handlerSource.includes('isSelfPushMessage'), 'no trust in a commit message');
+  assert(handlerSource.includes('await deps.runDriftSweep(supabase, integration.project_id, { branchName: mappedBranchName, force: true })'));
 });

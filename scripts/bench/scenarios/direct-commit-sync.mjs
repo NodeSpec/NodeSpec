@@ -13,16 +13,12 @@
 // browser hook and is pinned by src/tests/git-auto-sync.test.ts — a headless
 // bench cannot mount React. What this scenario proves is every contract that
 // driver depends on, server-side, end to end.
-import { callFn, rest, github, postSignedWebhook, mcpCall, uid, until, Scenario } from '../lib.mjs';
+import { callFn, rest, github, postSignedWebhook, mcpCall, uid, until, Scenario, parseMcp } from '../lib.mjs';
 import { createProject, connectRepo } from '../fixtures.mjs';
 
 const NEW_FILE = 'src/notifications.ts';
 const BINDINGS = '.nodespec/bindings.json';
 
-const parseMcp = (r) => {
-  const text = r.data?.result?.content?.[0]?.text;
-  try { return JSON.parse(text); } catch { return { raw: text, isError: r.data?.result?.isError }; }
-};
 
 export const directCommitSync = {
   name: 'direct-commit-sync',

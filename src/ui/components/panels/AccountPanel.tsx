@@ -2,14 +2,17 @@ import { memo, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { useAuth, useSubscription } from '../../context/ServiceContext.js';
-import { getPlanDisplayName, getTokenLimitDisplay } from '../pricing/pricing-data.js';
+import { getPlanDisplayName } from '../pricing/pricing-data.js';
 import type { SubscriptionInfo } from '../../services/SubscriptionService.js';
 import { CancelSubscriptionModal } from './CancelSubscriptionModal.js';
 import { DeleteAccountModal } from './DeleteAccountModal.js';
 import { getSupabaseClient } from '../../../persistence/supabase/client.js';
-import { useIsAdmin } from '../../hooks/useAdmin.js';
-import { isHostedEdition } from '../../config/edition.js';
+import { isHostedEdition, buildEdition } from '../../config/edition.js';
 import { PublicProfileEditor } from './PublicProfileEditor.js';
+import { useFeatureGate } from '../../hooks/useFeatureGate.js';
+import { testTierOverride } from '../../config/test-tier.js';
+import { tierDisplayName } from '../../config/tiers.js';
+import { resolveVariant } from '../../config/variant.js';
 
 interface AccountPanelProps {
   userEmail?: string;
@@ -30,33 +33,9 @@ function AccountPanelComponent({ userEmail, userId, onClose }: AccountPanelProps
   const [subLoading, setSubLoading] = useState(false);
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [useV4, setUseV4] = useState(true);
-  const [v4Loading, setV4Loading] = useState(true);
-  const { isAdmin } = useIsAdmin();
-
-  useEffect(() => {
-    const loadV4Setting = async () => {
-      try {
-        const supabase = getSupabaseClient();
-        let uid = userId;
-        if (!uid) {
-          const session = await auth.getSession();
-          uid = session?.user?.id;
-        }
-        if (!uid) { setV4Loading(false); return; }
-
-        const { data } = await supabase
-          .from('user_settings')
-          .select('use_v4_orchestrator')
-          .eq('user_id', uid)
-          .maybeSingle();
-
-        if (data) setUseV4(data.use_v4_orchestrator !== false);
-      } catch {}
-      setV4Loading(false);
-    };
-    loadV4Setting();
-  }, [userId, auth]);
+  // R18: the build-identity stamp reads the SAME gate the app's chrome
+  // resolves through, so what it prints is what the boards actually render.
+  const gate = useFeatureGate();
 
   useEffect(() => {
     if (activeTab !== 'subscription') return;
@@ -123,8 +102,8 @@ function AccountPanelComponent({ userEmail, userId, onClose }: AccountPanelProps
     position: 'absolute',
     top: '56px',
     right: '16px',
-    width: '460px',
-    maxHeight: '640px',
+    width: 'min(460px, calc(100vw - 32px))',
+    maxHeight: 'min(640px, calc(100vh - 72px))',
     backgroundColor: c.surface,
     border: `1px solid ${c.border}`,
     borderRadius: '8px',
@@ -310,25 +289,6 @@ function AccountPanelComponent({ userEmail, userId, onClose }: AccountPanelProps
     }
   };
 
-  const handleToggleV4 = async (enabled: boolean) => {
-    setUseV4(enabled);
-    try {
-      const supabase = getSupabaseClient();
-      let uid = userId;
-      if (!uid) {
-        const session = await auth.getSession();
-        uid = session?.user?.id;
-      }
-      if (!uid) return;
-
-      await supabase
-        .from('user_settings')
-        .upsert({ user_id: uid, use_v4_orchestrator: enabled }, { onConflict: 'user_id' });
-    } catch {
-      setUseV4(!enabled);
-    }
-  };
-
   const handleDeleteAccount = async () => {
     const session = await auth.getSession();
     if (!session?.session?.access_token) {
@@ -381,66 +341,6 @@ function AccountPanelComponent({ userEmail, userId, onClose }: AccountPanelProps
           Sign Out
         </button>
       </div>
-
-      {isAdmin && (
-      <div style={{
-        borderTop: `1px solid ${c.border}`,
-        paddingTop: '20px',
-        marginTop: '4px',
-        marginBottom: '20px',
-      }}>
-        <div style={labelStyles}>Developer Settings</div>
-        <div style={{
-          padding: '12px',
-          backgroundColor: c.background,
-          border: `1px solid ${c.border}`,
-          borderRadius: '6px',
-        }}>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-          }}>
-            <div>
-              <div style={{ fontSize: '13px', fontWeight: 500, color: c.text }}>
-                V4 AI Engine
-              </div>
-              <div style={{ fontSize: '11px', color: c.textMuted, marginTop: '2px' }}>
-                Multi-provider AI engine (testing)
-              </div>
-            </div>
-            <button
-              onClick={() => handleToggleV4(!useV4)}
-              disabled={v4Loading}
-              style={{
-                position: 'relative',
-                width: '40px',
-                height: '22px',
-                borderRadius: '11px',
-                border: 'none',
-                backgroundColor: useV4 ? c.primary : (theme.mode === 'dark' ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)'),
-                cursor: v4Loading ? 'not-allowed' : 'pointer',
-                transition: 'background-color 0.2s',
-                padding: 0,
-                opacity: v4Loading ? 0.5 : 1,
-              }}
-            >
-              <div style={{
-                position: 'absolute',
-                top: '2px',
-                left: useV4 ? '20px' : '2px',
-                width: '18px',
-                height: '18px',
-                borderRadius: '50%',
-                backgroundColor: '#fff',
-                transition: 'left 0.2s',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-              }} />
-            </button>
-          </div>
-        </div>
-      </div>
-      )}
 
       <div style={{
         borderTop: `1px solid ${c.border}`,
@@ -557,11 +457,6 @@ function AccountPanelComponent({ userEmail, userId, onClose }: AccountPanelProps
               ${(subscription.amountCents / 100).toFixed(0)}/{subscription.billingInterval === 'year' ? 'yr' : 'mo'}
               {subscription.billingInterval === 'year' ? ' (annual)' : ' (monthly)'}
             </div>
-            {subscription.tokenLimit > 0 && (
-              <div style={{ fontSize: '12px', color: c.textMuted }}>
-                {getTokenLimitDisplay(subscription.tokenLimit)} tokens/month
-              </div>
-            )}
           </div>
         </div>
 
@@ -665,6 +560,26 @@ function AccountPanelComponent({ userEmail, userId, onClose }: AccountPanelProps
       </div>
 
       <div style={contentStyles}>
+        {/* R18: WHAT AM I TESTING? Dev builds only (production never renders
+            this). Three axes, one line: the EDITION is the code in the bundle
+            (VITE_NODESPEC_EDITION; absent means the OSS community tree), the
+            TIER is the account (the seeded local subscription row, or the
+            VITE_NODESPEC_TEST_TIER override), and the VARIANT is the
+            presentation those resolve to. The seeded bench account is Team,
+            which is why a local build shows Team workflow chrome. */}
+        {import.meta.env.DEV && !gate.loading && (
+          <div
+            data-testid="build-identity-stamp"
+            title={'Local build identity (dev builds only). Edition is the code axis (VITE_NODESPEC_EDITION); tier is the account axis: '
+              + (testTierOverride() ? 'VITE_NODESPEC_TEST_TIER override.' : gate.subscription ? `subscription row "${gate.subscription.planName}" (supabase/seed.sql seeds the bench account at team).` : 'no subscription row, community default.')}
+            style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px', padding: '7px 10px', borderRadius: '8px', border: `1px dashed ${c.border}`, color: c.textSecondary, fontFamily: 'ui-monospace, Menlo, monospace', fontSize: '11px', letterSpacing: '.03em' }}
+          >
+            <span style={{ fontWeight: 700, color: c.text }}>DEV</span>
+            <span>edition {buildEdition}</span>
+            <span>tier {tierDisplayName(gate.plan)}{testTierOverride() ? ' (test override)' : gate.subscription ? '' : ' (no row)'}</span>
+            <span>{resolveVariant(gate.plan)} UI</span>
+          </div>
+        )}
         {activeTab === 'profile' && renderProfileTab()}
         {activeTab === 'subscription' && renderSubscriptionTab()}
         {isHostedEdition && activeTab === 'publicProfile' && <PublicProfileEditor userId={userId} />}

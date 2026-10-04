@@ -17,7 +17,7 @@ function role(id: string, over: Partial<NodeRole> = {}): NodeRole {
     paletteCategory: 'Infrastructure',
     nature: 'build', provider: null, capabilityTags: [],
     isContainer: false, containerLayer: null, containerStyle: null, canContain: [],
-    metadataSchema: null, defaultPorts: [], suggestedContracts: [], sortOrder: 0,
+    metadataSchema: null, suggestedContracts: [], sortOrder: 0,
     deprecated: false, whenToUse: null, defaultTechnology: null, ...over,
   };
 }

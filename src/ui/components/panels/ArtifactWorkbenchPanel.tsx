@@ -6,7 +6,6 @@ import { computeContentHash, generateUUID, now } from '@nodespec/core/utils.js';
 import { buildUpdateNodePatch } from '../../builders/patchBuilders.js';
 import { getContainerTypeById } from '@nodespec/core/container-types.js';
 import { useTheme } from '../../theme/ThemeContext.js';
-import { Tooltip } from '../common/Tooltip.js';
 import { buildNodeExportContext } from '../../utils/export-context.js';
 import { copyToClipboard } from '../../utils/export-context.js';
 
@@ -15,8 +14,9 @@ interface ArtifactWorkbenchPanelProps {
   graph: Graph;
   onPatchGenerated: (patch: PatchOperation) => void;
   initialArtifactId?: string | null;
-  /** P1-7 R2.1: hydrate a content-less bound artifact (e.g. adopted from the anchor) from the repo. */
-  onLoadFromRepo?: (artifactId: string) => Promise<void>;
+  /** P1-7 R2.1: hydrate a content-less bound artifact (e.g. adopted from the anchor) from the repo.
+   *  AB.2: runs when such a file is opened; false means it could not. */
+  onLoadFromRepo?: (artifactId: string) => Promise<boolean | void>;
 }
 
 export function ArtifactWorkbenchPanel({
@@ -51,45 +51,27 @@ export function ArtifactWorkbenchPanel({
       .sort((a, b) => a.path.localeCompare(b.path));
   }, [graph.artifacts, selectedNode]);
 
-  // N5.5: the suggested-file Accept/Dismiss flow moved here from the inspector —
-  // Accept is the LIVE gate (suggested→draft is what makes a file visible to task
-  // packets and MCP context).
-  const suggestedArtifacts = useMemo(() => {
-    if (!selectedNode) return [];
-    return Object.values(graph.artifacts)
-      .filter(a => a.nodeId === selectedNode.id && a.status === 'suggested')
-      .sort((a, b) => a.path.localeCompare(b.path));
-  }, [graph.artifacts, selectedNode]);
-
-  const handleAcceptSuggested = useCallback((artifact: Artifact) => {
-    onPatchGenerated(createUpdateArtifactPatch(
-      artifact.id,
-      { status: 'draft' },
-      { actorType: 'human', summary: `Accept suggested file ${artifact.path}` },
-    ));
-  }, [onPatchGenerated]);
-
-  const handleDismissSuggested = useCallback((artifact: Artifact) => {
-    onPatchGenerated(createRemoveArtifactPatch(artifact.id, {
-      actorType: 'human',
-      summary: `Dismiss suggested file ${artifact.path}`,
-    }));
-  }, [onPatchGenerated]);
+  // AB.2 (owner 2026-09-23): no suggested starting files. They were too much
+  // to track for too little; a file joins a node when someone adds it.
 
   const activeArtifact = activeArtifactId ? graph.artifacts[activeArtifactId] : null;
 
-  // Owner bench 2026-07-29: a body-less binding hydrates ITSELF when opened —
-  // the user shouldn't have to find and click "Load from repo" (the button stays
-  // as the manual retry for when the auto-attempt fails). One attempt per
-  // artifact per mount; a failure surfaces via the caller's toast.
-  const autoHydrateAttemptedRef = useRef<Set<string>>(new Set());
+  // Owner bench 2026-07-29: a body-less binding hydrates ITSELF when opened.
+  // AB.2: there is no button for it. Opening the file again is the retry, and
+  // the status bar says what is happening.
+  const [hydration, setHydration] = useState<{ id: string; state: 'loading' | 'failed' } | null>(null);
   useEffect(() => {
     if (!activeArtifact || !onLoadFromRepo) return;
     if (activeArtifact.content || !activeArtifact.path) return;
-    if (autoHydrateAttemptedRef.current.has(activeArtifact.id)) return;
-    autoHydrateAttemptedRef.current.add(activeArtifact.id);
-    void onLoadFromRepo(activeArtifact.id);
-  }, [activeArtifact, onLoadFromRepo]);
+    const id = activeArtifact.id;
+    let cancelled = false;
+    setHydration({ id, state: 'loading' });
+    onLoadFromRepo(id)
+      .then((ok) => { if (!cancelled) setHydration(ok === false ? { id, state: 'failed' } : null); })
+      .catch(() => { if (!cancelled) setHydration({ id, state: 'failed' }); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeArtifactId, onLoadFromRepo]);
 
   useEffect(() => {
     if (activeArtifact) {
@@ -133,6 +115,8 @@ export function ArtifactWorkbenchPanel({
           content: editorContent,
           contentHash: newContentHash,
           updatedAt: now(),
+          // AB.2: a file marked complete reopens as a draft when someone edits it.
+          ...(activeArtifact.status === 'complete' ? { status: 'draft' as const } : {}),
         },
         {
           actorType: 'human',
@@ -235,28 +219,16 @@ export function ArtifactWorkbenchPanel({
     });
 
     onPatchGenerated(updateNodePatch);
+    // AB.2: a file marked complete is reopened, then removed (the engine keeps complete files).
+    if (graph.artifacts[artifactId]?.status === 'complete') {
+      onPatchGenerated(createUpdateArtifactPatch(artifactId, { status: 'draft' }, { actorType: 'human', summary: 'Reopen artifact to delete it' }));
+    }
     onPatchGenerated(deleteArtifactPatch);
 
     if (activeArtifactId === artifactId) {
       setActiveArtifactId(null);
     }
-  }, [selectedNode, activeArtifactId, onPatchGenerated]);
-
-  const handleToggleStatus = useCallback(() => {
-    if (!activeArtifact) return;
-
-    const newStatus = activeArtifact.status === 'complete' ? 'draft' : 'complete';
-    const patch = createUpdateArtifactPatch(
-      activeArtifact.id,
-      { status: newStatus },
-      {
-        actorType: 'human',
-        summary: `Mark artifact ${activeArtifact.path} as ${newStatus}`,
-      }
-    );
-
-    onPatchGenerated(patch);
-  }, [activeArtifact, onPatchGenerated]);
+  }, [selectedNode, activeArtifactId, graph.artifacts, onPatchGenerated]);
 
   const handleChangeKind = useCallback((newKind: ArtifactKind) => {
     if (!activeArtifact) return;
@@ -289,7 +261,7 @@ export function ArtifactWorkbenchPanel({
       alert(`An artifact with path "${trimmed}" already exists on this node`);
       return;
     }
-    const patch = createUpdateArtifactPatch(artifactId, { path: trimmed }, {
+    const patch = createUpdateArtifactPatch(artifactId, { path: trimmed, ...(artifact.status === 'complete' ? { status: 'draft' as const } : {}) }, {
       actorType: 'human',
       summary: `Rename artifact to ${trimmed}`,
     });
@@ -435,42 +407,6 @@ export function ArtifactWorkbenchPanel({
               + New, not buried in the bottom status bar (which is status-only now). */}
           {activeTab === 'editor' && activeArtifact && (
             <>
-              {!activeArtifact.content && onLoadFromRepo && (
-                <Tooltip content="This file is a binding without a body (e.g. adopted from the design anchor). Pull its content from your connected git repository.">
-                  <button
-                    style={{
-                      ...buttonStyles,
-                      padding: '6px 10px',
-                      backgroundColor: 'transparent',
-                      color: c.primary,
-                      border: `1px solid ${c.primary}`,
-                    }}
-                    onClick={() => { void onLoadFromRepo(activeArtifact.id); }}
-                  >
-                    Load from repo
-                  </button>
-                </Tooltip>
-              )}
-              <Tooltip content={activeArtifact.status === 'complete' ? 'Mark as draft to edit again' : 'Locks this file as finalized and read-only'}>
-                <button
-                  style={{
-                    ...buttonStyles,
-                    padding: '6px 10px',
-                    backgroundColor: 'transparent',
-                    color: activeArtifact.status === 'complete' ? c.warning : c.success,
-                    border: `1px solid ${activeArtifact.status === 'complete' ? c.warning : c.success}`,
-                  }}
-                  onClick={handleToggleStatus}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.backgroundColor = activeArtifact.status === 'complete' ? c.warningBg : c.successBg;
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.backgroundColor = 'transparent';
-                  }}
-                >
-                  {activeArtifact.status === 'complete' ? 'Unlock' : 'Complete'}
-                </button>
-              </Tooltip>
               <button
                 style={{
                   ...buttonStyles,
@@ -597,34 +533,6 @@ export function ArtifactWorkbenchPanel({
         </div>
       )}
 
-      {suggestedArtifacts.length > 0 && (
-        <div style={{ padding: '10px 16px', borderBottom: `1px solid ${c.border}`, backgroundColor: c.background }}>
-          <div style={{ fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: c.textMuted, marginBottom: '6px' }}>
-            Suggested files
-          </div>
-          {suggestedArtifacts.map(a => (
-            <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 0' }}>
-              <span style={{ flex: 1, minWidth: 0, fontSize: '12px', color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={a.description || a.path}>
-                {a.path}
-              </span>
-              <button
-                style={{ padding: '2px 10px', fontSize: '11px', fontWeight: 600, border: 'none', borderRadius: '4px', cursor: 'pointer', backgroundColor: c.primary, color: 'white' }}
-                onClick={() => handleAcceptSuggested(a)}
-                title="Accept — the file becomes visible to task packets and the AI"
-              >
-                Accept
-              </button>
-              <button
-                style={{ padding: '2px 10px', fontSize: '11px', border: `1px solid ${c.border}`, borderRadius: '4px', cursor: 'pointer', backgroundColor: 'transparent', color: c.textMuted }}
-                onClick={() => handleDismissSuggested(a)}
-              >
-                Dismiss
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-
       {/* Tab Navigation */}
       <div style={{
         display: 'flex',
@@ -718,9 +626,9 @@ export function ArtifactWorkbenchPanel({
                       <span>{artifact.path.split('/').pop()}</span>
                     )}
                     {artifact.status === 'complete' && (
-                      <span style={{ fontSize: '10px', opacity: 0.6 }}>✓</span>
+                      <span title="Marked complete. Editing it reopens it as a draft." style={{ fontSize: '10px', opacity: 0.6 }}>✓</span>
                     )}
-                    {isActive && artifact.status !== 'complete' && !isRenaming && (
+                    {isActive && !isRenaming && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
@@ -762,7 +670,7 @@ export function ArtifactWorkbenchPanel({
                     minimap: { enabled: false },
                     fontSize: 13,
                     lineNumbers: 'on',
-                    readOnly: activeArtifact.status === 'complete',
+                    readOnly: false,
                     scrollBeyondLastLine: false,
                     automaticLayout: true,
                   }}
@@ -776,6 +684,11 @@ export function ArtifactWorkbenchPanel({
                     {!isSaving && lastSaved && `Saved at ${lastSaved}`}
                     {!isSaving && !lastSaved && editorContent === activeArtifact.content && 'All changes saved'}
                     {saveError && <span style={{ color: c.error }}>{saveError}</span>}
+                    {hydration?.id === activeArtifact.id && (
+                      <span data-testid="artifact-hydration" style={{ color: hydration.state === 'failed' ? c.error : c.textMuted }}>
+                        {hydration.state === 'loading' ? 'Loading this file from the repository' : 'This file could not be loaded from the repository. Open it again to retry.'}
+                      </span>
+                    )}
                   </span>
                   <span style={{ fontSize: '10px', display: 'flex', gap: '8px', alignItems: 'center' }}>
                     {activeArtifact.status !== 'complete' ? (

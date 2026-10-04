@@ -6,7 +6,6 @@ import type {
   Edge,
   Contract,
   Artifact,
-  Port,
   AddNodePatch,
   UpdateNodePatch,
   RemoveNodePatch,
@@ -20,15 +19,11 @@ import type {
   UpdateArtifactPatch,
   RemoveArtifactPatch,
   UpdateGraphMetadataPatch,
-  AddPortPatch,
-  UpdatePortPatch,
-  DeletePortPatch,
-  ConnectPortsPatch,
   CreateNodeFromTemplatePatch,
 } from './types.js';
 import { generateUUID, now, computeContentHash } from './utils.js';
 import { scaffoldNodeFromTemplate } from './draft-semantics.js';
-import { getTemplateById, getArtifactPlaceholdersForNode } from './templates.js';
+import { getTemplateById } from './templates.js';
 
 interface PatchOptions {
   actorType: ActorType;
@@ -212,70 +207,6 @@ export function createUpdateGraphMetadataPatch(
   };
 }
 
-export function createAddPortPatch(
-  nodeId: string,
-  port: Port,
-  options: PatchOptions
-): AddPortPatch {
-  return {
-    type: 'add_port',
-    metadata: createMetadata(options),
-    payload: { nodeId, port },
-  };
-}
-
-export function createUpdatePortPatch(
-  nodeId: string,
-  portId: string,
-  changes: Partial<Omit<Port, 'id'>>,
-  options: PatchOptions
-): UpdatePortPatch {
-  return {
-    type: 'update_port',
-    metadata: createMetadata(options),
-    payload: { nodeId, portId, changes },
-  };
-}
-
-export function createDeletePortPatch(
-  nodeId: string,
-  portId: string,
-  options: PatchOptions
-): DeletePortPatch {
-  return {
-    type: 'delete_port',
-    metadata: createMetadata(options),
-    payload: { nodeId, portId },
-  };
-}
-
-export function createConnectPortsPatch(
-  sourceNodeId: string,
-  sourcePortId: string,
-  targetNodeId: string,
-  targetPortId: string,
-  edgeId: string,
-  contractId: string,
-  options: PatchOptions,
-  contract?: Contract,
-  label?: string
-): ConnectPortsPatch {
-  return {
-    type: 'connect_ports',
-    metadata: createMetadata(options),
-    payload: {
-      sourceNodeId,
-      sourcePortId,
-      targetNodeId,
-      targetPortId,
-      edgeId,
-      contractId,
-      contract,
-      label,
-    },
-  };
-}
-
 export function createNodeFromTemplatePatch(
   templateId: string,
   nodeId: string,
@@ -306,25 +237,9 @@ export function createNodeFromTemplatePatch(
     scaffolded.node.parentId = parentId;
   }
 
-  const artifactPlaceholders = getArtifactPlaceholdersForNode(scaffolded.node);
-
-  const suggestedArtifacts: Artifact[] = artifactPlaceholders.map(placeholder => ({
-    id: generateUUID(),
-    nodeId: scaffolded.node.id,
-    kind: placeholder.kind,
-    path: placeholder.suggestedPath,
-    content: undefined,
-    contentHash: undefined,
-    language: placeholder.language,
-    createdAt: now(),
-    updatedAt: now(),
-    status: 'suggested' as const,
-    description: placeholder.description,
-    metadata: {
-      isTemplate: true,
-      templateId: template.id,
-    },
-  }));
+  // AB.2 (owner 2026-09-23): no suggested starting files. A node starts with
+  // the files someone adds to it; placeholders were too much to track.
+  const suggestedArtifacts: Artifact[] = [];
 
   return {
     type: 'create_node_from_template',
@@ -333,7 +248,7 @@ export function createNodeFromTemplatePatch(
       templateId,
       nodeId,
       node: scaffolded.node,
-      contracts: scaffolded.contracts,
+      contracts: [],
       artifacts: suggestedArtifacts,
     },
   };

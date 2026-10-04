@@ -8,7 +8,7 @@ import {
   FileText, Clock, Settings, Package, Hexagon, Library, ClipboardList,
   Gamepad2, Terminal, Webhook, Bot, Thermometer, Router, Archive,
   Megaphone, ScrollText, Warehouse, ListOrdered,
-  Binary, Cog, Timer, BarChart3, Key, Sliders,
+  Binary, Cog, Timer, BarChart3, Key, Sliders, Route, LayoutGrid, Table,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -125,6 +125,10 @@ const ROLE_ICON_MAP: Record<string, LucideIcon> = {
   'bar-chart-3': BarChart3,
   'key': Key,
   'sliders': Sliders,
+  // AA.3: the part roles (handler, component, table group).
+  'route': Route,
+  'layout-grid': LayoutGrid,
+  'table': Table,
 };
 
 // The map is authored in two dialects — kebab-case ('git-merge') and PascalCase

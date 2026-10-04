@@ -15,22 +15,10 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
-const PLATFORM_TRIAL_TOKENS = 600_000;
-
 // Canonicalized 2026-08-25: names come from the shared map (this file held the
-// SECOND drifted copy). The cron's one deliberate difference is preserved:
-// tokenLimit is flattened to the platform-trial allowance, never the plan's.
+// SECOND drifted copy).
 import { resolvePlanInfoWithFallbacks } from '../_shared/stripe-plans.ts';
 import { canonicalizeTier } from '../_shared/tiers.ts';
-
-function resolvePlanInfo(price: Stripe.Price): { name: string; tokenLimit: number; amountCents: number } {
-  const resolved = resolvePlanInfoWithFallbacks(price);
-  return {
-    name: resolved.name,
-    tokenLimit: resolved.name === 'unknown' ? 0 : PLATFORM_TRIAL_TOKENS,
-    amountCents: resolved.amountCents,
-  };
-}
 
 Deno.serve(async (req) => {
   try {
@@ -107,7 +95,7 @@ Deno.serve(async (req) => {
 
         const { data: existingRow } = await supabase
           .from('stripe_subscriptions')
-          .select('id, plan_name, status, amount_cents, billing_interval, token_limit, cancel_at_period_end')
+          .select('id, plan_name, status, amount_cents, billing_interval, cancel_at_period_end')
           .eq('stripe_customer_id', customer.customer_id)
           .maybeSingle();
 
@@ -139,7 +127,7 @@ Deno.serve(async (req) => {
         const subscription = stripeSubscriptions.data[0];
         const price = subscription.items.data[0]?.price;
         const priceId = price?.id ?? '';
-        const planInfo = price ? resolvePlanInfo(price) : { name: 'unknown', tokenLimit: 0, amountCents: 0 };
+        const planInfo = price ? resolvePlanInfoWithFallbacks(price) : { name: 'unknown', amountCents: 0 };
         const billingInterval = price?.recurring?.interval === 'year' ? 'year' : 'month';
 
         const upsertData: Record<string, unknown> = {
@@ -152,8 +140,6 @@ Deno.serve(async (req) => {
           status: subscription.status,
           price_id: priceId,
           billing_interval: billingInterval,
-          token_limit: planInfo.tokenLimit,
-          is_lifetime_limit: true,
           current_period_start: new Date(subscription.current_period_start * 1000).toISOString(),
           current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
           cancel_at_period_end: subscription.cancel_at_period_end,
@@ -180,7 +166,6 @@ Deno.serve(async (req) => {
           status: existingRow.status,
           amount_cents: existingRow.amount_cents,
           billing_interval: existingRow.billing_interval,
-          token_limit: existingRow.token_limit,
           cancel_at_period_end: existingRow.cancel_at_period_end,
         } : null;
 
@@ -202,7 +187,6 @@ Deno.serve(async (req) => {
               status: subscription.status,
               amount_cents: planInfo.amountCents,
               billing_interval: billingInterval,
-              token_limit: planInfo.tokenLimit,
               cancel_at_period_end: subscription.cancel_at_period_end,
             },
           });

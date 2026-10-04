@@ -19,8 +19,10 @@ describe('Container Type Registry', () => {
   });
 
   describe('Static Data Integrity', () => {
-    it('should have 16 built-in container types (cloud-project removed 2026-08-05; serverless-function + desktop-app removed by N11(c); service-mesh re-filed as a Networking LEAF by N10(c) 2026-08-09)', () => {
-      expect(STATIC_CONTAINER_TYPE_DATA.length).toBe(16);
+    // AG.11f: one entry per container role in the catalog (29 live, 2 retired), so the ten
+    // platforms and the devices draw as boxes before the catalog loads.
+    it('should have the catalog\'s 31 container types, and none of the retired container definitions', () => {
+      expect(STATIC_CONTAINER_TYPE_DATA.length).toBe(31);
       expect(STATIC_CONTAINER_TYPE_DATA.map(ct => ct.id)).not.toContain('cloud-project');
       expect(STATIC_CONTAINER_TYPE_DATA.map(ct => ct.id)).not.toContain('serverless-function');
       expect(STATIC_CONTAINER_TYPE_DATA.map(ct => ct.id)).not.toContain('desktop-app');
@@ -46,7 +48,8 @@ describe('Container Type Registry', () => {
         expect(ct.description).toBeTruthy();
         expect(ct.icon).toBeTruthy();
         expect(['infrastructure', 'orchestration', 'runtime', 'logical']).toContain(ct.layer);
-        expect(Array.isArray(ct.canContain)).toBe(true);
+        // a platform admits by rule (its provider, natures, interface kinds), the rest by list
+        expect(Array.isArray(ct.canContain) || typeof ct.canContain === 'object').toBe(true);
         expect(typeof ct.defaultMetadata).toBe('object');
         expect(typeof ct.metadataSchema).toBe('object');
       }
@@ -68,9 +71,12 @@ describe('Container Type Registry', () => {
       expect(layers.has('logical')).toBe(true);
     });
 
-    it('should have non-empty metadataSchema for all types', () => {
+    it('should have a metadataSchema for every type, with fields for the ones people configure', () => {
       for (const ct of STATIC_CONTAINER_TYPE_DATA) {
-        expect(Object.keys(ct.metadataSchema).length).toBeGreaterThan(0);
+        expect(typeof ct.metadataSchema).toBe('object');
+      }
+      for (const id of ['vpc', 'subnet', 'k8s-cluster', 'docker-container', 'aws', 'gcp', 'azure', 'vercel']) {
+        expect(Object.keys(getContainerTypeById(id)?.metadataSchema ?? {}).length, id).toBeGreaterThan(0);
       }
     });
 
@@ -80,11 +86,11 @@ describe('Container Type Registry', () => {
       }
     });
 
-    it('should have 12 hosting and 4 logical-boundary types', () => {
+    it('should have 25 hosting and 6 logical-boundary types (two of the groups retired)', () => {
       const hosting = STATIC_CONTAINER_TYPE_DATA.filter(ct => ct.containerStyle === 'hosting');
       const logical = STATIC_CONTAINER_TYPE_DATA.filter(ct => ct.containerStyle === 'logical-boundary');
-      expect(hosting.length).toBe(12);
-      expect(logical.length).toBe(4);
+      expect(hosting.length).toBe(25);
+      expect(logical.length).toBe(6);
     });
 
     it('infrastructure and orchestration layers should be hosting style', () => {

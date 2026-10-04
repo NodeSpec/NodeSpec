@@ -1,18 +1,29 @@
 // N6.2(c) rev 2 — ONE permanent home for changes, matching the git button
-// pattern: a header Changes button (badge when proposals are pending — TopBar
-// renders it, this component reports the count) opens this panel.
-//   Pending    — proposals awaiting review (Review opens the side review panel)
+// pattern: a header button (badge when anything waits — TopBar renders it,
+// this component reports the count) opens this panel. Owner 2026-09-20: the
+// header button is Agents, and this is the one Agents surface.
+//   Proposals  — V3 4.3: everything a person has to decide, in two origin
+//                sections: what your agents proposed (every kind, the plan
+//                included) and what the import left (candidates, mappings
+//                to review, open questions). One act per row. Named Needs
+//                you by the design; renamed Proposals (owner 2026-09-20).
+//   Autonomy   — 8.2: what the agents may do on each tier without asking.
+//                Was a popover on its own header button; one pane now.
+//   Connected  — V3 I (owner 2026-09-21): the person's connected agents,
+//                keys and OAuth clients in one list, with the plan's
+//                allowance; connect with a one-time key, revoke in the row.
 //   Repository — R3-5: what this branch did with its git repo, and what is still
 //                hanging (unanswered detections, files never bound)
 //   History    — the applied patch log, newest first, names not UUIDs
 // Nothing floats over the canvas unless the user opened it or is reviewing.
 //
 // R3-5 (owner 2026-07-30) moved this from a docked bottom sheet to a right-edge
-// SIDE PANEL: the dock's 46vh ceiling could not hold a timeline, and the bottom
-// strip belongs to the CanvasDock. Pending/History behavior is unchanged.
-import { useState, useEffect, useCallback } from 'react';
+// SIDE PANEL. V3 4.3 made it the width of the canvas; the owner (2026-09-20)
+// put it back beside the canvas: one side popup, the same in every view,
+// like the node sidepane. The header count is the Proposals count.
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  X, GitPullRequestArrow, History, GitBranch, RefreshCw, DownloadCloud,
+  X, GitPullRequestArrow, History, GitBranch, RefreshCw, DownloadCloud, SlidersHorizontal, Plug,
   AlertTriangle, GitCommitHorizontal, Link2Off, ArrowDownToLine, ArrowUpFromLine, CircleAlert, ListChecks,
 } from 'lucide-react';
 import { useProposal, usePatch } from '../../context/ServiceContext.js';
@@ -24,15 +35,43 @@ import { useTheme } from '../../theme/ThemeContext.js';
 import { GitService } from '../../services/GitService.js';
 import type { GitChangeEvent, RepoSyncEvent } from '../../services/GitService.js';
 import { getSupabaseClient } from '../../../persistence/supabase/client.js';
+import { isSpecPlaneProposal } from '../../utils/proposal-plane.js';
 import {
   deriveUnfinishedBusiness, mergeRepoActivity, formatActivityTime, shortSha, deriveAheadOfGit,
-  type RepoActivityEntry, type UnfinishedItem,
+  loadModelMessage, loadSpecMessage, type RepoActivityEntry, type UnfinishedItem,
 } from './repoActivity.js';
+// R17: approvals and agent presence live HERE. The Ideation popup and the
+// Agents button's roster both folded into this panel — one room, one door.
+import { useApprovalsQueue, queuePlanFrom } from '../ideation/useApprovalsQueue.js';
+import { useProjectFeatureGate } from '../../hooks/useProjectFeatureGate.js';
+import { ApprovalsWaiting, ApprovalsHistory } from '../ideation/ApprovalsQueue.js';
+import { AutonomyOverlay } from '../ideation/AutonomyOverlay.js';
+import { DecisionPage } from '../ideation/DecisionPage.js';
+import type { WorkTarget } from '../work/work-focus.js';
+import { useAutonomySettings } from '../ideation/useAutonomySettings.js';
+import { policySummary } from '../../utils/autonomy.js';
+import { useAgentPresence } from '../ideation/useAgentPresence.js';
+import { roster } from '../ideation/agent-roster.js';
+import { AgentAvatars } from './AgentAvatars.js';
+import { AgentRoster } from './AgentRoster.js';
+import { useAgentConnections } from '../ideation/useAgentConnections.js';
+import { ConnectedAgents } from '../ideation/ConnectedAgents.js';
+import { SIDE_POPUP_TOP, SIDE_POPUP_Z } from '../common/canvas-chrome.js';
+import { everyVisible } from '../../hooks/useSharedPoll.js';
 
 const POLL_MS = 30_000;
 const HISTORY_LIMIT = 50;
 
-type Tab = 'pending' | 'repository' | 'history';
+type Tab = 'pending' | 'autonomy' | 'connected' | 'repository' | 'history';
+/** AK: a tab another surface opens the panel on (the header's MCP button, the walkthrough). */
+export type AgentsTab = Tab;
+
+/** The tab the panel opens on: Proposals when anything waits for a decision
+ *  (the count the header's Agents badge shows, every kind) or the panel was
+ *  opened on a proposal; Repository otherwise. */
+export function openingTab(waiting: number, openedOnProposal: boolean): 'pending' | 'repository' {
+  return waiting > 0 || openedOnProposal ? 'pending' : 'repository';
+}
 
 export function ChangesPanel({
   isOpen,
@@ -43,11 +82,14 @@ export function ChangesPanel({
   hasGitIntegration,
   graph,
   refreshCounter,
-  autoApprove,
   onReviewProposal,
   onPendingCountChange,
   onOpenGitPanel,
-  onModelRestored,
+  focusProposalId,
+  onSpecDecided,
+  onOpenArchitecture,
+  onOpenWork,
+  openOn,
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -59,15 +101,21 @@ export function ChangesPanel({
   graph: Graph;
   /** Bump = reload (proposal accepted/declined, graph refreshed). */
   refreshCounter?: number;
-  /** UX-1.1a: the opt-in auto-approve setting (project-level, default OFF). */
-  autoApprove?: { enabled: boolean; onToggle: (enabled: boolean) => void };
   onReviewProposal: (proposal: AIProposal) => void;
   /** Reports the pending count upward for the header badge + arrival toast. */
   onPendingCountChange?: (count: number) => void;
   /** R3-5: jump to the reconciliation surface — the panel itself never resolves. */
   onOpenGitPanel?: () => void;
-  /** R3-5: the R3-1 load succeeded — re-read the canvas. */
-  onModelRestored?: () => void;
+  /** R17: opened from an agent card — that proposal's row is marked. */
+  focusProposalId?: string | null;
+  /** R17: a spec-plane decision landed — the boards behind re-read. */
+  onSpecDecided?: () => void;
+  /** V3 4.3: an open question is answered by an edit in Architecture; this goes there. */
+  onOpenArchitecture?: (nodeId?: string) => void;
+  /** The decision page's Edit first: the outcome under Work. */
+  onOpenWork?: (target: WorkTarget) => void;
+  /** AK: open on this tab (each new `at` asks again), over the tab the panel would pick. */
+  openOn?: { tab: Tab; at: number } | null;
 }) {
   const proposalService = useProposal();
   const patchService = usePatch();
@@ -77,6 +125,35 @@ export function ChangesPanel({
   const [tab, setTab] = useState<Tab>('pending');
   const [pending, setPending] = useState<AIProposal[]>([]);
   const [history, setHistory] = useState<PersistedPatch[]>([]);
+  // R17: the one approvals lane — every kind, grouped; decisions inline.
+  // V3 4.3: the graph answers the import's open questions by derivation.
+  // Q: the queue reads and shows only the lanes the project's plan carries (decision 1: its owner's).
+  const gate = useProjectFeatureGate(projectId);
+  const queue = useApprovalsQueue(projectId, queuePlanFrom(gate));
+  const nodeLabels = useMemo(() => new Map(Object.values(graph.nodes).map((n) => [n.id, n.label])), [graph]);
+  const presence = useAgentPresence(projectId);
+  const agents = roster(presence.holds);
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  // The Autonomy tab: the one control over what agents may do (one writer,
+  // useAutonomySettings). The design's aside ends in "Autonomy settings",
+  // and that chip opens this tab.
+  const autonomy = useAutonomySettings(projectId);
+  // V3 I: the person's connected agents (user-wide, not per project), read
+  // through list_api_keys when the panel opens so the tab shows the count.
+  const connections = useAgentConnections(isOpen);
+  // The design's One decision: a promotion is read on its own page before
+  // it is decided. Read it on the card opens it; so does arriving here on
+  // a promotion (Work's Review on the row that says proposal waiting).
+  const [decisionId, setDecisionId] = useState<string | null>(null);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
+  const decisionItem = useMemo(() => (decisionId ? queue.items.find((i) => i.proposalId === decisionId && i.kind === 'promotion' && i.pending) ?? null : null), [queue.items, decisionId]);
+  useEffect(() => {
+    if (!isOpen) { setDecisionId(null); setDecisionError(null); return; }
+    if (!focusProposalId) return;
+    const it = queue.items.find((i) => i.proposalId === focusProposalId);
+    if (it?.kind === 'promotion' && it.pending) setDecisionId(focusProposalId);
+  }, [isOpen, focusProposalId, queue.items]);
+  const afterDecision = () => { void queue.refresh(); void loadPending(); void presence.refresh(); onSpecDecided?.(); };
 
   // ── Repository tab state ────────────────────────────────────────────────────
   const [repoLoading, setRepoLoading] = useState(false);
@@ -97,18 +174,25 @@ export function ChangesPanel({
       // UX-1.2 (owner spec 2026-08-21): the queue reads newest-first so
       // recency is legible at a glance; each row shows its timestamp below.
       proposals.sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
-      setPending(proposals);
-      onPendingCountChange?.(proposals.length);
+      // 8.1: this lane is the canvas — graph proposals only. Spec-plane rows
+      // belong to the Ideation approvals queue (resolve_proposal refuses
+      // graph ops; the canvas accept would mangle spec ops).
+      const graphOnly = proposals.filter((p) => !isSpecPlaneProposal(p));
+      setPending(graphOnly);
     } catch {
       setPending([]);
     }
-  }, [branchId, proposalService, onPendingCountChange]);
+  }, [branchId, proposalService]);
+
+  // R17: the header badge counts everything awaiting a decision. V3 4.3:
+  // that is the whole Proposals list, the import's leftovers included.
+  useEffect(() => { onPendingCountChange?.(queue.pending); }, [queue.pending, onPendingCountChange]);
 
   // Poll even while closed — the header badge and arrival toast depend on it.
+  // AL.20: not while the tab is hidden; coming back reads once.
   useEffect(() => {
     loadPending();
-    const t = setInterval(loadPending, POLL_MS);
-    return () => clearInterval(t);
+    return everyVisible(loadPending, POLL_MS);
   }, [loadPending, refreshCounter]);
 
   useEffect(() => {
@@ -134,7 +218,7 @@ export function ChangesPanel({
       const [events, syncs, ref, patches] = await Promise.all([
         gitService.getRecentChangeEvents(projectId).catch(() => [] as GitChangeEvent[]),
         gitService.getRepoSyncEvents(projectId).catch(() => [] as RepoSyncEvent[]),
-        gitService.getBranchGitRef(projectId, branchName || 'main').catch(() => null),
+        (branchName ? gitService.getBranchGitRef(projectId, branchName).catch(() => null) : Promise.resolve(null)),
         branchId ? patchService.loadPatches(branchId).catch(() => []) : Promise.resolve([]),
       ]);
       setChanges(events);
@@ -151,11 +235,18 @@ export function ChangesPanel({
     void loadRepoRecords();
   }, [isOpen, tab, loadRepoRecords, refreshCounter]);
 
-  // Default to whichever tab has something to say.
+  // Default to whichever tab has something to say. The queue counts every
+  // kind waiting (the badge's number); `pending` is the canvas lane alone,
+  // so an outcome or a promotion used to open the panel on Repository.
   useEffect(() => {
-    if (isOpen) setTab(pending.length > 0 ? 'pending' : 'repository');
+    if (isOpen) setTab(openOn?.tab ?? openingTab(queue.pending + pending.length, !!focusProposalId));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
+  // Asked again while already open (the walkthrough moving from Connected to Autonomy).
+  useEffect(() => {
+    if (isOpen && openOn) setTab(openOn.tab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openOn?.at]);
 
   /**
    * RACE SAFETY (owner constraint): a forced, branch-scoped sweep — exactly the
@@ -170,13 +261,16 @@ export function ChangesPanel({
     try {
       const integration = await gitService.getIntegration(projectId);
       if (!integration) { setRepoNote({ tone: 'warn', text: 'No git integration is configured for this project.' }); return; }
-      const sweep = await gitService.detectDrift(integration.id, { branchName: branchName || 'main', force: true });
+      const sweep = await gitService.detectDrift(integration.id, { ...(branchName ? { branchName } : {}), force: true });
       const status = (sweep?.status as string | undefined) ?? null;
       setSweepStatus(status);
       setHeadSha((sweep?.headSha as string | undefined) ?? null);
       await loadRepoRecords();
       if (status === 'drift' || status === 'behind_in_sync') {
         setRepoNote({ tone: 'warn', text: 'This branch is behind its git branch — see below.' });
+      } else if (status === 'load_proposed') {
+        // V3 AD.2b: a merged pull request came home and was filed, not loaded.
+        setRepoNote({ tone: 'warn', text: "A merged change arrived: the repository's model is waiting in Proposals." });
       } else if (status === 'clean' || status === 'fast_forwarded') {
         setRepoNote({ tone: 'ok', text: 'Up to date with the repository.' });
       } else if (status === 'ref_deleted') {
@@ -202,28 +296,24 @@ export function ChangesPanel({
    */
   const handleLoadRepoModel = useCallback(async () => {
     if (!projectId) return;
-    if (!window.confirm(
-      `Load the repository's model for "${branchName || 'main'}" onto this canvas?\n\n` +
-      'The design stored in the repository becomes this branch\'s canvas. Unpushed local ' +
-      'changes on this branch are replaced. Your git history is untouched.'
-    )) return;
+    // V3 AD.2b: the load is filed as a proposal the person reviews, so there
+    // is nothing to confirm here: nothing changes until they accept it.
     setBusy('load');
     setRepoNote(null);
     try {
       const integration = await gitService.getIntegration(projectId);
       if (!integration) { setRepoNote({ tone: 'warn', text: 'No git integration is configured for this project.' }); return; }
-      const result = await gitService.restoreModel(integration.id, branchName || 'main');
+      const result = await gitService.restoreModel(integration.id, branchName || undefined);
       setSweepStatus(null);
       setHeadSha(result?.headSha ?? null);
-      onModelRestored?.();
       await loadRepoRecords();
-      setRepoNote({ tone: 'ok', text: `Loaded the repository model at ${shortSha(result?.headSha ?? null) || 'HEAD'}.` });
+      setRepoNote({ tone: 'ok', text: loadModelMessage(result) });
     } catch (err) {
       setRepoNote({ tone: 'warn', text: err instanceof Error ? err.message : 'Load failed' });
     } finally {
       setBusy(null);
     }
-  }, [projectId, branchName, gitService, loadRepoRecords, onModelRestored]);
+  }, [projectId, branchName, gitService, loadRepoRecords]);
 
   /**
    * R7c: the spec plane's card-independent loader, for the same reason the model
@@ -235,24 +325,19 @@ export function ChangesPanel({
   const handleLoadRepoSpec = useCallback(async () => {
     if (!projectId) return;
     if (!window.confirm(
-      `Load the repository's requirements for "${branchName || 'main'}"?\n\n` +
+      `Load the repository's requirements${branchName ? ` for "${branchName}"` : ''}?\n\n` +
       'Requirements and acceptance criteria are taken from the repository. Criteria you have ' +
       'already met keep their evidence unless their text changed. Requirements the repository ' +
-      'does not have are kept, not deleted.'
+      'does not have are kept, not deleted, and locked requirements stay as they are.'
     )) return;
     setBusy('spec');
     setRepoNote(null);
     try {
       const integration = await gitService.getIntegration(projectId);
       if (!integration) { setRepoNote({ tone: 'warn', text: 'No git integration is configured for this project.' }); return; }
-      const result = await gitService.restoreSpec(integration.id, branchName || 'main');
-      const c = result.counts ?? { mappings: 0 };
-      const detail = result.mode === 'adopted'
-        ? `${c.requirements ?? 0} requirement(s) imported`
-        : `${c.added ?? 0} added, ${c.updated ?? 0} updated, ${c.criteriaPreserved ?? 0} met criterion(s) kept their evidence`;
-      const kept = result.keptLocal?.length ? ` ${result.keptLocal.length} of yours kept (not in the repo).` : '';
+      const result = await gitService.restoreSpec(integration.id, branchName || undefined);
       await loadRepoRecords();
-      setRepoNote({ tone: 'ok', text: `Requirements loaded — ${detail}.${kept}` });
+      setRepoNote({ tone: 'ok', text: loadSpecMessage(result) });
     } catch (err) {
       setRepoNote({ tone: 'warn', text: err instanceof Error ? err.message : 'Requirements load failed' });
     } finally {
@@ -262,7 +347,9 @@ export function ChangesPanel({
 
   if (!isOpen) return null;
 
-  const currentBranch = branchName || 'main';
+  // AD.4 (D15): the open branch, named by the editor (the primary's real
+  // name when none is open); never the literal 'main'.
+  const currentBranch = branchName ?? '';
   const unfinished: UnfinishedItem[] = deriveUnfinishedBusiness({
     changes, branchName: currentBranch, sweepStatus, headSha,
     // R4: the other direction — accepted changes that never reached git.
@@ -272,15 +359,8 @@ export function ChangesPanel({
     syncEvents, changes, branchName: currentBranch, branchId,
   });
 
-  const titleOf = (p: AIProposal): string => {
-    const meta = p.metadata as Record<string, unknown> | undefined;
-    if (typeof meta?.title === 'string' && meta.title) return meta.title;
-    if (meta?.source === 'git-adopt') return 'Restore design from repository model';
-    if (typeof meta?.source === 'string' && meta.source) return `Proposal (${meta.source})`;
-    return 'Architecture change proposal';
-  };
 
-  const tabButton = (key: Tab, label: string, icon: React.ReactNode, count?: number) => (
+  const tabButton = (key: Tab, label: string, icon: React.ReactNode, count?: number, note?: string) => (
     <button
       onClick={() => setTab(key)}
       style={{
@@ -294,6 +374,7 @@ export function ChangesPanel({
     >
       {icon}
       {label}
+      {note && <span data-testid={`changes-tab-note-${key}`} style={{ fontSize: '10.5px', fontWeight: 700, opacity: 0.8 }}>· {note}</span>}
       {count !== undefined && count > 0 && (
         <span style={{
           padding: '1px 6px', borderRadius: '8px', fontSize: '10px', fontWeight: 700,
@@ -480,89 +561,133 @@ export function ChangesPanel({
   );
 
   return (
-    <div style={{
-      position: 'fixed', top: '68px', right: '12px', bottom: '12px',
-      width: 'min(420px, 94vw)',
+    <div data-testid="proposals-panel" data-tour="agents-panel" style={{
+      // A side popup beside the canvas, the same in every view (owner
+      // 2026-09-20): the node sidepane's anchor and height, wider for the
+      // cards; never the width of the canvas.
+      position: 'fixed', right: '20px', top: `${SIDE_POPUP_TOP}px`, width: 'min(540px, calc(100vw - 40px))', height: `calc(100vh - ${SIDE_POPUP_TOP + 20}px)`,
       display: 'flex', flexDirection: 'column',
       backgroundColor: c.surface, border: `1px solid ${c.border}`, borderRadius: '12px',
       boxShadow: theme.mode === 'dark' ? '0 12px 48px rgba(0,0,0,0.5)' : '0 12px 48px rgba(0,0,0,0.16)',
-      overflow: 'hidden', zIndex: 300,
+      overflow: 'hidden', zIndex: SIDE_POPUP_Z,
     }}>
-      <div style={{
-        display: 'flex', alignItems: 'center',
+      {/* R17: who is working, ambient across every tab. The stack expands
+          into the full roster; the roster's own queue link is off because
+          this panel IS the queue. */}
+      {agents.length > 0 && (
+        <div style={{ borderBottom: `1px solid ${c.border}`, flexShrink: 0 }}>
+          <button
+            data-testid="changes-agents-strip"
+            aria-expanded={agentsOpen}
+            onClick={() => setAgentsOpen((v) => !v)}
+            style={{
+              width: '100%', display: 'flex', alignItems: 'center', gap: '9px',
+              padding: '8px 14px', border: 'none', background: 'transparent',
+              color: c.text, cursor: 'pointer', textAlign: 'left',
+            }}
+          >
+            <AgentAvatars principals={agents} />
+            <span style={{ fontSize: '11.5px', fontWeight: 600 }}>
+              {agents.length} agent{agents.length === 1 ? '' : 's'} at work
+            </span>
+            <span style={{ flex: 1 }} />
+            <span style={{ fontSize: '10px', color: c.textMuted }}>{agentsOpen ? '▾' : '▸'}</span>
+          </button>
+          {agentsOpen && (
+            // A long roster scrolls in place; it never pushes the tabs and the
+            // close button out of the panel.
+            <div style={{ padding: '0 14px 12px', maxHeight: '30vh', overflowY: 'auto' }}>
+              <AgentRoster presence={presence} showQueueLink={false} />
+            </div>
+          )}
+        </div>
+      )}
+      <div data-testid="changes-header" style={{
+        display: 'flex', alignItems: 'flex-start', flexShrink: 0,
         borderBottom: `1px solid ${c.border}`, backgroundColor: c.backgroundSecondary,
         paddingRight: '4px',
       }}>
-        {tabButton('pending', 'Pending', <GitPullRequestArrow size={13} />, pending.length)}
-        {tabButton('repository', 'Repository', <GitBranch size={13} />, unfinished.length)}
-        {tabButton('history', 'History', <History size={13} />)}
-        <div style={{ flex: 1 }} />
+        {/* The tabs wrap onto a second row when the panel is narrow, and the
+            close button sits outside them, so it stays in view at any width
+            (owner 2026-09-29: the X was pushed off the panel). */}
+        <div data-testid="changes-tabs" style={{ display: 'flex', flexWrap: 'wrap', flex: 1, minWidth: 0 }}>
+          {tabButton('pending', 'Proposals', <GitPullRequestArrow size={13} />, queue.pending)}
+          {projectId && tabButton('autonomy', 'Autonomy', <SlidersHorizontal size={13} />, undefined, autonomy.loading ? undefined : policySummary(autonomy.policy))}
+          {tabButton('connected', 'Connected', <Plug size={13} />, undefined, connections.loading || connections.error ? undefined : `${connections.active} of ${connections.limit}`)}
+          {tabButton('repository', 'Repository', <GitBranch size={13} />, unfinished.length)}
+          {tabButton('history', 'History', <History size={13} />)}
+        </div>
         <button
+          data-testid="changes-close"
           onClick={onClose}
-          style={{ background: 'transparent', border: 'none', color: c.textMuted, cursor: 'pointer', padding: '6px' }}
+          style={{ background: 'transparent', border: 'none', color: c.textMuted, cursor: 'pointer', padding: '6px', marginTop: '3px', flexShrink: 0 }}
           title="Close"
+          aria-label="Close"
         >
           <X size={15} />
         </button>
       </div>
 
       <div style={{ overflowY: 'auto', flex: 1 }}>
-        {tab === 'pending' && autoApprove && (
-          <label style={{
-            display: 'flex', alignItems: 'center', gap: '8px',
-            padding: '9px 14px', borderBottom: `1px solid ${c.border}`,
-            fontSize: '11.5px', color: c.textMuted, cursor: 'pointer',
-          }}>
-            <input
-              type="checkbox"
-              checked={autoApprove.enabled}
-              onChange={(e) => autoApprove.onToggle(e.target.checked)}
-              style={{ accentColor: c.primary, cursor: 'pointer' }}
-            />
-            <span>
-              Auto-approve incoming proposals
-              <span style={{ opacity: 0.75 }}> — applies immediately with the same validation and locked-node guards; import reviews still ask</span>
-            </span>
-          </label>
-        )}
-        {tab === 'pending' ? (
-          pending.length === 0 ? (
-            <div style={{ padding: '20px', fontSize: '12px', color: c.textMuted, textAlign: 'center' }}>
-              No pending change proposals. Your AI's proposed changes (via MCP) and
-              repository restore offers appear here for review.
-            </div>
-          ) : (
-            pending.map((p) => (
-              <div key={p.id} style={{
-                display: 'flex', alignItems: 'center', gap: '10px',
-                padding: '10px 14px', borderBottom: `1px solid ${c.border}`,
-              }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: '12px', fontWeight: 500, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {titleOf(p)}
-                  </div>
-                  <div style={{ fontSize: '11px', color: c.textMuted }}>
-                    {p.patches.length} change{p.patches.length !== 1 ? 's' : ''}
-                    {p.createdAt ? ` · ${new Date(p.createdAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : ''}
-                  </div>
-                </div>
-                <button
-                  onClick={() => { onClose(); onReviewProposal(p); }}
-                  style={{
-                    padding: '5px 14px', fontSize: '12px', fontWeight: 600,
-                    border: 'none', borderRadius: '6px', cursor: 'pointer',
-                    backgroundColor: c.primary, color: '#fff', flexShrink: 0,
-                  }}
-                >
-                  Review
-                </button>
-              </div>
-            ))
-          )
+        {/* R23: the auto-approve toggle that sat here was a SECOND control
+            over the same state as the Autonomy settings (the architecture
+            lane's Auto-apply mirrors the same metadata key). One meaning per
+            control: the Autonomy tab is the one writer; the Proposals tab
+            only lists and decides. */}
+        {tab === 'autonomy' ? (
+          <div data-testid="proposals-autonomy-page" style={{ padding: '14px' }}>
+            <AutonomyOverlay settings={autonomy} onClose={() => setTab('pending')} />
+          </div>
+        ) : tab === 'connected' ? (
+          <div data-testid="agents-connected-page" style={{ padding: '14px' }}>
+            <ConnectedAgents connections={connections} holds={presence.holds} />
+          </div>
+        ) : tab === 'pending' && decisionItem ? (
+          <DecisionPage
+            item={decisionItem}
+            projectId={projectId}
+            graph={graph}
+            workflows={!gate.loading && gate.can('workflow_space')}
+            busy={queue.busyId === decisionItem.proposalId}
+            error={decisionError}
+            onDecide={(action) => {
+              setDecisionError(null);
+              void queue.resolve(decisionItem.proposalId, action).then((r) => {
+                if (!r.ok) { setDecisionError(r.error ?? 'The decision did not apply.'); return; }
+                setDecisionId(null);
+                afterDecision();
+              });
+            }}
+            onBack={() => { setDecisionId(null); setDecisionError(null); }}
+            onEditFirst={onOpenWork ? (candidateId) => { onClose(); onOpenWork({ kind: 'outcome', id: candidateId }); } : undefined}
+            onOpenArchitecture={onOpenArchitecture ? (nodeId) => { onClose(); onOpenArchitecture(nodeId); } : undefined}
+          />
+        ) : tab === 'pending' ? (
+          /* R17: ONE waiting list, every kind, grouped by what deciding it
+             does. Canvas changes hand off to the side review (the panel
+             closes so the review has the room); everything else decides
+             inline through resolve_proposal. */
+          <ApprovalsWaiting
+            queue={queue}
+            focusProposalId={focusProposalId}
+            nodeLabels={nodeLabels}
+            onOpenAutonomy={projectId ? () => setTab('autonomy') : undefined}
+            onReadDecision={(proposalId) => { setDecisionError(null); setDecisionId(proposalId); }}
+            onOpenWork={onOpenWork ? (target) => { onClose(); onOpenWork(target); } : undefined}
+            onReviewCanvas={(proposalId) => {
+              const p = pending.find((x) => x.id === proposalId);
+              if (p) { onClose(); onReviewProposal(p); }
+            }}
+            onDecided={afterDecision}
+          />
         ) : tab === 'repository' ? (
           repositoryTab
-        ) : (
-          history.length === 0 ? (
+        ) : (<>
+          <ApprovalsHistory queue={queue} />
+          <div style={{ padding: '9px 14px 5px', fontSize: '10px', fontWeight: 700, letterSpacing: '.07em', color: c.textMuted, textTransform: 'uppercase', borderBottom: `1px solid ${c.border}` }}>
+            Applied changes
+          </div>
+          {history.length === 0 ? (
             <div style={{ padding: '20px', fontSize: '12px', color: c.textMuted, textAlign: 'center' }}>
               No applied changes recorded on this branch yet.
             </div>
@@ -587,8 +712,8 @@ export function ChangesPanel({
                 </span>
               </div>
             ))
-          )
-        )}
+          )}
+        </>)}
       </div>
     </div>
   );

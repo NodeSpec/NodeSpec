@@ -32,6 +32,7 @@ function RequirementInspectorComponent({
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState<'functional' | 'non-functional' | 'technical' | 'business'>('functional');
   const [locked, setLocked] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [acceptanceCriteria, setAcceptanceCriteria] = useState<Array<{ text: string; met?: boolean; testId?: string }>>([]);
   const [newCriterionText, setNewCriterionText] = useState('');
   const [isSaving, setIsSaving] = useState(false);
@@ -102,7 +103,8 @@ function RequirementInspectorComponent({
         const branchesResult = await services.persistence.getBranchRepository().listByProject(projectId);
         if (cancelled) return;
         if (branchesResult.success) {
-          const mainBranch = branchesResult.data.find((b: any) => b.name === 'main');
+          // AD.4 (D15): the primary branch by its flag; connect may have renamed it.
+          const mainBranch = branchesResult.data.find((b: any) => b.isPrimary);
           if (mainBranch) {
             const snapshotResult = await services.persistence.getGraphRepository().loadSnapshot(mainBranch.id);
             if (cancelled) return;
@@ -119,11 +121,17 @@ function RequirementInspectorComponent({
     return () => { cancelled = true; };
   }, [projectId, services]);
 
+  // v3x (doctrine 6): while the SERVER row is locked, the fields take no
+  // edit; the Protection toggle plus Save is the one door, and nothing else
+  // rides along with the unlock (the database refuses a rider).
+  const serverLocked = requirement?.locked ?? false;
+
   const handleSave = async () => {
     if (!requirement) return;
 
     try {
       setIsSaving(true);
+      setSaveError(null);
       await specificationService.updateRequirement(requirement.id, {
         name,
         description: description || undefined,
@@ -174,6 +182,7 @@ function RequirementInspectorComponent({
       if (onUpdate) onUpdate();
     } catch (err) {
       console.error('Failed to save requirement:', err);
+      setSaveError(err instanceof Error ? err.message : 'Save failed');
     } finally {
       setIsSaving(false);
     }
@@ -314,6 +323,7 @@ function RequirementInspectorComponent({
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
+              disabled={serverLocked}
               placeholder="Enter requirement name..."
               style={{
                 padding: '10px 12px',
@@ -333,6 +343,7 @@ function RequirementInspectorComponent({
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
+              disabled={serverLocked}
               placeholder="Describe the requirement in detail..."
               style={{
                 padding: '10px 12px',
@@ -355,6 +366,7 @@ function RequirementInspectorComponent({
               <select
                 value={category}
                 onChange={(e) => setCategory(e.target.value as typeof category)}
+                disabled={serverLocked}
                 style={{
                   padding: '10px 12px',
                   border: `1px solid ${inputBorder}`,
@@ -397,6 +409,15 @@ function RequirementInspectorComponent({
                   {locked ? 'Locked' : 'Unlocked'}
                 </span>
               </button>
+              {(serverLocked || locked) && (
+                <div data-testid="lock-note" style={{ fontSize: '12px', lineHeight: 1.5, color: serverLocked ? '#d97706' : c.textMuted }}>
+                  {serverLocked && locked
+                    ? 'Locked. Every write refuses this requirement, from the app and from every tool, until you switch the lock off here and save. Evidence on its criteria still flows.'
+                    : serverLocked
+                      ? 'Save to unlock. Nothing else changes in the same save; edit after.'
+                      : 'Saving locks it: every write refuses it until you unlock it here.'}
+                </div>
+              )}
             </div>
           </div>
 
@@ -510,7 +531,8 @@ function RequirementInspectorComponent({
                     {criterion.text}
                   </span>
                   <button
-                    onClick={() => handleRemoveCriterion(index)}
+                    onClick={() => { if (!serverLocked) handleRemoveCriterion(index); }}
+                    disabled={serverLocked}
                     style={{
                       padding: '4px',
                       border: 'none',
@@ -560,7 +582,7 @@ function RequirementInspectorComponent({
               />
               <button
                 onClick={handleAddCriterion}
-                disabled={!newCriterionText.trim()}
+                disabled={serverLocked || !newCriterionText.trim()}
                 style={{
                   padding: '10px 16px',
                   border: 'none',
@@ -671,6 +693,11 @@ function RequirementInspectorComponent({
           borderTop: `1px solid ${borderColor}`,
           gap: '12px',
         }}>
+          {saveError && (
+            <div data-testid="save-error" role="alert" style={{ flex: 1, alignSelf: 'center', fontSize: '12px', lineHeight: 1.4, color: '#d97706' }}>
+              {saveError}
+            </div>
+          )}
           <button
             style={{
               padding: '10px 16px',
@@ -687,7 +714,8 @@ function RequirementInspectorComponent({
               color: '#ef4444',
             }}
             onClick={handleDelete}
-            disabled={isDeleting}
+            disabled={isDeleting || serverLocked}
+            title={serverLocked ? 'Locked. Unlock it here and save, then delete.' : undefined}
             onMouseEnter={(e) => { if (!isDeleting) e.currentTarget.style.opacity = '0.8'; }}
             onMouseLeave={(e) => { if (!isDeleting) e.currentTarget.style.opacity = '1'; }}
           >

@@ -111,7 +111,6 @@ async function handleGetTemplateAuthoringContext(
     isContainer: r.is_container,
     containerLayer: r.container_layer,
     paletteCategory: r.palette_category,
-    defaultPorts: r.default_ports,
     suggestedContracts: r.suggested_contracts,
     capabilityTags: r.capability_tags,
     defaultTechnology: r.default_technology,
@@ -182,9 +181,9 @@ async function handleGetTemplateAuthoringContext(
         "artifacts",
       ],
       nodeFields:
-        "id, type (must match a node_role id), label, technology?, deploymentTarget?, ports?, data?, artifacts?, metadata?, status?, parentId?, placementKind?",
+        "id, type (must match a node_role id), label, technology?, deploymentTarget?, data?, artifacts?, metadata?, status?, parentId?, placementKind?",
       edgeFields:
-        "id, source (node uuid), target (node uuid), sourcePortId?, targetPortId?, contractId (must reference a contract), label?, metadata?, direction?, criticality?",
+        "id, source (node uuid), target (node uuid), contractId (must reference a contract), label?, metadata?, direction?, criticality?",
       contractFields:
         "id, kind (from contractKinds), interactionKind?, transport?, specFormat?, name, schema?, schemaRef?, metadata?, status?",
       artifactFields:

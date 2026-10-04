@@ -1,8 +1,18 @@
+// V3 P3 (task 3.1): the two-view shell — Work | Architecture (Workflow
+// Space design; ruling R4). V3 4.1: the upstream view reads "Work"; the
+// internal 'ideation' id survives so persisted view state keeps working.
+// Work hosts the Steps and Plan tabs, Architecture stays the flat React
+// Flow canvas exactly as it was.
 import { memo } from 'react';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { Tooltip } from './Tooltip.js';
+import { useViewport } from '../../hooks/useViewport.js';
+import {
+  canvasChromeLayout, PILL_METRICS,
+  VIEW_PILL, VIEW_PILL_NO_EXPORT,
+} from './canvas-chrome.js';
 
-export type CanvasViewMode = 'decomposition' | 'architecture' | 'specification';
+export type CanvasViewMode = 'ideation' | 'architecture';
 
 interface ViewToggleProps {
   viewMode: CanvasViewMode;
@@ -13,17 +23,33 @@ interface ViewToggleProps {
 function ViewToggleComponent({ viewMode, onToggle, onExport }: ViewToggleProps) {
   const { theme } = useTheme();
   const c = theme.colors;
+  const vp = useViewport();
+
+  // 9.14: the pill's size is a LAYOUT decision, not a constant, and it is made
+  // in canvas-chrome.ts. V3 4.1 retired the mode pill that used to share the
+  // line with it, so this pill is the whole band in both views.
+  const spec = onExport ? VIEW_PILL : VIEW_PILL_NO_EXPORT;
+  const layout = canvasChromeLayout({
+    vw: vp.width,
+    modePill: null,
+    viewPill: spec,
+  });
+  const m = PILL_METRICS[layout.density];
+  const box = layout.viewPill!;
 
   const containerStyles: React.CSSProperties = {
     position: 'absolute',
-    top: '16px',
+    top: `${box.top}px`,
     right: '16px',
     zIndex: 100,
     display: 'flex',
-    gap: '4px',
+    // A label the estimate under-measured must WRAP rather than push the pill
+    // off the canvas, so the shell can never be wider than the gutters allow.
+    maxWidth: 'calc(100% - 32px)',
+    gap: `${m.shellGap}px`,
     backgroundColor: c.surface,
-    borderRadius: '12px',
-    padding: '6px',
+    borderRadius: `${m.radius}px`,
+    padding: `${m.shellPad}px`,
     boxShadow: theme.mode === 'dark'
       ? '0 4px 16px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.12)'
       : '0 4px 16px rgba(0, 0, 0, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.08)',
@@ -32,18 +58,20 @@ function ViewToggleComponent({ viewMode, onToggle, onExport }: ViewToggleProps) 
   };
 
   const buttonBaseStyles: React.CSSProperties = {
-    padding: '10px 16px',
+    padding: `${m.padY}px ${m.padX}px`,
     border: 'none',
-    borderRadius: '8px',
+    borderRadius: `${m.buttonRadius}px`,
     cursor: 'pointer',
-    fontSize: '13px',
+    fontSize: `${m.fontSize}px`,
     fontWeight: 600,
     transition: 'all 0.2s ease',
     display: 'flex',
     alignItems: 'center',
-    gap: '8px',
+    justifyContent: 'center',
+    gap: m.showLabel ? `${m.iconGap}px` : '0',
     outline: 'none',
     userSelect: 'none',
+    whiteSpace: 'nowrap',
   };
 
   const getButtonStyles = (isActive: boolean): React.CSSProperties => ({
@@ -53,49 +81,31 @@ function ViewToggleComponent({ viewMode, onToggle, onExport }: ViewToggleProps) 
     boxShadow: isActive ? '0 2px 8px rgba(0, 0, 0, 0.15)' : 'none',
   });
 
-  return (
-    <div style={containerStyles}>
-      <Tooltip content="Edit the full specification as markdown">
-        <button
-          style={getButtonStyles(viewMode === 'specification')}
-          onClick={() => onToggle('specification')}
-          onMouseEnter={(e) => {
-            if (viewMode !== 'specification') {
-              e.currentTarget.style.backgroundColor = theme.mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.04)';
-            }
-          }}
-          onMouseLeave={(e) => {
-            if (viewMode !== 'specification') {
-              e.currentTarget.style.backgroundColor = 'transparent';
-            }
-          }}
-        >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path d="M4 2h8a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="currentColor" strokeWidth="1.5" fill="none" />
-            <line x1="5.5" y1="5" x2="10.5" y2="5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-            <line x1="5.5" y1="7.5" x2="10.5" y2="7.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-            <line x1="5.5" y1="10" x2="8.5" y2="10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-          </svg>
-          <span>Specification</span>
-        </button>
-      </Tooltip>
+  const hoverIn = (active: boolean) => (e: React.MouseEvent<HTMLButtonElement>) => {
+    if (!active) {
+      e.currentTarget.style.backgroundColor = theme.mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.04)';
+    }
+  };
+  const hoverOut = (active: boolean) => (e: React.MouseEvent<HTMLButtonElement>) => {
+    if (!active) {
+      e.currentTarget.style.backgroundColor = 'transparent';
+    }
+  };
 
-      <Tooltip content="Decomposition view - See requirements, features, and architecture mappings">
+  return (
+    <div data-testid="view-toggle" data-tour="views" data-density={layout.density} style={containerStyles}>
+      <Tooltip content="Work · steps, requirements, proof and the plan">
         <button
-          style={getButtonStyles(viewMode === 'decomposition')}
-          onClick={() => onToggle('decomposition')}
-          onMouseEnter={(e) => {
-            if (viewMode !== 'decomposition') {
-              e.currentTarget.style.backgroundColor = theme.mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.04)';
-            }
-          }}
-          onMouseLeave={(e) => {
-            if (viewMode !== 'decomposition') {
-              e.currentTarget.style.backgroundColor = 'transparent';
-            }
-          }}
+          data-testid="view-toggle-ideation"
+          aria-label="Work"
+          aria-pressed={viewMode === 'ideation'}
+          title={m.showLabel ? undefined : 'Work'}
+          style={getButtonStyles(viewMode === 'ideation')}
+          onClick={() => onToggle('ideation')}
+          onMouseEnter={hoverIn(viewMode === 'ideation')}
+          onMouseLeave={hoverOut(viewMode === 'ideation')}
         >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <svg width={m.icon} height={m.icon} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
             <rect x="2" y="2" width="12" height="3" rx="1" stroke="currentColor" strokeWidth="1.5" fill="none" />
             <rect x="2" y="6.5" width="12" height="3" rx="1" stroke="currentColor" strokeWidth="1.5" fill="none" />
             <rect x="2" y="11" width="12" height="3" rx="1" stroke="currentColor" strokeWidth="1.5" fill="none" />
@@ -103,26 +113,22 @@ function ViewToggleComponent({ viewMode, onToggle, onExport }: ViewToggleProps) 
             <circle cx="4" cy="8" r="0.8" fill="currentColor" />
             <circle cx="4" cy="12.5" r="0.8" fill="currentColor" />
           </svg>
-          <span>Decomposition</span>
+          {m.showLabel && <span>Work</span>}
         </button>
       </Tooltip>
 
-      <Tooltip content="Architecture view - Visualize components and infrastructure">
+      <Tooltip content="Architecture — components and infrastructure on the canvas">
         <button
+          data-testid="view-toggle-architecture"
+          aria-label="Architecture"
+          aria-pressed={viewMode === 'architecture'}
+          title={m.showLabel ? undefined : 'Architecture'}
           style={getButtonStyles(viewMode === 'architecture')}
           onClick={() => onToggle('architecture')}
-          onMouseEnter={(e) => {
-            if (viewMode !== 'architecture') {
-              e.currentTarget.style.backgroundColor = theme.mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.04)';
-            }
-          }}
-          onMouseLeave={(e) => {
-            if (viewMode !== 'architecture') {
-              e.currentTarget.style.backgroundColor = 'transparent';
-            }
-          }}
+          onMouseEnter={hoverIn(viewMode === 'architecture')}
+          onMouseLeave={hoverOut(viewMode === 'architecture')}
         >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <svg width={m.icon} height={m.icon} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
             <circle cx="3" cy="3" r="2" stroke="currentColor" strokeWidth="1.5" fill="none" />
             <circle cx="13" cy="3" r="2" stroke="currentColor" strokeWidth="1.5" fill="none" />
             <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.5" fill="none" />
@@ -133,7 +139,7 @@ function ViewToggleComponent({ viewMode, onToggle, onExport }: ViewToggleProps) 
             <line x1="6.5" y1="9" x2="4.5" y2="12" stroke="currentColor" strokeWidth="1.5" />
             <line x1="9.5" y1="9" x2="11.5" y2="12" stroke="currentColor" strokeWidth="1.5" />
           </svg>
-          <span>Architecture</span>
+          {m.showLabel && <span>Architecture</span>}
         </button>
       </Tooltip>
 
@@ -147,25 +153,25 @@ function ViewToggleComponent({ viewMode, onToggle, onExport }: ViewToggleProps) 
           }} />
           <Tooltip content="Export project context for AI agents and documentation">
             <button
+              data-testid="view-toggle-export"
+              data-tour="export"
+              aria-label="Export"
+              title={m.showLabel ? undefined : 'Export'}
               style={{
                 ...buttonBaseStyles,
                 backgroundColor: 'transparent',
                 color: c.text,
               }}
               onClick={onExport}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = theme.mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.04)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-              }}
+              onMouseEnter={hoverIn(false)}
+              onMouseLeave={hoverOut(false)}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg width={m.icon} height={m.icon} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
                 <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
                 <polyline points="16 6 12 2 8 6" />
                 <line x1="12" y1="2" x2="12" y2="15" />
               </svg>
-              <span>Export</span>
+              {m.showLabel && <span>Export</span>}
             </button>
           </Tooltip>
         </>

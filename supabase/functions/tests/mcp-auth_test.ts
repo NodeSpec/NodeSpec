@@ -40,11 +40,12 @@ Deno.test('authenticate: non-Bearer Authorization is rejected', async () => {
 Deno.test('authenticate: X-MCP-API-Key routes to the api-key validator', async () => {
   const sb = new FakeSupabase();
   sb.script('rpc', 'validate_mcp_api_key', {
-    data: [{ is_valid: true, user_id: 'user-1', key_id: 'key-1', scopes: ['read', 'propose'] }],
+    data: [{ is_valid: true, user_id: 'user-1', key_id: 'key-1', scopes: ['read', 'propose'], key_name: 'hermes' }],
     error: null,
   });
   const auth = await authenticate(reqWith({ 'X-MCP-API-Key': 'ns_live_secret' }), sb as never);
-  assertEquals(auth, { userId: 'user-1', keyId: 'key-1', scopes: ['read', 'propose'], authMethod: 'api_key' });
+  // O.2: the key's name rides the answer, so every write it makes is labelled by it
+  assertEquals(auth, { userId: 'user-1', keyId: 'key-1', scopes: ['read', 'propose'], authMethod: 'api_key', keyName: 'hermes' });
   assertEquals(sb.callsTo('rpc', 'validate_mcp_api_key').length, 1);
 });
 

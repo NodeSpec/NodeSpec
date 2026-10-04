@@ -4,20 +4,32 @@
 //   r6-vision-lane        (1) update_vision over MCP → git-push regenerates the
 //                             task packet AND the committed doc embeds the new
 //                             vision — the visionHash fingerprint leg END TO END
-//                             (Discovered #9/#10).
+//                             (Discovered #9/#10). Since AA.6 (owner 2026-09-23)
+//                             a packet carries only the vision sentences its
+//                             node's outcomes cite: the fixture's outcome on
+//                             REQ-001 cites the sentence the edit adds, so the
+//                             edit changes the served block, re-stales the
+//                             packet and lands the new sentence in the doc.
 //   r6-relations-coupling (2) create_requirement with relations[] records
 //                             lineage at creation (source 'ai');
 //                         (3) derived coupling flips shared_node → adjacent when
 //                             map_requirement moves a requirement across an edge;
 //                         (4) two rapid auto-numbered creates land distinct ids
 //                             (Discovered #8, the numbering race).
-import { callFn, github, rest, mcpCall, uid, until, Scenario } from '../lib.mjs';
+import { callFn, github, rest, mcpCall, uid, until, Scenario, parseMcp } from '../lib.mjs';
 import { createProject, connectRepo } from '../fixtures.mjs';
 
-const parse = (r) => {
-  const text = r.data?.result?.content?.[0]?.text;
-  try { return JSON.parse(text); } catch { return { raw: text, isError: r.data?.result?.isError }; }
-};
+// AA.1: a vision sentence's id, the server's rule (vision-sentences.ts):
+// `v:` and the FNV-1a of its normalized text.
+function visionSentenceId(text) {
+  const norm = String(text ?? '').replace(/[*_`]/g, '').trim().replace(/\s+/g, ' ').replace(/[\s.!?;:,]+$/, '').toLowerCase();
+  let h = 0x811c9dc5;
+  for (let i = 0; i < norm.length; i++) { h ^= norm.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return `v:${h.toString(16).padStart(8, '0')}`;
+}
+
+// The shared strict reader (lib.mjs): a call that failed below the tool is an error.
+const parse = parseMcp;
 
 export const visionLane = {
   name: 'r6-vision-lane',
@@ -35,6 +47,23 @@ export const visionLane = {
     // carries exactly ONE task artifact — findExistingTaskArtifact resolves by
     // (nodeId, kind), and two docs on one node would make generate_task_docs'
     // update target ambiguous.
+    // AA.6: the vision a packet carries is the sentences its node's outcomes
+    // cite. An outcome behind REQ-001 (mapped to API Service) cites the
+    // sentence the vision edit below adds; until then it cites nothing the
+    // vision has, and the packet says so.
+    const NEW_VISION = 'R6 BENCH VISION: a task API whose packets follow the vision';
+    const outcomeId = uid();
+    await db.insert('requirement_candidates', {
+      id: outcomeId, project_id: fx.ids.project, branch_id: fx.ids.branch, node_id: null,
+      key: `outcome:${uid().slice(0, 8)}`, kind: 'outcome', name: 'Packets follow the vision',
+      criteria: [{ id: 'c1', text: 'The packet carries the vision sentence it serves' }],
+      evidence: { serves: [{ id: visionSentenceId(NEW_VISION), text: NEW_VISION }] },
+    });
+    await db.insert('outcome_derivations', {
+      project_id: fx.ids.project, branch_id: fx.ids.branch, candidate_id: outcomeId, requirement_row_id: fx.ids.req1,
+      criteria_slice: ['c1'], proposed_by_kind: 'human', proposed_by_id: session.userId,
+    });
+
     const artId = uid();
     const graph = structuredClone(fx.graph);
     delete graph.artifacts[fx.ids.taskArtifact];
@@ -122,15 +151,19 @@ export const visionLane = {
     s.check('committed doc carries the AUTHORED prose, no review marker yet',
       !!doc2 && !doc2.content.includes('REVIEW NEEDED'), doc2?.content?.slice(0, 300) ?? 'authored content never appeared');
 
-    // The vision edit — over MCP, the C3 write lane.
-    const NEW_VISION = 'R6 BENCH VISION: a task API whose packets follow the vision';
+    // The vision edit (over MCP, the C3 write lane) adds the sentence the outcome cites.
     const vis = parse(await mcpCall(env, 'update_vision', { project_id: fx.ids.project, vision: NEW_VISION }));
-    s.check('update_vision succeeds over MCP', vis?.vision === NEW_VISION || vis?.updated === true || !vis?.isError,
-      JSON.stringify(vis).slice(0, 300));
+    // UAT hardening 2026-09-27: any answer that was not an error used to pass;
+    // the stored vision is what the push below depends on.
+    const [visRow] = await rest(env).select('project_specifications', `project_id=eq.${fx.ids.project}&select=vision`);
+    s.check('update_vision succeeds over MCP and the stored vision is the new one',
+      vis?.isError !== true && visRow?.vision === NEW_VISION,
+      `answer ${JSON.stringify(vis).slice(0, 160)}; stored ${JSON.stringify(visRow?.vision ?? null).slice(0, 120)}`);
 
     // Push 3: NOTHING changed but the vision, against a genuinely FRESH
-    // fingerprint — visionHash alone must re-stale the packet (the R6 leg-1 pin,
-    // now non-vacuous). N5.17 preservation rides the same regeneration: authored
+    // fingerprint. The new sentence is one the node's outcome cites, so the
+    // served block changes and visionHash alone must re-stale the packet (the
+    // R6 leg-1 pin, now non-vacuous). N5.17 preservation rides the same regeneration: authored
     // prose survives verbatim and gains the REVIEW-NEEDED flag.
     await until(async () => (await gh.headSha('main')) === push2.data.commitSha, { timeoutMs: 20000, everyMs: 2000 });
     const push3 = await callFn(env, session, 'git-push', {
@@ -373,7 +406,7 @@ export const sectionLane = {
     const cleared = parse(await mcpCall(env, 'update_requirement', {
       project_id: fx.ids.project, requirement_id: first.requirementId, section: null,
     }));
-    s.check('update with section null clears', cleared?.success !== false,
+    s.check('update with section null clears', cleared?.isError !== true && cleared?.success !== false,
       JSON.stringify(cleared).slice(0, 200));
 
     list = parse(await mcpCall(env, 'list_requirements', { project_id: fx.ids.project }));

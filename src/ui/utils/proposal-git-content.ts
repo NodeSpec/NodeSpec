@@ -19,6 +19,10 @@ export interface GitContentRequest {
   index: number;
   path: string;
   ref: string;
+  /** V3 AD.2b: a load of git's model binds every file its model.json names,
+   *  and a binding whose file was never committed lands without content
+   *  instead of failing the accept. */
+  optional?: boolean;
 }
 
 /**
@@ -37,10 +41,10 @@ export function collectGitContentRequests(
     if (patch.type !== 'add_artifact') return;
     const payload = patch.payload as { content?: string; path?: string; metadata?: Record<string, unknown> };
     if (payload?.content !== GIT_CONTENT_SENTINEL) return;
-    const source = payload.metadata?.contentSource as { type?: string; ref?: string } | undefined;
+    const source = payload.metadata?.contentSource as { type?: string; ref?: string; optional?: boolean } | undefined;
     const path = typeof payload.path === 'string' ? payload.path : '';
     if (source?.type === 'git' && typeof source.ref === 'string' && source.ref.length > 0 && path) {
-      requests.push({ index, path, ref: source.ref });
+      requests.push({ index, path, ref: source.ref, ...(source.optional === true ? { optional: true } : {}) });
     } else {
       malformed.push(path || `(patch ${index}: no path)`);
     }
@@ -66,6 +70,12 @@ export function injectGitContent(
     if (!request) return patch;
     const content = files.get(request.path);
     if (content === undefined) {
+      if (request.optional) {
+        // Bound in git's model, never committed: the binding lands empty,
+        // with no hash claiming content it does not have.
+        const { contentHash: _none, ...rest } = patch.payload as Record<string, unknown>;
+        return { ...patch, payload: { ...rest, content: '' } } as unknown as PatchOperation;
+      }
       missing.push(request.path);
       return patch;
     }

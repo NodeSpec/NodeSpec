@@ -25,8 +25,8 @@ import imgRedis from '../../assets/redis.png';
 */
 
 const STAGES: Array<{ view: string; overlay: string | null; label: string }> = [
-  { view: 'spec', overlay: null, label: 'Spec · requirements and acceptance criteria' },
-  { view: 'decomposition', overlay: null, label: 'Decomposition · every requirement traced to a node' },
+  { view: 'spec', overlay: null, label: 'Work · requirements and acceptance criteria' },
+  { view: 'decomposition', overlay: null, label: 'Work · every requirement traced to a node' },
   { view: 'architecture', overlay: null, label: 'Architecture · the live system canvas' },
   { view: 'architecture', overlay: 'inspector', label: 'Scoped context · one node, one slice' },
   { view: 'architecture', overlay: 'mcp', label: 'MCP first · your AI, your IDE' },
@@ -165,13 +165,15 @@ export function ProductTourSection() {
       }
     });
     root.querySelectorAll<HTMLElement>('[data-view]').forEach(b => {
-      const on = b.getAttribute('data-view') === id;
+      // The app's view pill is Work | Architecture: the requirements and
+      // their trace to nodes are both under Work.
+      const on = b.getAttribute('data-view') === (id === 'decomposition' ? 'spec' : id);
       b.style.cursor = 'pointer';
       b.style.color = on ? '#ffffff' : '#1f2937';
       b.style.backgroundColor = on ? '#8B8FE6' : 'transparent';
       b.style.boxShadow = on ? '0 2px 8px rgba(0,0,0,.15)' : 'none';
     });
-    const sbActive = id === 'spec' ? 'spec' : 'nodes';
+    const sbActive = 'nodes';
     root.querySelectorAll<HTMLElement>('[data-sbtab]').forEach(t => {
       const on = t.getAttribute('data-sbtab') === sbActive;
       t.style.color = on ? '#111827' : '#6b7280';
@@ -331,9 +333,6 @@ export function ProductTourSection() {
                     <span data-sbtab="nodes" style={{ flex: "1", display: "flex", alignItems: "center", justifyContent: "center", gap: "7px", fontSize: "13px", fontWeight: "500", color: "#6b7280", padding: "13px 8px", borderBottom: "2px solid transparent", transition: "color .3s ease, border-color .3s ease, background-color .3s ease" }}>
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="6" height="6" rx="1"></rect><rect x="15" y="15" width="6" height="6" rx="1"></rect><path d="M9 6h6a3 3 0 0 1 3 3v6"></path></svg>Nodes
                     </span>
-                    <span data-sbtab="spec" style={{ flex: "1", display: "flex", alignItems: "center", justifyContent: "center", gap: "7px", fontSize: "13px", fontWeight: "600", color: "#111827", background: "#fff", padding: "13px 8px", borderBottom: "2px solid #8B8FE6", transition: "color .3s ease, border-color .3s ease, background-color .3s ease" }}>
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 3h9l4 4v14H6z"></path><path d="M9 12h7"></path><path d="M9 16h5"></path></svg>Spec
-                    </span>
                   </div>
                   <div style={{ padding: "12px 12px 8px" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px 11px", borderRadius: "8px", border: "1px solid #e5e7eb", background: "#fafbfc", fontSize: "12px", color: "#9ca3af" }}><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M16 16l4 4"></path></svg>Search 300+ technologies</div>
@@ -355,10 +354,7 @@ export function ProductTourSection() {
 
                   <div style={{ position: "absolute", top: "12px", right: "12px", zIndex: "6", display: "flex", gap: "3px", padding: "5px", borderRadius: "11px", background: "#ffffff", boxShadow: "0 4px 16px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.08)" }}>
                     <span data-view="spec" style={{ display: "flex", alignItems: "center", gap: "5px", fontSize: "11.5px", fontWeight: "600", color: "#1f2937", padding: "6px 9px", borderRadius: "8px", cursor: "pointer", whiteSpace: "nowrap", transition: "background-color .3s ease, color .3s ease" }}>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 3h9l4 4v14H6z"></path><path d="M9 12h7"></path><path d="M9 16h5"></path></svg>Specification
-                    </span>
-                    <span data-view="decomposition" style={{ display: "flex", alignItems: "center", gap: "5px", fontSize: "11.5px", fontWeight: "600", color: "#1f2937", padding: "6px 9px", borderRadius: "8px", cursor: "pointer", whiteSpace: "nowrap", transition: "background-color .3s ease, color .3s ease" }}>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="4" width="5" height="16" rx="1"></rect><rect x="10" y="4" width="5" height="16" rx="1"></rect><rect x="17" y="4" width="4" height="16" rx="1"></rect></svg>Decomposition
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 3h9l4 4v14H6z"></path><path d="M9 12h7"></path><path d="M9 16h5"></path></svg>Work
                     </span>
                     <span data-view="architecture" style={{ display: "flex", alignItems: "center", gap: "5px", fontSize: "11.5px", fontWeight: "600", color: "#1f2937", padding: "6px 9px", borderRadius: "8px", cursor: "pointer", whiteSpace: "nowrap", transition: "background-color .3s ease, color .3s ease" }}>
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="6" height="6" rx="1"></rect><rect x="15" y="3" width="6" height="6" rx="1"></rect><rect x="9" y="15" width="6" height="6" rx="1"></rect><path d="M6 9v3c0 1 1 2 2 2h2"></path><path d="M18 9v3c0 1-1 2-2 2h-2"></path></svg>Architecture
@@ -816,7 +812,7 @@ export function ProductTourSection() {
             </div>
 
             <div style={{ display: "flex", justifyContent: "center", marginTop: "20px" }}>
-              <span data-stage-label="" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11.5px", color: "#8a8f9e", padding: "7px 14px", borderRadius: "999px", border: "1px solid rgba(139,143,230,.18)", background: "rgba(26,29,38,.6)", transition: "opacity .3s ease" }}>Spec · requirements and acceptance criteria</span>
+              <span data-stage-label="" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "11.5px", color: "#8a8f9e", padding: "7px 14px", borderRadius: "999px", border: "1px solid rgba(139,143,230,.18)", background: "rgba(26,29,38,.6)", transition: "opacity .3s ease" }}>Work · requirements and acceptance criteria</span>
             </div>
           </div>
 

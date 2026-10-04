@@ -28,6 +28,8 @@ function makeCatalog() {
             label: type.split('.')[1],
             category: 'container',
             rfVisualType: 'container',
+            // AB.5: containment comes from the container flag, as on every real container row.
+            isContainer: true,
             canContain: ['*'],
             paletteCategory: 'orchestration',
           },

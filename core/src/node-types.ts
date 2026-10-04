@@ -4,13 +4,6 @@
 // handles, and the failed state is VISIBLE via the N9b-2 DegradedCatalogBanner
 // instead of silently serving stale hardcoded data.
 
-export interface PortTemplate {
-  name: string;
-  direction: 'in' | 'out';
-  required?: boolean;
-  schemaRef?: string;
-}
-
 export type SetupInstructionType =
   | 'account_setup'
   | 'dashboard_config'
@@ -71,7 +64,6 @@ export interface DomainNodeType {
   icon: string;
   color: string;
   aiContext: AIContext;
-  defaultPorts?: PortTemplate[];
   suggestedContracts?: string[];
   commonConnections?: string[];
   defaultMetadata?: Record<string, unknown>;

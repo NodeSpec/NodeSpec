@@ -1,9 +1,8 @@
 // P0-1: one-shot batch re-encryption of stored customer secrets to the v2 envelope.
 //
-// Covers BOTH secret stores:
-//   - user_api_keys.api_key_encrypted        (AI provider keys)
-//   - git_integrations.access_token_encrypted (git provider tokens; legacy rows may be
-//     v1-encrypted OR raw plaintext — the old code only decrypted when isEncrypted())
+// Covers the secret store: git_integrations.access_token_encrypted (git provider
+// tokens; legacy rows may be v1-encrypted OR raw plaintext, as the old code only
+// decrypted when isEncrypted()). AH.2 removed the other store, user_api_keys.
 //
 // Admin-only (same gate as admin-update-subscription: JWT app_metadata.is_admin).
 // Requires ENCRYPTION_SECRET. Rows that fail to decrypt are left untouched and counted.
@@ -123,7 +122,6 @@ Deno.serve(async (req: Request) => {
     }
 
     const results = [
-      await reencryptTable(supabase, "user_api_keys", "api_key_encrypted", encryptionSecret, supabaseServiceKey),
       await reencryptTable(supabase, "git_integrations", "access_token_encrypted", encryptionSecret, supabaseServiceKey),
     ];
 
@@ -133,7 +131,7 @@ Deno.serve(async (req: Request) => {
       results,
       note: remaining === 0
         ? "All stored secrets are now v2."
-        : "Some rows failed to decrypt and were left untouched — their owners must re-save those keys/tokens.",
+        : "Some rows failed to decrypt and were left untouched: their owners must re-save those tokens.",
     });
   } catch (e) {
     return jsonResponse({ error: e instanceof Error ? e.message : "Unexpected error" }, 500);

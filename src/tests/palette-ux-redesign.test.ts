@@ -21,7 +21,6 @@ function makeRole(id: string, opts: Partial<NodeRole> = {}): NodeRole {
     containerLayer: opts.containerLayer ?? null,
     containerStyle: opts.containerStyle ?? null,
     metadataSchema: opts.metadataSchema ?? null,
-    defaultPorts: opts.defaultPorts ?? [],
     suggestedContracts: opts.suggestedContracts ?? [],
     deprecated: opts.deprecated ?? false,
     whenToUse: opts.whenToUse ?? null,

@@ -78,12 +78,8 @@ describe('Obligations', () => {
 
       const obligations = deriveNodeObligations(graph, node2Id);
 
-      expect(obligations.length).toBeGreaterThan(0);
-      const contractObligation = obligations.find(o => o.kind === 'contract_required');
-      expect(contractObligation).toBeDefined();
-      expect(contractObligation?.severity).toBe('warning');
-      expect(contractObligation?.portId).toBe(port2Id);
-      expect(contractObligation?.contractId).toBe(contractId);
+      // AG.13: a port no longer restates its edge's contract as an obligation.
+      expect(obligations.some(o => (o.kind as string) === 'contract_required')).toBe(false);
     });
 
     it('should emit artifact_required warning when REST contract exists but no schema/doc artifact', () => {

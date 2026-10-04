@@ -26,7 +26,15 @@ export interface RoleInfo {
   /** M1b: 'logical-boundary' marks a PURELY ORGANIZATIONAL container — the only kind that
    *  may hold a `host` node (N8.4g-3). Every other container carries hosting semantics. */
   containerStyle?: 'hosting' | 'logical-boundary' | null;
+  /** AA.3: the role's can_contain. On a role that is not a container it lists the parts a
+   *  node of the role may be exploded into. Absent = not known (the permissive fallback). */
+  canContain?: string[] | CanContainRule;
+  /** AA.3: a part role (capability tag 'part'): it lives only under a role naming it by id. */
+  isPart?: boolean;
 }
+
+/** AA.3: the capability tag that marks a part role (module, handler, table group...). */
+export const PART_CAPABILITY_TAG = 'part';
 
 export type RoleResolver = (roleId: string) => RoleInfo | null;
 
@@ -50,11 +58,14 @@ export interface ContainerTypeDefinition {
   canContain: string[] | CanContainRule;
   defaultMetadata: Record<string, unknown>;
   metadataSchema: Record<string, {
-    type: 'string' | 'number' | 'boolean' | 'array' | 'object';
+    /** AG.11f: the catalog's field types, `enum` and `multiselect` with their `options`;
+     *  a catalog field may carry no description. */
+    type: 'string' | 'number' | 'boolean' | 'array' | 'object' | 'enum' | 'multiselect';
     label: string;
-    description: string;
+    description?: string;
     required?: boolean;
     default?: unknown;
+    options?: string[];
   }>;
 }
 
@@ -165,6 +176,11 @@ export function canContainerHoldNode(
   // "Purely organizational" IS containerStyle='logical-boundary' (N5.16).
   if (info?.nature === 'host' && containerInfo && containerInfo.containerStyle !== 'logical-boundary') return false;
 
+  // AA.3: the depth rule (a part only under a role naming it; a node that is not a
+  // container holds only the parts its role lists). Before it, a parent whose role is not
+  // a container fell straight through the line below and held anything.
+  if (depthRuleRefusal(containerId, nodeType, resolver ?? undefined)) return false;
+
   if (!containerDef) return true;
 
   // N2.3 precedence — treatment BEFORE any enumeration (V2_TASKS N2.3; §1.F.1). A child
@@ -220,6 +236,45 @@ export function canContainerHoldNode(
   if (noListsDefined) return false;
 
   return false;
+}
+
+/**
+ * AA.3 (owner 2026-09-23): the depth rule, one rule and catalog rows. A node may have a
+ * child only if its role lists the child's role in can_contain. A part role (module,
+ * handler, table group...) is admitted only by a role that names it by id, never by a
+ * container that admits by nature or provider, and a part's own can_contain is empty, so a
+ * part can never be exploded. A role that lists no parts can never be exploded either.
+ *
+ * Containers keep their own rules (canContainerHoldNode). A parent or child the resolver
+ * does not know, or a resolver that carries no can_contain, is never refused here: before
+ * the catalog loads, and in callers with a partial resolver, the old behaviour holds.
+ *
+ * Returns why the placement is refused, or null.
+ */
+export function depthRuleRefusal(parentType: string, childType: string, roleResolver?: RoleResolver): string | null {
+  const resolver = roleResolver || _roleResolver;
+  if (!resolver) return null;
+  const tail = (id: string) => (id.includes('.') ? id.split('.').pop()! : id);
+  const child = tail(childType);
+  const parent = tail(parentType);
+  const childInfo = resolver(child) || resolver(childType);
+  const parentInfo = resolver(parent) || resolver(parentType);
+  if (!parentInfo) return null;
+  const containerDef = getContainerTypeById(parentType);
+  const named = new Set([
+    ...(parentInfo.canContain ? getCanContainRoleIds({ canContain: parentInfo.canContain }) : []),
+    ...(containerDef ? getCanContainRoleIds(containerDef) : []),
+  ]);
+  if (childInfo?.isPart) {
+    if (named.has(child) || named.has(childType)) return null;
+    return `"${child}" is a part: it lives only inside a node whose role lists it, and "${parent}" does not.`;
+  }
+  if (parentInfo.isContainer || parentInfo.canContain === undefined) return null;
+  if (named.has(child) || named.has(childType)) return null;
+  const parts = [...named];
+  return parts.length > 0
+    ? `"${parent}" is not a container: it holds only its parts (${parts.join(', ')}), not "${child}".`
+    : `"${parent}" is not a container and lists no parts, so nothing can be placed inside it.`;
 }
 
 // M6: the prefix + family tables moved to provider-inference.ts — this file held one of

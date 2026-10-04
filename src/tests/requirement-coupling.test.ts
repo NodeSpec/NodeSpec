@@ -182,3 +182,31 @@ describe('computeExpandSuggestions', () => {
     expect(out.size).toBe(0);
   });
 });
+
+// 9.9: an archived row is out of the working set on both ends.
+describe('9.9 · computeExpandSuggestions never fires for an archived target, nor from an archived source', () => {
+  const completed = mkReq('row-done', 'REQ-007', { status: 'implemented' });
+  const fresh = mkReq('row-new', 'REQ-010');
+  const shared = new Map([
+    ['row-new', [{ requirementRowId: 'row-done', kind: 'shared_node' as const, via: 'API Service' }]],
+    ['row-done', [{ requirementRowId: 'row-new', kind: 'shared_node' as const, via: 'API Service' }]],
+  ]);
+
+  it('a hand-archived completed target is never suggested', () => {
+    const archived = { ...completed, archivedAt: '2026-09-16T00:00:00Z' };
+    expect(computeExpandSuggestions([archived, fresh], shared, []).has('row-new')).toBe(false);
+  });
+
+  it('a target already superseded by lineage (a third requirement expands it) is never suggested again', () => {
+    const third = mkReq('row-third', 'REQ-012');
+    const out = computeExpandSuggestions([completed, fresh, third], shared, [mkRelation('row-third', 'row-done', 'expands')]);
+    expect(out.has('row-new')).toBe(false);
+  });
+
+  it('an archived source gets no suggestion of its own', () => {
+    const archivedSource = { ...fresh, archivedAt: '2026-09-16T00:00:00Z' };
+    expect(computeExpandSuggestions([completed, archivedSource], shared, []).has('row-new')).toBe(false);
+    // the plain incomplete source still does
+    expect(computeExpandSuggestions([completed, fresh], shared, []).has('row-new')).toBe(true);
+  });
+});

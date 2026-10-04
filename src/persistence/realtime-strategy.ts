@@ -248,7 +248,8 @@ export function createRealtimeSyncService(
         throw new Error('Not connected to a branch');
       }
 
-      const validation = validatePatch(state.graph, patch);
+      // AA.3: a submit is a new write, held to the depth rule; incoming patches are not.
+      const validation = validatePatch(state.graph, patch, { placement: true });
       if (!validation.valid) {
         throw new Error(`Local validation failed: ${validation.errors[0]?.message}`);
       }

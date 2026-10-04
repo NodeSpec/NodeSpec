@@ -27,8 +27,8 @@ function NotificationCenterComponent({
     position: 'absolute',
     top: '56px',
     right: '16px',
-    width: '420px',
-    maxHeight: '600px',
+    width: 'min(420px, calc(100vw - 32px))',
+    maxHeight: 'min(600px, calc(100vh - 72px))',
     backgroundColor: c.surface,
     border: `1px solid ${c.border}`,
     borderRadius: '8px',
@@ -69,7 +69,8 @@ function NotificationCenterComponent({
 
   const listStyles: React.CSSProperties = {
     overflowY: 'auto',
-    maxHeight: '500px',
+    flex: 1,
+    minHeight: 0,
   };
 
   const emptyStyles: React.CSSProperties = {

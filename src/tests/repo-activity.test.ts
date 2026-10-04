@@ -14,7 +14,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import {
   deriveUnfinishedBusiness, mergeRepoActivity, formatActivityTime, shortSha, changeBranch,
-  deriveAheadOfGit, shouldAutoPushOnAccept,
+  deriveAheadOfGit, shouldAutoPushOnAccept, pushSkipNote, pushWithheldNote, loadSpecMessage, automatedTicksNote, groupCardFiles,
 } from '../ui/components/panels/repoActivity.js';
 import type { GitChangeEvent, RepoSyncEvent } from '../ui/services/GitService.js';
 
@@ -29,6 +29,7 @@ const card = (over: Partial<GitChangeEvent> = {}): GitChangeEvent => ({
   changedFiles: [{ path: 'src/a.ts', action: 'modified' }],
   status: 'pending',
   createdAt: '2026-07-30T10:00:00.000Z',
+  branchName: 'main',
   ...over,
 });
 
@@ -57,9 +58,13 @@ describe('deriveUnfinishedBusiness — the "I forgot to finish this" surface', (
     expect(items).toHaveLength(0);
   });
 
-  it('a legacy card with no branchName belongs to main (R3-3c convention)', () => {
-    expect(changeBranch(card())).toBe('main');
-    expect(deriveUnfinishedBusiness({ changes: [card()], branchName: 'main' })).toHaveLength(1);
+  it('AD.4 (D15): a card is on the branch it names; GitService names a legacy card after the primary', () => {
+    // The primary here was renamed to the git default's name at connect.
+    expect(changeBranch(card({ branchName: 'develop' }))).toBe('develop');
+    expect(deriveUnfinishedBusiness({ changes: [card({ branchName: 'develop' })], branchName: 'develop' })).toHaveLength(1);
+    // A card that names no branch (an unmapped ref) is nobody's, never "main".
+    expect(changeBranch(card({ branchName: undefined }))).toBeNull();
+    expect(deriveUnfinishedBusiness({ changes: [card({ branchName: undefined })], branchName: 'main' })).toHaveLength(0);
   });
 
   // THE owner case: a merge landed, the user never bound the new file, and then
@@ -223,7 +228,8 @@ describe('formatting helpers', () => {
 describe('R3-5 panel: the only two writes, and the one it deliberately omits', () => {
   it('the Changes home is a SIDE panel with three tabs', () => {
     const source = read('ui/components/panels/ChangesPanel.tsx');
-    expect(source).toContain("position: 'fixed', top: '68px', right: '12px', bottom: '12px'");
+    // V3 4.3 made the drawer a page; the owner (2026-09-20) put it back beside the canvas as the Proposals side popup
+    expect(source).toContain("position: 'fixed', right: '20px', top: `${SIDE_POPUP_TOP}px`, width: 'min(540px, calc(100vw - 40px))', height: `calc(100vh - ${SIDE_POPUP_TOP + 20}px)`,");
     expect(source).toContain("tabButton('pending'");
     expect(source).toContain("tabButton('repository'");
     expect(source).toContain("tabButton('history'");
@@ -231,7 +237,7 @@ describe('R3-5 panel: the only two writes, and the one it deliberately omits', (
 
   it('"Check for changes now" is the same forced, branch-scoped sweep the page load runs', () => {
     const source = read('ui/components/panels/ChangesPanel.tsx');
-    expect(source).toContain("gitService.detectDrift(integration.id, { branchName: branchName || 'main', force: true })");
+    expect(source).toContain("gitService.detectDrift(integration.id, { ...(branchName ? { branchName } : {}), force: true })");
   });
 
   // The banked gap closed here: the R3-1 loader used to exist ONLY on a detection
@@ -241,7 +247,7 @@ describe('R3-5 panel: the only two writes, and the one it deliberately omits', (
     expect(source).toContain('Load repo model onto canvas');
     // restoreModel resolves the ref's head server-side — no sha is ever passed in
     // from a card, so a stale record can never be replayed.
-    expect(source).toContain("gitService.restoreModel(integration.id, branchName || 'main')");
+    expect(source).toContain("gitService.restoreModel(integration.id, branchName || undefined)");
     expect(source).not.toContain('restoreModel(integration.id, branchName, change');
   });
 
@@ -254,17 +260,17 @@ describe('R3-5 panel: the only two writes, and the one it deliberately omits', (
     expect(source).toContain('Open the Git panel to resolve');
   });
 
-  it('the load action confirms what it replaces before running', () => {
+  it('the load action files a proposal and replaces nothing (V3 AD.2b)', () => {
     const source = read('ui/components/panels/ChangesPanel.tsx');
-    expect(source).toContain('window.confirm(');
-    expect(source).toContain('Your git history is untouched');
+    expect(source).toContain("text: loadModelMessage(result)");
+    expect(source).not.toContain('Unpushed local changes on this branch are replaced');
   });
 
-  it('GraphEditor gives the panel the branch it reports on and a canvas refresh', () => {
+  it('GraphEditor gives the panel the branch it reports on', () => {
     const source = read('ui/components/GraphEditor.tsx');
-    expect(source).toContain('onModelRestored={refreshGraph}');
+    expect(source).not.toContain('onModelRestored');
     expect(source).toContain('onOpenGitPanel={() => setShowGitModal(true)}');
-    expect(source).toContain("branchName={branchName || 'main'}");
+    expect(source).toContain('branchName={gitBranchName ?? undefined}');
   });
 
   it('the panel reads resolved cards too — otherwise unbound residue vanishes with the card', () => {
@@ -360,7 +366,7 @@ describe('R4 wiring', () => {
 
   it('auto-push NEVER confirms the overwrite guard', () => {
     const source = read('ui/components/GraphEditor.tsx');
-    expect(source).toContain('gitService.push(projectId, branchName || \'main\', integration.id, false, title)');
+    expect(source).toContain('gitService.push(projectId, gitBranchName, integration.id, false, title)');
     expect(source).not.toContain('integration.id, true, title');
   });
 
@@ -374,5 +380,175 @@ describe('R4 wiring', () => {
   it('a push failure reports "ahead of git" instead of failing the accept', () => {
     const source = read('ui/components/GraphEditor.tsx');
     expect(source).toContain('Your design is ahead of git');
+  });
+});
+
+// V3 AD.1: a push never writes over a file git changed since the last sync;
+// the person is told which files waited and what to do.
+describe('AD.1: what a push left alone', () => {
+  it('says nothing when the push wrote everything', () => {
+    expect(pushSkipNote({})).toBe('');
+    expect(pushSkipNote({ skipped: [] })).toBe('');
+  });
+
+  it('names the files, the reason, and the next step', () => {
+    const one = pushSkipNote({ skipped: [{ path: 'src/a.ts' }] });
+    expect(one).toContain('1 file was left as it is in git because it changed there since the last sync (src/a.ts)');
+    expect(one).toContain('Review the pending change, then commit again.');
+    const many = pushSkipNote({ skipped: ['a', 'b', 'c', 'd', 'e'].map((path) => ({ path })) });
+    expect(many).toContain('5 files were left as they are in git');
+    expect(many).toContain('(a, b, c and 2 more)');
+    expect(many).not.toMatch(/[\u2013\u2014]/);
+  });
+
+  it('both push lanes say it', () => {
+    expect(read('ui/components/GraphEditor.tsx')).toContain('${pushSkipNote(result)}');
+    expect(read('ui/components/panels/GitIntegrationModal.tsx')).toContain('+ pushSkipNote(result)');
+  });
+});
+
+// V3 AD.2 (I12): model.json carries configuration and schemas now; a value that
+// looks like a credential stays out of git and the person is told which.
+describe('AD.2: what a push kept out of git', () => {
+  it('says nothing when nothing was withheld', () => {
+    expect(pushWithheldNote({})).toBe('');
+    expect(pushWithheldNote({ withheld: [] })).toBe('');
+  });
+
+  it('names each value and says the canvas keeps it', () => {
+    const one = pushWithheldNote({ withheld: [{ name: 'Orders API', path: 'config.dbPassword' }] });
+    expect(one).toBe(' 1 value looked like a credential and was kept out of git (Orders API config.dbPassword); the canvas keeps it.');
+    const many = pushWithheldNote({ withheld: ['a', 'b', 'c', 'd'].map((k) => ({ name: 'API', path: `config.${k}` })) });
+    expect(many).toContain('4 values looked like credentials and were kept out of git');
+    expect(many).toContain('and 1 more');
+    expect(many).not.toMatch(/[\u2013\u2014]/);
+  });
+
+  it('both push lanes say it', () => {
+    expect(read('ui/components/GraphEditor.tsx')).toContain('${pushWithheldNote(result)}');
+    expect(read('ui/components/panels/GitIntegrationModal.tsx')).toContain('+ pushWithheldNote(result)');
+  });
+});
+
+// V3 AD.2c (D21): a requirements load is one transaction that keeps what git
+// did not change; the person reads what arrived, what evidence survived and
+// what stayed as it was.
+describe('AD.2c: what a requirements load did', () => {
+  it('an adopt counts what came in', () => {
+    expect(loadSpecMessage({ mode: 'adopted', counts: { requirements: 3, criteria: 1, mappings: 2 } }))
+      .toBe("Loaded the repository's requirements: 3 requirements with 1 acceptance criterion.");
+  });
+
+  it('a load names the evidence kept, the mappings git removed, what is kept and what stayed locked', () => {
+    const m = loadSpecMessage({
+      mode: 'applied',
+      counts: { added: 1, updated: 2, criteriaPreserved: 1, mappings: 0, mappingsRemoved: 2 },
+      keptLocal: ['REQ-100'],
+      locked: ['REQ-001', 'REQ-004'],
+      note: 'The last sync stays where it was.',
+    });
+    expect(m).toBe(
+      "Loaded the repository's requirements: 1 added, 2 updated, 1 met criterion kept its evidence, 2 mappings git removed were removed." +
+      ' 1 requirement the repository does not have is kept, not deleted: REQ-100.' +
+      ' 2 locked requirements git changed stay as they are: REQ-001, REQ-004.' +
+      ' The last sync stays where it was.',
+    );
+    expect(m).not.toMatch(/[\u2013\u2014]/);
+  });
+
+  it('says nothing about mappings, kept or locked requirements when there are none', () => {
+    const m = loadSpecMessage({ mode: 'applied', counts: { added: 0, updated: 1, criteriaPreserved: 0, mappings: 0 } });
+    expect(m).toBe("Loaded the repository's requirements: 0 added, 1 updated, 0 met criteria kept their evidence.");
+    expect(loadSpecMessage({ mode: 'applied', locked: ['REQ-9'] })).toContain('A locked requirement git changed stays as it is: REQ-9.');
+  });
+});
+
+// V3 AD.3 (ruling 3): a criterion ticked in a doc that a test result proves
+// says so on the card; the person may still mark it met, as theirs.
+describe('AD.3: ticked criteria that expect a test result', () => {
+  it('names them, and says a person marking them met is recorded as theirs', () => {
+    const one = automatedTicksNote([{ direction: 'tick', verification: 'automated' }, { direction: 'tick', verification: 'manual' }]);
+    expect(one).toBe('One ticked criterion needs a test result: no passing test has marked it met. Marking it met here records it as met by you.');
+    const two = automatedTicksNote([{ direction: 'tick', verification: 'automated' }, { direction: 'tick', verification: 'automated' }, { direction: 'untick', verification: 'automated' }]);
+    expect(two).toBe('2 ticked criteria need a test result: no passing test has marked them met. Marking them met here records them as met by you.');
+    expect(two).not.toMatch(/[\u2013\u2014]/);
+  });
+
+  it('says nothing for manual criteria or cards written before the lane rode along', () => {
+    expect(automatedTicksNote([{ direction: 'tick', verification: 'manual' }])).toBe('');
+    expect(automatedTicksNote([{ direction: 'tick' }])).toBe('');
+  });
+
+  it('the Git panel shows it beside the ticks, and marks each such line', () => {
+    const modal = read('ui/components/panels/GitIntegrationModal.tsx');
+    expect(modal).toContain('automatedTicksNote(criterionTicks)');
+    expect(modal).toContain("d.verification === 'automated' && open.criteria > 0");
+    expect(modal).toContain('(needs a test result)');
+  });
+});
+
+// V3 AD.3c (D23): a card says who changed which file.
+describe('AD.3c: a card\'s files grouped by who changed them', () => {
+  const files = [{ path: 'src/a.ts' }, { path: 'src/b.ts' }, { path: 'src/c.ts' }, { path: 'README.md' }];
+
+  it('each file once, under the authors whose commits changed it; unattributed last', () => {
+    const groups = groupCardFiles(files, [
+      { author: 'alice', files: ['src/a.ts', 'src/b.ts'] },
+      { author: 'claude-agent', files: ['src/b.ts', 'src/c.ts'] },
+    ]);
+    expect(groups.map((g) => [g.label, g.files.map((f) => f.path)])).toEqual([
+      ['alice', ['src/a.ts']],
+      ['alice, claude-agent', ['src/b.ts']],
+      ['claude-agent', ['src/c.ts']],
+      [null, ['README.md']],
+    ]);
+  });
+
+  it('a card without attribution is one unlabeled list, as before', () => {
+    expect(groupCardFiles(files)).toEqual([{ label: null, files }]);
+    expect(groupCardFiles(files, [])).toEqual([{ label: null, files }]);
+  });
+
+  it('the Git panel renders the groups, the roster names who made the commits', () => {
+    const modal = read('ui/components/panels/GitIntegrationModal.tsx');
+    expect(modal).toContain('groupCardFiles(change.changedFiles, change.authors)');
+    expect(modal).toContain('Not attributed to a commit this check read');
+    const roster = read('ui/components/panels/AgentRoster.tsx');
+    expect(roster).toContain("{col.by.length > 0 && <span style={{ fontWeight: 600 }}>{col.by.join(', ')}</span>}");
+    const presence = read('ui/components/ideation/useAgentPresence.ts');
+    expect(presence).toContain("select('id, commit_sha, author, changed_files, metadata')");
+  });
+});
+
+// V3 AD.3c (D22): evidence goes stale on every lane that brings a file
+// change onto the canvas, not only the Git panel's file accept.
+import { nodesWithChangedFiles } from '../ui/services/evidenceStale.js';
+
+describe('AD.3c: staleness on every lane', () => {
+  const before = {
+    A1: { nodeId: 'N1', content: 'old', contentHash: 'h1' },
+    A2: { nodeId: 'N2', content: 'same', contentHash: 'h2' },
+  };
+
+  it('names the nodes whose existing files an accepted batch changed', () => {
+    expect(nodesWithChangedFiles([
+      { type: 'update_artifact', payload: { id: 'A1', changes: { content: 'new' } } },
+      { type: 'update_artifact', payload: { id: 'A2', changes: { content: 'same' } } },
+      { type: 'update_artifact', payload: { id: 'A2', changes: { path: 'moved.ts' } } },
+      { type: 'add_artifact', payload: { id: 'A3', nodeId: 'N3', content: 'fresh' } },
+      { type: 'update_artifact', payload: { id: 'A9', changes: { content: 'x' } } },
+    ], before)).toEqual(['N1']);
+  });
+
+  it('a file moved to another node with new content flags the node it now belongs to', () => {
+    expect(nodesWithChangedFiles([{ type: 'update_artifact', payload: { id: 'A1', changes: { content: 'new', nodeId: 'N5' } } }], before)).toEqual(['N5']);
+  });
+
+  it('the accept path flags them after every accepted proposal, as the Git panel does', () => {
+    const svc = read('ui/services/ProposalService.ts');
+    expect(svc).toContain('const changedNodes = nodesWithChangedFiles(approvedPatches, artifactsBefore);');
+    expect(svc).toContain('await flagNodeEvidenceStale(client, branch.projectId, nodeId, sourceCommit);');
+    const editor = read('ui/components/GraphEditor.tsx');
+    expect(editor).toContain('void flagNodeEvidenceStale(getSupabaseClient(), projectId, artifact.nodeId, sourceCommit)');
   });
 });

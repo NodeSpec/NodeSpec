@@ -9,6 +9,8 @@ const BORDER_COLOR = 'rgba(139, 143, 230, 0.1)';
 
 interface FeatureRow {
   label: string;
+  /** R9: the feature-rules key this row sells — cross-pinned in editions-matrix.test.ts. */
+  feature?: import('../../config/feature-rules.js').Feature;
   category?: boolean;
   values: (string | boolean)[];
 }
@@ -16,34 +18,42 @@ interface FeatureRow {
 // Column order matches deploymentTiers (owner design 2026-08-26):
 // Community (container) · Free (hosted) · Indie · Team · Enterprise · Government.
 // The platform block ships in every tier; each step up is additive — Indie
-// adds repo import, Team adds the teamwork lane, Enterprise is everything but
-// Government-specific, Government is everything.
+// adds repo import and Priority mode, Team adds the teamwork lane, Enterprise
+// is everything but Government-specific, Government is everything.
+// R9 (2026-09-15): every boolean row that names a gated capability carries its
+// `feature` key, and editions-matrix.test.ts asserts the six values against
+// feature-rules.ts for the (edition, tier) pair each column stands for — the
+// marketing claim and the enforcement cannot drift apart.
 function getFeatureRows(): FeatureRow[] {
   return [
     { label: 'Scale', category: true, values: [] },
     { label: 'Where it runs', values: ['Your container', 'Hosted', 'Hosted', 'Hosted', 'Self-hosted', 'Gov enclave'] },
     { label: 'Projects', values: ['Unlimited (local)', '2', 'Unlimited', 'Unlimited', 'Unlimited', 'Unlimited'] },
     { label: 'Users', values: ['Self-managed', '1', '1', 'Per seat', 'Custom', 'Custom'] },
+    { label: 'Connected agents per person', values: ['1', '1', '5', '5', '5', '5'] },
     { label: 'The platform — every tier', category: true, values: [] },
     { label: 'MCP-native connection for your AI', values: [true, true, true, true, true, true] },
     { label: 'Git connection & git provenance', values: [true, true, true, true, true, true] },
     { label: 'Full spec-driven development engine', values: [true, true, true, true, true, true] },
     { label: 'Architecture Canvas', values: [true, true, true, true, true, true] },
     { label: 'Node technology catalog', values: ['Open catalog', 'Full', 'Full', 'Full', 'Full + custom', 'Full + gov-only'] },
-    { label: 'Repo intelligence — Indie and up', category: true, values: [] },
-    { label: 'Repo import reverse visualization & deduction', values: [false, false, true, true, true, true] },
+    { label: 'Build intelligence — Indie and up', category: true, values: [] },
+    { label: 'Repo import reverse visualization & deduction', feature: 'repo_import', values: [false, false, true, true, true, true] },
+    { label: 'Plan: work plans and the order of operations', feature: 'priority_board', values: [false, false, true, true, true, true] },
+    { label: 'Workflows: journeys, their steps, and the outcomes placed on them', feature: 'workflow_space', values: [false, false, true, true, true, true] },
     { label: 'Teamwork — Team and up', category: true, values: [] },
-    { label: 'Notion, Atlassian & Slack node tagging', values: [false, false, false, true, true, true] },
-    { label: 'Workflow Designer — UX to Requirements', values: [false, false, false, true, true, true] },
+    { label: 'Project seats — maintainer, contributor, viewer', feature: 'team_lanes', values: [false, false, false, true, true, true] },
+    { label: 'Notion, Atlassian & Slack node tagging', feature: 'work_exports', values: [false, false, false, true, true, true] },
     { label: 'Deployment & support', category: true, values: [] },
-    { label: 'Licensed self-host deployment', values: [false, false, false, false, true, true] },
+    { label: 'Licensed self-host deployment', feature: 'self_host', values: [false, false, false, false, true, true] },
     { label: 'Internal customer authentication', values: [false, false, false, false, true, true] },
-    { label: 'Custom catalog additions', values: [false, false, false, false, true, true] },
+    { label: 'Custom catalog additions', feature: 'custom_catalog', values: [false, false, false, false, true, true] },
     { label: 'Dedicated onboarding & support', values: [false, false, false, false, true, true] },
     { label: 'Government', category: true, values: [] },
     { label: 'Compliant Government cloud enclaves', values: [false, false, false, false, false, true] },
-    { label: 'Gov-only node additions & context', values: [false, false, false, false, false, true] },
-    { label: 'Compliance package builder', values: [false, false, false, false, false, true] },
+    { label: 'Classification marks & clearance on seats', feature: 'classification', values: [false, false, false, false, false, true] },
+    { label: 'Gov-only node additions & context', feature: 'gov_catalog', values: [false, false, false, false, false, true] },
+    { label: 'Compliance package builder', feature: 'compliance', values: [false, false, false, false, false, true] },
     { label: 'Any foundational or open-weight model', values: [false, false, false, false, false, true] },
   ];
 }

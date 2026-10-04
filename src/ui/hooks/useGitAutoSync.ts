@@ -58,7 +58,11 @@ export function useGitAutoSync(args: {
       if (inFlight.current) return;
       inFlight.current = true;
       try {
-        const pending = await gitService.getPendingChanges(projectId);
+        // AD.1 (D8): oldest card first, so each resolve moves the baseline
+        // forward in commit order and never past a card still waiting.
+        const pending = (await gitService.getPendingChanges(projectId))
+          .slice()
+          .sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''));
         for (const change of pending) {
           if (cancelled) return;
           if (attempted.current.has(change.id)) continue;
@@ -115,7 +119,9 @@ export function useGitAutoSync(args: {
             continue;
           }
 
-          await gitService.resolveChangeEvent(change.id, 'accepted', {
+          // AD.1 (D8): resolves as the version applied above; a card the sync
+          // check rewrote meanwhile is refused and stays for the next pass.
+          await gitService.resolveChangeEvent(integrationId, { id: change.id, commitSha: change.commitSha }, 'accepted', {
             autoSynced: { at: new Date().toISOString(), files: appliedCount },
             ...(boundCount > 0 ? { declarationsBound: boundCount } : {}),
           });

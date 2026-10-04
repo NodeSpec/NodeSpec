@@ -2,10 +2,16 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { encrypt } from "../_shared/crypto.ts";
 import { getPrimaryBranch, computePrimaryRename } from "../_shared/primary-branch.ts";
 import { extractOrchestratorAuth } from "../_shared/auth-helpers.ts";
-import { providerApiBase, fetchRemoteHeadSha, fetchRemoteHeadShaDetailed, fetchRepoFile, listRemoteBranchNames } from "../_shared/git-provider.ts";
-import { MODEL_ANCHOR_PATH, parseModel, verifyModelHash, anchorToPatches, serializeModel, diffAnchors, capAnchorDiff, coreModelHash, type ModelAnchor } from "../_shared/model-anchor.ts";
+import { providerApiBase, fetchRemoteHeadSha, fetchRemoteHeadShaDetailed, readRepoFile } from "../_shared/git-provider.ts";
+import { advanceBaseline, ancestryFor } from "../_shared/baseline.ts";
+import { MODEL_ANCHOR_PATH, parseModel, verifyModelHash, anchorToPatches, serializeModel, diffAnchors, capAnchorDiff, sameDesign, type ModelAnchor } from "../_shared/model-anchor.ts";
 import { SPEC_ANCHOR_PATH, parseSpec, adoptSpecAnchor } from "../_shared/spec-anchor.ts";
-import { summarizeAnchor, decideConnectAnchorAction, loadLatestSnapshot, detectRepoDesignBranches, type BranchDetectResult } from "../_shared/git-drift.ts";
+import { summarizeAnchor, decideConnectAnchorAction, loadLatestSnapshot } from "../_shared/git-drift.ts";
+import { getEffectiveTier } from "../_shared/deployment.ts";
+import { featureAllowed } from "../_shared/feature-rules.ts";
+import { newWebhookSecret, readWebhookSecret, webhookSecretToKeep } from "../_shared/webhook-secret.ts";
+import { isWorkBranch } from "../_shared/commit-mode.ts";
+import { mayUseIntegration } from "../_shared/git-access.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -51,6 +57,14 @@ Deno.serve(async (req: Request) => {
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
+    // AD.4 (D16): a nodespec/push-* branch is where NodeSpec opens pull
+    // requests from; tracking it would read a pull request's work as the design.
+    if (isWorkBranch(defaultBranch)) {
+      return new Response(
+        JSON.stringify({ error: `"${defaultBranch}" is a branch NodeSpec opens pull requests from. Choose the branch they merge into.` }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -69,9 +83,11 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    if (project.owner_id !== userId) {
+    // The owner, or a maintainer seat on a Team project, manages the
+    // repository connection (owner 2026-09-27).
+    if (!(await mayUseIntegration(serviceClient, { integrationProjectId: projectId, userId, access: "manage" }))) {
       return new Response(
-        JSON.stringify({ error: "Not authorized for this project" }),
+        JSON.stringify({ error: "Connecting the repository needs the project owner or a maintainer." }),
         { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
@@ -153,7 +169,7 @@ Deno.serve(async (req: Request) => {
 
     const { data: existing } = await serviceClient
       .from("git_integrations")
-      .select("id, provider, repo_owner, repo_name, default_branch, base_url")
+      .select("id, provider, repo_owner, repo_name, default_branch, base_url, webhook_secret")
       .eq("project_id", projectId)
       .maybeSingle();
 
@@ -168,6 +184,15 @@ Deno.serve(async (req: Request) => {
       existing.default_branch !== defaultBranch ||
       (existing.base_url ?? null) !== normalizedBaseUrl;
 
+    // AD.0 (S2): the webhook's secret. Kept across saves of the same binding,
+    // made new when there is none or the repository changed (its webhook lives
+    // there), stored encrypted like the token, and returned to the owner on
+    // every save so the Git panel can show it beside the webhook URL.
+    const keptSecret = webhookSecretToKeep(await readWebhookSecret(existing?.webhook_secret), bindingChanged);
+    const webhookSecret = keptSecret ?? newWebhookSecret();
+    const encryptedWebhookSecret = await encrypt(webhookSecret);
+
+    let integrationId: string;
     if (existing) {
       const { error: updateError } = await serviceClient
         .from("git_integrations")
@@ -178,12 +203,14 @@ Deno.serve(async (req: Request) => {
           default_branch: defaultBranch,
           base_url: normalizedBaseUrl,
           access_token_encrypted: encryptedToken,
+          webhook_secret: encryptedWebhookSecret,
         })
         .eq("id", existing.id);
 
       if (updateError) throw updateError;
+      integrationId = existing.id;
     } else {
-      const { error: insertError } = await serviceClient
+      const { data: inserted, error: insertError } = await serviceClient
         .from("git_integrations")
         .insert({
           project_id: projectId,
@@ -193,11 +220,16 @@ Deno.serve(async (req: Request) => {
           default_branch: defaultBranch,
           base_url: normalizedBaseUrl,
           access_token_encrypted: encryptedToken,
+          webhook_secret: encryptedWebhookSecret,
           created_by: userId,
-        });
+        })
+        .select("id")
+        .single();
 
       if (insertError) throw insertError;
+      integrationId = inserted.id;
     }
+    const webhook = { integrationId, secret: webhookSecret, created: keptSecret === null };
 
     // P1-7 R1: bind the project's main branch to the integration's default git branch — the
     // 1:1 branch↔git-ref mirror the bidirectional sync loop keys on. R2.2 fix: the baseline
@@ -260,9 +292,15 @@ Deno.serve(async (req: Request) => {
         const nodeCount = snapGraph?.nodes ? Object.keys(snapGraph.nodes).length : 0;
 
         const apiBase = providerApiBase(provider, normalizedBaseUrl);
-        const anchorText = await fetchRepoFile(provider, apiBase, repoOwner.trim(), repoName.trim(), MODEL_ANCHOR_PATH, defaultBranch, trimmedToken);
+        // AD.1 (D11): a model.json the provider would not serve is not a
+        // repository without one. Treating it as absent used to start an import
+        // over a repository that already carries a design.
+        const anchorRead = await readRepoFile(provider, apiBase, repoOwner.trim(), repoName.trim(), MODEL_ANCHOR_PATH, defaultBranch, trimmedToken);
+        const anchorText = anchorRead.status === "found" ? anchorRead.text : null;
 
-        if (!anchorText) {
+        if (anchorRead.status === "failed") {
+          anchorAdopt.skipped = `could not read ${MODEL_ANCHOR_PATH} (${anchorRead.error}), so nothing was adopted, compared or imported; save again to retry`;
+        } else if (!anchorText) {
           // Observability parity with every other branch: the no-anchor outcome
           // must be NAMED (the bench read a blank here when the contents API
           // served a stale 404 right after a push — silence hid which branch ran).
@@ -271,7 +309,13 @@ Deno.serve(async (req: Request) => {
           // import job the client drives (skeleton → fetch → enrich → synthesize);
           // the result lands as ONE reviewable proposal. Best-effort like the rest
           // of this block — a job-insert failure never fails the save.
-          if (nodeCount === 0) {
+          // Q (owner 2026-09-22): repo import is Indie and above, so below it
+          // no job is made and the response carries no importJob; the save
+          // itself (git export and pull) is the same on every plan. The plan
+          // is the project's, its owner's, whoever connects the repository.
+          let importAllowed = false;
+          try { importAllowed = featureAllowed(await getEffectiveTier(serviceClient as never, project.owner_id), "repo_import"); } catch { /* fail closed */ }
+          if (nodeCount === 0 && importAllowed) {
             const { data: existingJob } = await serviceClient
               .from("import_jobs")
               .select("id, status")
@@ -322,17 +366,18 @@ Deno.serve(async (req: Request) => {
               const summary = summarizeAnchor(parsed.model);
               anchorAdopt.repoAnchor = summary;
 
-              let ownModelHash: string | null = null;
               let ownParsedModel: ModelAnchor | null = null;
+              let projectMatchesAnchor = false;
               try {
                 const ownParsed = parseModel(await serializeModel(snapGraph ?? {}));
                 if (ownParsed.ok) {
                   ownParsedModel = ownParsed.model;
-                  // R7d: compare on the architecture-only projection — a pre-R7d
-                  // repo anchor's stored hash covers a mappings section today's
-                  // serialization no longer emits. Same architecture must read
-                  // as a match (reconnect stays a no-op).
-                  ownModelHash = await coreModelHash(ownParsed.model);
+                  // R7d: never the stored hashes: a pre-R7d repo anchor's stored
+                  // hash covers a mappings section today's serialization no
+                  // longer emits. Same design must read as a match (reconnect
+                  // stays a no-op). AD.2: the whole design when the repo's
+                  // anchor carries it, architecture when it is version 1.
+                  projectMatchesAnchor = await sameDesign(ownParsed.model, parsed.model);
                 }
               } catch (hashErr) {
                 console.warn("[save-git-integration] own-model hash computation failed:", hashErr);
@@ -341,16 +386,19 @@ Deno.serve(async (req: Request) => {
               const baselineAfterBind = bindingChanged ? null : (mainBranch.last_synced_commit ?? null);
               const action = decideConnectAnchorAction({
                 anchorPresent: true, parsedOk: true, hashOk: true, nodeCount,
-                projectMatchesAnchor: ownModelHash !== null && ownModelHash === (await coreModelHash(parsed.model)),
+                projectMatchesAnchor,
                 baselined: !!baselineAfterBind,
               });
 
               if (action === "auto-baseline") {
+                // AD.1 (D10): only an unbaselined branch gets here, and the one
+                // writer sets its first baseline.
                 const anchorHeadSha = await fetchRemoteHeadSha(provider, apiBase, repoOwner.trim(), repoName.trim(), defaultBranch, trimmedToken);
                 if (anchorHeadSha) {
-                  await serviceClient.from("branches")
-                    .update({ last_synced_commit: anchorHeadSha })
-                    .eq("id", mainBranch.id);
+                  await advanceBaseline(serviceClient, {
+                    branchId: mainBranch.id, to: anchorHeadSha,
+                    ancestry: ancestryFor(provider, apiBase, repoOwner.trim(), repoName.trim(), trimmedToken),
+                  });
                 }
                 anchorAdopt.skipped = "repo anchor matches this project's model — baseline re-established, nothing to review";
               } else if (action === "none") {
@@ -426,6 +474,9 @@ Deno.serve(async (req: Request) => {
               metadata: {
                 source: "git-adopt", modelHash: parsed.model.modelHash,
                 anchorMappings: parsed.model.mappings ?? [], // legacy anchors only — spec.json owns mappings since R7
+                // AD.1 (D5): the commit the model was read at. The branch's
+                // baseline is set to it when this proposal is accepted.
+                ...(adoptHeadSha ? { adoptHeadSha } : {}),
               },
             });
             if (propError) {
@@ -436,13 +487,11 @@ Deno.serve(async (req: Request) => {
                 nodes: parsed.model.nodes.length, edges: parsed.model.edges.length,
                 contracts: parsed.model.contracts.length, artifacts: parsed.model.artifacts.length,
               };
-              // Baseline = the HEAD the anchor was read at, so the first sweep reads clean.
-              const headSha = await fetchRemoteHeadSha(provider, apiBase, repoOwner.trim(), repoName.trim(), defaultBranch, trimmedToken);
-              if (headSha) {
-                await serviceClient.from("branches")
-                  .update({ last_synced_commit: headSha })
-                  .eq("id", mainBranch.id);
-              }
+              // AD.1 (D5): no baseline yet. It used to be set here, before anyone
+              // accepted the adopt; a rejected adopt then left the branch reading
+              // as in sync with an empty canvas, and the next push deleted every
+              // file the repository's model listed. Unbaselined, the push guard
+              // asks first; accepting the proposal sets the baseline.
             }
           }
         }
@@ -460,10 +509,14 @@ Deno.serve(async (req: Request) => {
         // exists — reconciling a DIVERGED spec is R7c's card, never a silent
         // overwrite.
         try {
-          const specText = await fetchRepoFile(
+          const specRead = await readRepoFile(
             provider, apiBase, repoOwner.trim(), repoName.trim(), SPEC_ANCHOR_PATH, defaultBranch, trimmedToken,
           );
-          if (specText) {
+          const specText = specRead.status === "found" ? specRead.text : null;
+          if (specRead.status === "failed") {
+            specAdopt.detected = true;
+            specAdopt.skipped = `could not read ${SPEC_ANCHOR_PATH} (${specRead.error}), so no requirements were adopted; save again to retry`;
+          } else if (specText) {
             specAdopt.detected = true;
             const parsedSpec = parseSpec(specText);
             if (!parsedSpec.ok) {
@@ -506,29 +559,13 @@ Deno.serve(async (req: Request) => {
       anchorAdopt = { detected: anchorAdopt.detected ?? false, skipped: "adopt error — see function logs" };
     }
 
-    // ── R3-6: design-branch detection (owner bench 2026-07-31: connect a second
-    // project to the same repo — "the branches do not detect"). The repo's
-    // non-default branches created by another project already ARE design
-    // branches; materialize each anchored one through the R3-1 loader
-    // (resolveCards:false inside — detection must not swallow a mismatch card
-    // this same connect raised). Best-effort: a failure never fails the save.
-    let branchDetect: BranchDetectResult | null = null;
-    try {
-      const names = await listRemoteBranchNames(
-        provider, providerApiBase(provider, normalizedBaseUrl),
-        repoOwner.trim(), repoName.trim(), trimmedToken,
-      );
-      if (names.length > 0) {
-        branchDetect = await detectRepoDesignBranches(serviceClient, {
-          projectId, ownerId: userId, defaultBranch, branchNames: names,
-        });
-      }
-    } catch (detectErr) {
-      console.warn("[save-git-integration] branch detection failed (save still succeeded):", detectErr);
-    }
+    // AD.2b: connect no longer materializes the repository's other branches as
+    // design branches (R3-6). That wrote each branch's snapshot straight from
+    // git, and 2.2 keeps one design branch per project (the AD.4 retirement,
+    // taken here because no path may write a snapshot from git).
 
     return new Response(
-      JSON.stringify({ success: true, anchorAdopt, specAdopt, primaryBranch: primaryBranch ? { ...primaryBranch, gitRef: defaultBranch, renamed: primaryRename.rename, renameReason: primaryRename.reason } : null, ...(branchDetect ? { branchDetect } : {}) }),
+      JSON.stringify({ success: true, anchorAdopt, specAdopt, primaryBranch: primaryBranch ? { ...primaryBranch, gitRef: defaultBranch, renamed: primaryRename.rename, renameReason: primaryRename.reason } : null, webhook }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (error: any) {

@@ -14,9 +14,6 @@ import { CHECKOUT_LOOKUP_KEYS, VALID_LOOKUP_KEYS } from '../_shared/stripe-plans
 export function validateCheckoutPrice(price_id: string): string | null {
   if (CHECKOUT_LOOKUP_KEYS.has(price_id)) return null;
   if (VALID_LOOKUP_KEYS.has(price_id)) {
-    if (price_id.includes('token_addon')) {
-      return 'Token add-ons are not currently offered.';
-    }
     return 'This plan is not available for purchase yet — Indie is the current paid tier ($15/mo or $144/yr). For Team, join the waitlist at https://nodespec.io/pricing.';
   }
   return `Invalid price identifier: ${price_id}`;

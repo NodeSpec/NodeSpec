@@ -734,8 +734,8 @@ describe('AuthLandingPage templates navigation', () => {
     expect(source).toContain("label: 'Browse Templates'");
   });
 
-  it('navigates to /templates when Browse Templates is clicked', () => {
-    expect(source).toContain("navigate('/templates')");
+  it('links Browse Templates to /templates (a real link since AJ.2; the render is in seo-client-head)', () => {
+    expect(source).toContain("{ label: 'Browse Templates', path: '/templates' }");
   });
 
   it('positions Browse Templates between Features and Pricing', () => {
@@ -748,7 +748,7 @@ describe('AuthLandingPage templates navigation', () => {
   });
 
   it('renders Browse Templates as a nav link with the same pattern as other items', () => {
-    const navItems = source.match(/label: '[^']+', action:/g) || [];
+    const navItems = source.match(/label: '[^']+', (action|path):/g) || [];
     const labels = navItems.map(item => item.match(/label: '([^']+)'/)?.[1]);
     expect(labels).toContain('Features');
     expect(labels).toContain('Browse Templates');

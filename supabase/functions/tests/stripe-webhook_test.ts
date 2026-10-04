@@ -131,3 +131,20 @@ Deno.test('events without a customer field are ignored entirely', async () => {
   );
   assert(db.calls.length === 0, 'no DB calls for customer-less events');
 });
+
+Deno.test('AH.2: a renewal syncs the plan, writes no token allowance and touches no token table', async () => {
+  const db = mappedSupabase({ id: 'row1', plan_name: 'team', status: 'active' });
+  await handleEvent(
+    { stripe: stripeWithSubscription(activeSubscription()), supabase: db },
+    { id: 'evt_9', type: 'invoice.paid', data: { object: { customer: CUSTOMER, billing_reason: 'subscription_cycle' } } },
+  );
+  const upserts = db.callsTo('stripe_subscriptions', 'upsert');
+  assertEquals(upserts.length, 1, 'the renewal still syncs the subscription');
+  const row = upserts[0].payload as Record<string, unknown>;
+  assertEquals(['token_limit' in row, 'is_lifetime_limit' in row], [false, false]);
+  const audit = db.callsTo('subscription_audit_log', 'insert')[0].payload as Record<string, Record<string, unknown>>;
+  assertEquals(['token_limit' in audit.old_values, 'token_limit' in audit.new_values], [false, false]);
+  for (const t of ['token_usage', 'token_rollover', 'token_addons', 'token_grants']) {
+    assertEquals(db.callsTo(t).length, 0, `${t} is not touched`);
+  }
+});

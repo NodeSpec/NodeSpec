@@ -1,53 +1,19 @@
-import type { SupabaseClient } from "jsr:@supabase/supabase-js@2";
-import type { CatalogData, NodeRoleRow, TechnologyRow } from "./catalog-loader.ts";
+import type { CatalogData, TechnologyRow } from "./catalog-loader.ts";
 import { effectiveTreatment, treatmentForRole } from "./ontology.ts";
-import { PALETTE_CATEGORY_IDS, categoryLabel, resolveCategoryId } from "./palette-categories.ts";
+import { categoryLabel, resolveCategoryId } from "./palette-categories.ts";
 // Real imports, not just the re-exports at the bottom of this file: a re-export
 // alone does NOT bind the name in this module's own scope, and --no-check
 // (jsr-403) means the ReferenceError only surfaces at runtime — 17 tests caught
 // it. (Prose on purpose: an import-shaped example path in this comment sent a
 // path-scanning tool looking for a file that does not exist.)
 import { normalizeProviderFamily, inferProviderFromId as inferProviderPrefix } from "./provider-inference.ts";
-
-export interface RoleDefinition {
-  id: string;
-  label: string;
-  description: string;
-  category: string;
-  /** M7: was `kind`, read from a column M1c DROPPED — a Deno type error the client tsc run
-   *  could not see, and a field no consumer ever read. Replaced with the axis that exists. */
-  nature: string;
-  isContainer: boolean;
-  containerLayer: string | null;
-  capabilityTags: string[];
-  /** N1 ontology axis. boundary = engine that owns its internals; NodeSpec owns placement,
-   *  wiring, and connection config only (never the engine's internal logic). */
-  treatmentMode: 'leaf' | 'container' | 'boundary';
-}
+import { isPartRole, namedRoleIds } from "./part-roles.ts";
+// AA.3: the part helpers live in part-roles.ts; re-exported for the registry's callers.
+export { PART_CAPABILITY_TAG, isPartRole, namedRoleIds } from "./part-roles.ts";
 
 export interface TechnologyOption {
   id: string;
   name: string;
-}
-
-function toRoleDefinition(row: NodeRoleRow): RoleDefinition {
-  return {
-    id: row.id,
-    label: row.label,
-    description: row.description,
-    category: row.palette_category,
-    nature: row.nature ?? 'build',
-    isContainer: row.is_container,
-    containerLayer: row.container_layer,
-    capabilityTags: row.capability_tags || [],
-    treatmentMode: treatmentForRole({ nature: row.nature, is_container: row.is_container }),
-  };
-}
-
-export function getRolesWithCapability(catalogs: CatalogData, capability: string): string[] {
-  return Object.values(catalogs.nodeRoles)
-    .filter(r => Array.isArray(r.capability_tags) && r.capability_tags.includes(capability))
-    .map(r => r.id);
 }
 
 export function getRolesByCategory(catalogs: CatalogData, category: string): string[] {
@@ -65,6 +31,31 @@ export function getContainersByLayer(catalogs: CatalogData, layer: string): stri
 export function isContainerRole(catalogs: CatalogData, roleId: string): boolean {
   const row = catalogs.nodeRoles[roleId];
   return row?.is_container ?? false;
+}
+
+/**
+ * AA.3 (owner 2026-09-23): the depth rule. Mirror of core/src/container-types.ts::
+ * depthRuleRefusal. A node may have a child only if its role lists the child's role in
+ * can_contain. A part role is admitted only by a role naming it by id (never by a
+ * container admitting by nature or provider), and its own can_contain is empty, so a part
+ * can never be exploded; a role listing no parts can never be exploded either. Containers
+ * keep their own rules (canContainerAcceptChild). A parent the catalog does not know is
+ * never refused here. Returns why the placement is refused, or null.
+ */
+export function depthRuleRefusal(catalogs: CatalogData, parentRoleId: string, childRoleId: string): string | null {
+  const parent = catalogs.nodeRoles[parentRoleId];
+  if (!parent) return null;
+  const child = catalogs.nodeRoles[childRoleId];
+  const named = namedRoleIds(parent.can_contain);
+  if (isPartRole(child)) {
+    if (named.includes(childRoleId)) return null;
+    return `"${childRoleId}" is a part: it lives only inside a node whose role lists it, and "${parentRoleId}" does not.`;
+  }
+  if (parent.is_container) return null;
+  if (named.includes(childRoleId)) return null;
+  return named.length > 0
+    ? `"${parentRoleId}" is not a container: it holds only its parts (${named.join(', ')}), not "${childRoleId}".`
+    : `"${parentRoleId}" is not a container and lists no parts, so nothing can be placed inside it.`;
 }
 
 export function canContainerAcceptChild(
@@ -104,7 +95,11 @@ export function canContainerAcceptChild(
   }
 
   if (!containerRow) return { allowed: true };
-  if (!containerRow.is_container) return { allowed: false, reason: `"${containerRoleId}" is not a container` };
+  // AA.3: the depth rule. A part only under a role naming it; a node that is not a
+  // container holds only the parts its role lists, and nothing else.
+  const depth = depthRuleRefusal(catalogs, containerRoleId, childRoleId);
+  if (depth) return { allowed: false, reason: depth };
+  if (!containerRow.is_container) return { allowed: true };
 
   // N2.3 precedence — mirror of core/src/container-types.ts::canContainerHoldNode. An
   // effective-boundary child (role default, or raised by a boundary-engine technology's
@@ -161,6 +156,103 @@ export function canContainerAcceptChild(
   return { allowed: true };
 }
 
+/** AG.11c and AG.12 (owner 2026-09-28): how a type holds what it holds, read from its
+ *  layer. A container that runs what it holds (runtime, orchestration) hosts it; one that
+ *  places it (a network, a cloud account) contains it; a group (logical) scopes it. A type
+ *  that is not a container is a leaf, holding at most the parts its role lists. */
+export type HoldingKind = 'runs' | 'places' | 'groups' | 'leaf';
+
+export function holdingKind(catalogs: CatalogData, roleId: string): HoldingKind {
+  const row = catalogs.nodeRoles[roleId];
+  if (!row?.is_container) return 'leaf';
+  if (row.container_layer === 'runtime' || row.container_layer === 'orchestration') return 'runs';
+  if (row.container_layer === 'logical') return 'groups';
+  return 'places';
+}
+
+/** AG.11c and AG.12a: the placement a child gets from how its parent holds, the rule the
+ *  canvas drag, the in-app agent and propose_patches share. A boundary engine (by role, or
+ *  raised by its technology) is hosted only by what runs it and scoped anywhere else. */
+export function placementFor(
+  catalogs: CatalogData,
+  parentRoleId: string,
+  childRoleId?: string,
+  childTechnologyId?: string,
+): 'hosts' | 'contains' | 'scopes' {
+  const kind = holdingKind(catalogs, parentRoleId);
+  if (kind === 'runs') return 'hosts';
+  if (childRoleId) {
+    const child = catalogs.nodeRoles[childRoleId];
+    const treatment = treatmentForRole({ nature: child?.nature, is_container: child?.is_container });
+    const techRow = childTechnologyId ? catalogs.technologies[childTechnologyId] : undefined;
+    const techOverride = (techRow?.ai_context as Record<string, unknown> | undefined)?.treatmentOverride as string | undefined;
+    if (treatment !== 'container' && effectiveTreatment(treatment, techOverride) === 'boundary') return 'scopes';
+  }
+  return kind === 'groups' ? 'scopes' : 'contains';
+}
+
+/** AG.12: the live types a role may hold, decided by the same check every placement
+ *  passes (canContainerAcceptChild), so what an agent reads is what it is held to. A leaf
+ *  holds only the parts its role lists. */
+export function admittedRoleIds(catalogs: CatalogData, roleId: string): string[] {
+  const row = catalogs.nodeRoles[roleId];
+  if (!row) return [];
+  const live = (id: string) => !!catalogs.nodeRoles[id] && catalogs.nodeRoles[id].deprecated !== true;
+  if (!row.is_container) return namedRoleIds(row.can_contain).filter(live);
+  return Object.values(catalogs.nodeRoles)
+    .filter((c) => c.deprecated !== true && canContainerAcceptChild(catalogs, roleId, c.id).allowed)
+    .map((c) => c.id);
+}
+
+/** AG.12 (owner 2026-09-28: the canvas rules "made present to the user's agent over
+ *  MCP"): one line on how a type holds and what it may hold, in the same words wherever an
+ *  agent reads it: get_node, the import draft, search_catalog, lookup_catalog and a refused
+ *  placement. Lists past `max` ids are cut, naming how many more. */
+export function holdingLine(catalogs: CatalogData, roleId: string, max = 12): string {
+  const row = catalogs.nodeRoles[roleId];
+  if (!row) return `"${roleId}" is not in the catalog.`;
+  if (isPartRole(row)) {
+    const parents = Object.values(catalogs.nodeRoles).filter((r) => namedRoleIds(r.can_contain).includes(row.id)).map((r) => r.id);
+    return `A part: it comes from exploding a node and lives only inside ${parents.length > 0 ? parents.join(', ') : 'a role that lists it'}. It holds nothing.`;
+  }
+  const ids = admittedRoleIds(catalogs, roleId);
+  const list = ids.length <= max
+    ? ids.join(', ')
+    : `${ids.slice(0, max).join(', ')} and ${ids.length - max} more (lookup_catalog roleId ${roleId} lists them all)`;
+  const holds = ids.length > 0 ? ` May hold: ${list}.` : ' It admits nothing.';
+  switch (holdingKind(catalogs, roleId)) {
+    case 'runs': return `Runs what it holds: a node inside it is hosted by it.${holds}`;
+    case 'places': return `Places what it holds: a node inside it names it in its own configuration.${holds}`;
+    case 'groups': return `Groups what it holds: organization only, nothing runs in it.${holds}`;
+    default:
+      return ids.length > 0
+        ? `A leaf. Parts: ${list}. Nothing else can be placed inside it.`
+        : 'A leaf: it holds nothing.';
+  }
+}
+
+/** AG.12a: why a parent may not hold a child, in the words propose_patches and
+ *  finalize_import both use, or null when it may. The parent's own list or rule is said as
+ *  what the parent may hold; the other refusals (one provider per chain, a platform only in
+ *  a group, the depth rule) keep their own words. */
+export function placementRefusal(
+  catalogs: CatalogData,
+  parentRoleId: string,
+  childRoleId: string,
+  childTechnologyId?: string,
+  parentTechnologyId?: string,
+): string | null {
+  const check = canContainerAcceptChild(catalogs, parentRoleId, childRoleId, childTechnologyId, parentTechnologyId);
+  if (check.allowed) return null;
+  return !check.reason || /^Container role /.test(check.reason)
+    ? `a ${parentRoleId} may not hold a ${childRoleId}. ${holdingLine(catalogs, parentRoleId)}`
+    : check.reason;
+}
+
+/** AG.12a: the sentence that closes every placement refusal. */
+export const PLACEMENT_RULE =
+  "A node sits only where its parent may hold it, the rule the canvas and import apply; get_project_context and lookup_catalog say what each type may hold.";
+
 // M6: the copies this file's own comment flagged ("the N8(a) worksheet owns unifying the
 // copies") are unified. Re-exported under their existing names so call sites are unchanged.
 export { normalizeProviderFamily } from "./provider-inference.ts";
@@ -169,11 +261,6 @@ export { inferProviderFromId as inferProviderPrefix } from "./provider-inference
 export function getContainerLayer(catalogs: CatalogData, roleId: string): string | null {
   const row = catalogs.nodeRoles[roleId];
   return row?.container_layer ?? null;
-}
-
-export function getRoleDefinition(catalogs: CatalogData, roleId: string): RoleDefinition | null {
-  const row = catalogs.nodeRoles[roleId];
-  return row ? toRoleDefinition(row) : null;
 }
 
 export function getTechnologiesForRole(catalogs: CatalogData, roleId: string): TechnologyOption[] {
@@ -276,8 +363,7 @@ export function validateAndCorrectNodeType(
   // N8.5″(c): the last resort is now MACHINE-DETECTABLE (`blanket: true`) — consumers
   // decide what to do with a lie-shaped answer instead of sniffing the error string.
   // The normalization lane (catalog-node-normalization.ts) REFUSES it and derives a
-  // technology-driven role with a reported note; only the D-doomed tool-executor lane
-  // still accepts it, and it dies with the D-series.
+  // technology-driven role with a reported note.
   return {
     type: 'backend-service',
     corrected: true,
@@ -303,40 +389,6 @@ function findClosestTechnologyId(
   }
 
   return closest;
-}
-
-export function isContainerTechnologyMismatch(
-  catalogs: CatalogData,
-  technologyId: string,
-  roleId: string,
-): { mismatch: boolean; reason?: string; suggestion?: string } {
-  const role = catalogs.nodeRoles[roleId];
-  if (!role || !role.is_container) return { mismatch: false };
-  if (role.container_layer !== 'infrastructure' && role.container_layer !== 'orchestration') return { mismatch: false };
-
-  const tech = catalogs.technologies[technologyId];
-  if (!tech) return { mismatch: false };
-
-  const hasAffinity = Array.isArray(tech.role_affinities) && tech.role_affinities.includes(roleId);
-  if (hasAffinity) return { mismatch: false };
-
-  const containerRoleIds = Object.values(catalogs.nodeRoles)
-    .filter(r => r.is_container && (r.container_layer === 'infrastructure' || r.container_layer === 'orchestration'))
-    .map(r => r.id);
-  const hasAnyContainerAffinity = Array.isArray(tech.role_affinities) &&
-    tech.role_affinities.some(aff => containerRoleIds.includes(aff));
-  if (hasAnyContainerAffinity) return { mismatch: false };
-
-  const validTechs = getTechnologiesForRole(catalogs, roleId);
-  const suggestion = validTechs.length > 0
-    ? `Valid technologies for ${roleId}: ${validTechs.map(t => t.id).join(', ')}`
-    : `No specific technologies cataloged for ${roleId}; omit technology or use a cloud provider identifier (aws, azure, gcp)`;
-
-  return {
-    mismatch: true,
-    reason: `Technology "${technologyId}" is a leaf-service technology (affinities: ${tech.role_affinities.join(', ')}), not valid for infrastructure container role "${roleId}"`,
-    suggestion,
-  };
 }
 
 export function validateTechnology(
@@ -380,167 +432,10 @@ export function validateTechnology(
   return { technology: technologyId, corrected: false };
 }
 
-function containerTag(row: NodeRoleRow): string {
-  if (!row.is_container) return '';
-  if (row.container_style === 'logical-boundary') return '[LOGICAL BOUNDARY]';
-  return '[HOSTING CONTAINER]';
-}
-
-// M2: keyed on the stored palette_category ID, not the resolved LABEL. Keyed on the label
-// these silently never fired for Infrastructure (label "Deploy & Runtime") or Platform
-// (label "Platforms"). Worse, the old Infrastructure hint described NETWORKING — "use cdn…
-// api-gateway… load-balancer" — which the v3 restructure moved into its own category, so
-// repairing the key without rewriting the text would have taught the AI a layout two
-// restructures stale. Both are rewritten here; the dead `Process` hint is gone.
-const CATEGORY_PROMPT_HINTS: Record<string, string> = {
-  'Networking': 'Traffic routing, edge and network security: api-gateway for request routing and auth verification, load-balancer for distribution, cdn for static assets, dns, waf, auth-provider, secret-manager. These do NOT run your application code — they sit in front of or beside the services that do.',
-  'Infrastructure': 'Deployment containers only — the things that HOLD workloads: VPCs, subnets, Kubernetes clusters and namespaces, Docker containers/compose/swarm, ECS clusters, VMs. Not networking, not automation.',
-  'Automation': 'Triggered and scheduled pipelines: CI/CD, infrastructure-as-code workflows, scheduled triggers. These run code but are started by an event or a schedule, never by a user request.',
-  'Platform': 'Cloud provider accounts and managed platforms (AWS, Azure, Google Cloud, Cloudflare, Supabase, Vercel, Netlify, Railway, Render, Fly.io). They are CONTAINERS: drop a provider-branded technology and it nests inside its platform automatically. A platform is operated by its vendor — nothing hosts it.',
-  'Hardware': 'Physical devices: sensors, actuators, microcontrollers, embedded devices, robots, gateways. Use for IoT, robotics, and embedded systems.',
-  'AI & ML': 'Model serving and ML workloads: inference-service for endpoints, ai-agent-service for agent loops, ml-pipeline for training/evaluation/data-prep jobs, plus feature and model stores. Distinct from backend-service — these specifically serve or manage machine-learning workloads.',
-  'Logical': 'Organizational boundaries with no runtime: bounded contexts, modules, software layers. Optional — grouping never hosts anything. Use a hosting container when something actually runs there.',
-};
-
-const ROLE_PROMPT_HINTS: Record<string, string> = {
-  'cdn': '[INFRASTRUCTURE] Content delivery network. Caches and serves static assets at the edge. NOT a backend-service.',
-  'api-gateway': '[INFRASTRUCTURE] Request routing, rate limiting, auth verification. Sits in front of backend services. NOT a backend-service itself.',
-  'load-balancer': '[INFRASTRUCTURE] Distributes traffic across service instances. NOT a backend-service.',
-  'dns-resolver': '[INFRASTRUCTURE] DNS resolution. Maps domain names to IPs.',
-  'firewall': '[INFRASTRUCTURE] Network security boundary. Filters traffic by rules.',
-};
-
-// M2: ordering and labels come from the shared vocabulary module, keyed on the SAME value
-// roles store. The `palette_categories` table, its separate row-id space and the
-// agent_alias hop are all gone — that hop is what silently matched zero roles.
-function getCategoryDisplayOrder(): string[] {
-  return [...PALETTE_CATEGORY_IDS];
-}
-
-export function getAllNodeTypesForPrompt(catalogs: CatalogData): string {
-  return getFilteredNodeTypesForPrompt(catalogs);
-}
-
 export interface ProjectRelevanceFilter {
   archetypes?: string[];
   existingRoleIds?: string[];
   preferredCategories?: string[];
-}
-
-export function getFilteredNodeTypesForPrompt(
-  catalogs: CatalogData,
-  filter?: ProjectRelevanceFilter,
-): string {
-  const byCategory: Record<string, NodeRoleRow[]> = {};
-
-  const relevantRoleIds = filter ? computeRelevantRoles(catalogs, filter) : null;
-
-  for (const row of Object.values(catalogs.nodeRoles)) {
-    if (relevantRoleIds && !relevantRoleIds.has(row.id)) continue;
-    if (!byCategory[row.palette_category]) byCategory[row.palette_category] = [];
-    byCategory[row.palette_category].push(row);
-  }
-
-  const displayOrder = getCategoryDisplayOrder();
-  const knownSet = new Set(displayOrder);
-  const extraCategories = Object.keys(byCategory).filter(c => !knownSet.has(c)).sort();
-  const orderedCategories = [...displayOrder, ...extraCategories];
-
-  const lines: string[] = [];
-
-  for (const cat of orderedCategories) {
-    const rows = byCategory[cat];
-    if (!rows || rows.length === 0) continue;
-
-    rows.sort((a, b) => a.sort_order - b.sort_order);
-
-    const catLabel = categoryLabel(cat);
-    const catHint = CATEGORY_PROMPT_HINTS[catLabel];
-    lines.push(`\n## ${catLabel}`);
-    if (catHint) {
-      lines.push(`> ${catHint}`);
-    }
-
-    for (const row of rows) {
-      const techs = getTechnologiesForRole(catalogs, row.id);
-      let line = `- ${row.id}: ${row.description}`;
-      if (techs.length > 0) {
-        line += `\n  Technologies: ${techs.map(t => t.id).join(', ')}`;
-      }
-      if (row.is_container) {
-        line += `\n  ${containerTag(row)} - can hold child nodes`;
-      }
-      // M7: was keyed on 'component-library', a role M3 DELETED (deprecated=true), so the
-      // library annotation stopped reaching the AI entirely. The surviving role is
-      // `shared-library`; the note is what tells the model an edge INTO this node means
-      // consuming its exports rather than calling a service.
-      if (row.id === 'shared-library') {
-        line += `\n  [LIBRARY - code-producing node. Edges TO this node = consumption of its exports. Has export surface with functions, classes, types.]`;
-      }
-      const roleHint = ROLE_PROMPT_HINTS[row.id];
-      if (roleHint) {
-        line += `\n  ${roleHint}`;
-      }
-      lines.push(line);
-    }
-  }
-
-  return lines.join('\n');
-}
-
-export function getCatalogSummaryForPrompt(
-  catalogs: CatalogData,
-  filter?: ProjectRelevanceFilter,
-  inContextTechIds?: Set<string>,
-): string {
-  const byCategory: Record<string, NodeRoleRow[]> = {};
-  const relevantRoleIds = filter ? computeRelevantRoles(catalogs, filter) : null;
-
-  for (const row of Object.values(catalogs.nodeRoles)) {
-    if (relevantRoleIds && !relevantRoleIds.has(row.id)) continue;
-    if (!byCategory[row.palette_category]) byCategory[row.palette_category] = [];
-    byCategory[row.palette_category].push(row);
-  }
-
-  const displayOrder = getCategoryDisplayOrder();
-  const knownSet = new Set(displayOrder);
-  const extraCategories = Object.keys(byCategory).filter(c => !knownSet.has(c)).sort();
-  const orderedCategories = [...displayOrder, ...extraCategories];
-
-  const lines: string[] = [];
-
-  for (const cat of orderedCategories) {
-    const rows = byCategory[cat];
-    if (!rows || rows.length === 0) continue;
-    const roleIds = rows.map(r => r.id);
-    const catTechIds = new Set(
-      rows.flatMap(r =>
-        Object.values(catalogs.technologies)
-          .filter(t => Array.isArray(t.role_affinities) && t.role_affinities.some(a => roleIds.includes(a)))
-          .map(t => t.id)
-      )
-    );
-    const roleIdList = roleIds.join(', ');
-    const catLabel = categoryLabel(cat);
-    const catHint = CATEGORY_PROMPT_HINTS[catLabel];
-    const hintSuffix = catHint ? ` -- ${catHint}` : '';
-
-    if (inContextTechIds && inContextTechIds.size > 0) {
-      const inCtx = [...catTechIds].filter(id => inContextTechIds.has(id));
-      const remaining = catTechIds.size - inCtx.length;
-      if (inCtx.length > 0) {
-        const inCtxStr = inCtx.join(', ');
-        const moreStr = remaining > 0 ? `; ${remaining} more via lookup_catalog` : '';
-        lines.push(`- ${catLabel}: ${roleIdList} (${inCtxStr} already in context${moreStr})${hintSuffix}`);
-      } else {
-        lines.push(`- ${catLabel}: ${roleIdList} (${catTechIds.size} technologies -- use lookup_catalog or search_catalog for details)${hintSuffix}`);
-      }
-    } else {
-      lines.push(`- ${catLabel}: ${roleIdList} (${catTechIds.size} technologies -- use lookup_catalog or search_catalog for details)${hintSuffix}`);
-    }
-  }
-
-  return lines.join('\n');
 }
 
 export interface CatalogLookupParams {
@@ -680,26 +575,8 @@ function lookupRole(catalogs: CatalogData, roleId: string, relevantRoleIds: Set<
   const lines: string[] = [`## ${role.label} (${role.id})`];
   lines.push(`Category: ${categoryLabel(role.palette_category)}`);
   lines.push(`Description: ${role.description}`);
-  if (role.is_container) {
-    const styleLabel = role.container_style === 'logical-boundary'
-      ? 'visual grouping only -- no runtime or deployment semantics'
-      : 'deployment container -- represents where code actually runs';
-    lines.push(`${containerTag(role)} - layer: ${role.container_layer || 'unspecified'} (${styleLabel})`);
-    // N8.1: can_contain has two shapes — the array `.length` check silently printed
-    // NOTHING for exactly the rule-object platform containers (aws/azure/gcp).
-    if (Array.isArray(role.can_contain) && role.can_contain.length > 0) {
-      lines.push(`Can contain: ${role.can_contain.join(', ')}`);
-    } else if (role.can_contain && !Array.isArray(role.can_contain)) {
-      const rule = role.can_contain;
-      const parts = [
-        rule.roleIds?.length ? `roles: ${rule.roleIds.join(', ')}` : null,
-        rule.natures?.length ? `natures: ${rule.natures.join(', ')}` : null,
-        rule.interfaceKinds?.length ? `interfaces: ${rule.interfaceKinds.join(', ')}` : null,
-        rule.providers?.length ? `providers: ${rule.providers.join(', ')} (any ${rule.providers.map(p => `${p}-*`).join('/')} technology)` : null,
-      ].filter(Boolean);
-      if (parts.length > 0) lines.push(`Can contain: ${parts.join('; ')}`);
-    }
-  }
+  // AG.12c: how the type holds, runs, places, groups or leaf, and everything it may hold.
+  lines.push(holdingLine(catalogs, role.id, Infinity));
   if (role.capability_tags && role.capability_tags.length > 0) {
     lines.push(`Capabilities: ${role.capability_tags.join(', ')}`);
   }
@@ -745,7 +622,8 @@ function lookupCategory(catalogs: CatalogData, category: string, relevantRoleIds
       .filter(t => Array.isArray(t.role_affinities) && t.role_affinities.includes(row.id));
     let line = `- ${row.id}: ${row.description}`;
     if (techs.length > 0) line += `\n  Technologies: ${techs.map(t => t.id).join(', ')}`;
-    if (row.is_container) line += `\n  ${containerTag(row)}`;
+    // AG.12c: how each type holds, and what it may hold.
+    line += `\n  ${holdingLine(catalogs, row.id, 8)}`;
     if (row.capability_tags && row.capability_tags.length > 0) {
       line += `\n  Capabilities: ${row.capability_tags.join(', ')}`;
     }
@@ -780,20 +658,6 @@ function lookupCategory(catalogs: CatalogData, category: string, relevantRoleIds
   }
 
   return lines.join('\n');
-}
-
-export function lookupCatalogCategory(
-  catalogs: CatalogData,
-  categoryOrRole: string,
-  filter?: ProjectRelevanceFilter,
-): string {
-  const lower = categoryOrRole.toLowerCase();
-
-  if (catalogs.nodeRoles[lower]) {
-    return lookupCatalog(catalogs, { roleId: lower }, filter);
-  }
-
-  return lookupCatalog(catalogs, { category: lower }, filter);
 }
 
 function getArchetypeRelevantCategories(catalogs: CatalogData, archetype: string): string[] {
@@ -844,162 +708,12 @@ function computeRelevantRoles(catalogs: CatalogData, filter: ProjectRelevanceFil
   return relevant;
 }
 
-export interface InScopeTechPreferences {
-  languages?: string[];
-  frameworks?: string[];
-  databases?: string[];
-}
-
-export interface GraphNodeMinimal {
-  technology?: string;
-}
-
-export function collectInScopeTechnologies(
-  catalogs: CatalogData,
-  preferences: InScopeTechPreferences | null | undefined,
-  graphNodes: Record<string, GraphNodeMinimal>,
-): string[] {
-  const ids = new Set<string>();
-
-  if (preferences) {
-    const candidates = [
-      ...(preferences.languages || []),
-      ...(preferences.frameworks || []),
-      ...(preferences.databases || []),
-    ];
-    for (const candidate of candidates) {
-      const lower = candidate.toLowerCase().replace(/\s+/g, '-');
-      if (catalogs.technologies[lower]) {
-        ids.add(lower);
-      } else if (catalogs.technologies[candidate]) {
-        ids.add(candidate);
-      } else {
-        for (const tech of Object.values(catalogs.technologies)) {
-          if (tech.name.toLowerCase() === candidate.toLowerCase() ||
-              tech.id.toLowerCase() === lower) {
-            ids.add(tech.id);
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  for (const node of Object.values(graphNodes)) {
-    if (node.technology && catalogs.technologies[node.technology]) {
-      ids.add(node.technology);
-    }
-  }
-
-  return [...ids];
-}
-
-const TECH_GUIDANCE_CHAR_CAP = 10_000;
-
 const CODE_TEMPLATE_SUFFIX = ' [Tailor to project language and apply best practices for engineering and security if different from this example]';
-
-function buildTechSection(tech: TechnologyRow): string {
-  if (tech.is_user_contributed) {
-    return `### ${tech.name} (${tech.id}) [user-specified]\nThis is a user-specified technology without curated best practices. Apply general software engineering principles for ${tech.name} and note any assumptions.`;
-  }
-
-  if (!tech.ai_context) return '';
-
-  const ctx = tech.ai_context;
-  const hasContent = ctx.purpose || (ctx.bestPractices && ctx.bestPractices.length > 0) ||
-                     (ctx.antiPatterns && ctx.antiPatterns.length > 0) ||
-                     ctx.sdkInitPattern || ctx.configurationTemplate ||
-                     (ctx.commonApiPatterns && ctx.commonApiPatterns.length > 0) ||
-                     ctx.securityGuidance || ctx.freshnessNote ||
-                     (ctx.integrationPatterns && ctx.integrationPatterns.length > 0);
-  if (!hasContent) return '';
-
-  const parts: string[] = [`### ${tech.name} (${tech.id})`];
-  if (ctx.purpose) parts.push(`Purpose: ${ctx.purpose}`);
-  if (ctx.sdkInitPattern) {
-    parts.push(`SDK Init: ${ctx.sdkInitPattern}${CODE_TEMPLATE_SUFFIX}`);
-  }
-  if (ctx.commonApiPatterns && ctx.commonApiPatterns.length > 0) {
-    const patterns = ctx.commonApiPatterns.map(p =>
-      `${p.name}: ${p.codeTemplate}${CODE_TEMPLATE_SUFFIX}${p.description ? ` -- ${p.description}` : ''}`
-    );
-    parts.push(`Common Patterns:\n${patterns.join('\n')}`);
-  }
-  if (ctx.configurationTemplate) {
-    parts.push(`Config: ${ctx.configurationTemplate}${CODE_TEMPLATE_SUFFIX}`);
-  }
-  if (ctx.bestPractices && ctx.bestPractices.length > 0) {
-    parts.push(`Best practices: ${ctx.bestPractices.join('; ')}`);
-  }
-  if (ctx.securityGuidance) {
-    parts.push(`Security: ${ctx.securityGuidance}`);
-  }
-  if (ctx.freshnessNote) {
-    parts.push(`Freshness: ${ctx.freshnessNote}`);
-  }
-  if (ctx.integrationPatterns && ctx.integrationPatterns.length > 0) {
-    parts.push(`Integrations: ${ctx.integrationPatterns.join('; ')}`);
-  }
-  if (ctx.antiPatterns && ctx.antiPatterns.length > 0) {
-    parts.push(`Avoid: ${ctx.antiPatterns.join('; ')}`);
-  }
-  const guidanceConnections = normalizeCommonConnections(tech.common_connections);
-  if (guidanceConnections.length > 0) {
-    parts.push(`Typical connections: ${guidanceConnections.map(formatCommonConnection).join(', ')}`);
-  }
-  return parts.join('\n');
-}
-
-export function buildTechnologyGuidance(
-  catalogs: CatalogData,
-  inScopeTechIds: string[],
-  graphNodeTechIds?: Set<string>,
-): string {
-  if (inScopeTechIds.length === 0) return '';
-
-  const sections: string[] = [];
-
-  for (const techId of inScopeTechIds) {
-    const tech = catalogs.technologies[techId];
-    if (!tech) continue;
-    const section = buildTechSection(tech);
-    if (section) sections.push(section);
-  }
-
-  if (sections.length === 0) return '';
-
-  let result = `\nTECHNOLOGY GUIDANCE (for this project's stack):\n${sections.join('\n\n')}`;
-
-  if (result.length > TECH_GUIDANCE_CHAR_CAP && graphNodeTechIds && graphNodeTechIds.size > 0) {
-    const prioritySections: string[] = [];
-    for (const techId of graphNodeTechIds) {
-      const tech = catalogs.technologies[techId];
-      if (!tech) continue;
-      const section = buildTechSection(tech);
-      if (section) prioritySections.push(section);
-    }
-    if (prioritySections.length > 0) {
-      const trimmedCount = inScopeTechIds.length - graphNodeTechIds.size;
-      const suffix = trimmedCount > 0
-        ? `\n\n(${trimmedCount} additional technologies from spec preferences omitted -- use lookup_catalog for details)`
-        : '';
-      result = `\nTECHNOLOGY GUIDANCE (for technologies assigned to graph nodes):\n${prioritySections.join('\n\n')}${suffix}`;
-    }
-  }
-
-  return result;
-}
-
-export interface TechnologyHints {
-  suggested_files: Array<{ path: string; kind: string }>;
-  /** Normalized — see normalizeCommonConnections. */
-  common_connections: Array<{ id: string; reason?: string }>;
-}
 
 /** N8.4b-3: `common_connections` carries three shapes across the live catalog (see the
  *  type in catalog-loader.ts). Every reader collapses them here, so the `{id, reason}`
- *  rows — 75 of them, the plurality — stop rendering as "undefined via undefined" in
- *  lookup_catalog, add_node hints and the technology-relevance block. */
+ *  rows (75 of them, the plurality) stop rendering as "undefined via undefined" in
+ *  lookup_catalog. */
 export function normalizeCommonConnections(
   connections: TechnologyRow['common_connections'] | null | undefined,
 ): Array<{ id: string; reason?: string }> {
@@ -1022,122 +736,4 @@ export function normalizeCommonConnections(
 /** One rendering of a normalized connection, shared by every AI-facing surface. */
 export function formatCommonConnection(cc: { id: string; reason?: string }): string {
   return cc.reason ? `${cc.id} (${cc.reason})` : cc.id;
-}
-
-export function getTechnologyHints(
-  catalogs: CatalogData,
-  technologyId: string,
-): TechnologyHints | null {
-  const tech = catalogs.technologies[technologyId];
-  if (!tech) return null;
-
-  const hasSuggestedFiles = Array.isArray(tech.suggested_files) && tech.suggested_files.length > 0;
-  const connections = normalizeCommonConnections(tech.common_connections);
-  // N8.4q: default_metadata dropped — orphan column (no packet/context/readiness reader).
-  if (!hasSuggestedFiles && connections.length === 0) return null;
-
-  return {
-    suggested_files: tech.suggested_files || [],
-    common_connections: connections,
-  };
-}
-
-export function buildPlaceholderTechnology(
-  rawName: string,
-  roleId: string,
-  projectId: string,
-  userId: string,
-): TechnologyRow {
-  const id = rawName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  return {
-    id,
-    name: rawName,
-    icon_url: null,
-    brand_color: '#6b7280',
-    secondary_color: null,
-    display_name: null,
-    node_shape: null,
-    role_affinities: [roleId],
-    ai_context: {},
-    suggested_files: [],
-    metadata_schema: {},
-    common_connections: [],
-    is_user_contributed: true,
-    project_id: projectId,
-    created_by: userId,
-  };
-}
-
-export async function registerPlaceholderTechnology(
-  supabase: SupabaseClient,
-  catalogs: CatalogData,
-  placeholder: TechnologyRow,
-): Promise<{ registered: boolean; techId: string }> {
-  if (catalogs.technologies[placeholder.id]) {
-    const existing = catalogs.technologies[placeholder.id];
-    if (!existing.role_affinities.includes(placeholder.role_affinities[0])) {
-      existing.role_affinities = [...existing.role_affinities, placeholder.role_affinities[0]];
-    }
-    return { registered: false, techId: existing.id };
-  }
-
-  const { error } = await supabase
-    .from('technology_catalog')
-    .upsert({
-      id: placeholder.id,
-      name: placeholder.name,
-      icon_url: placeholder.icon_url,
-      brand_color: placeholder.brand_color,
-      role_affinities: placeholder.role_affinities,
-      ai_context: placeholder.ai_context,
-      suggested_files: placeholder.suggested_files,
-      metadata_schema: placeholder.metadata_schema,
-      common_connections: placeholder.common_connections,
-      is_user_contributed: placeholder.is_user_contributed,
-      project_id: placeholder.project_id,
-      created_by: placeholder.created_by,
-    }, { onConflict: 'id', ignoreDuplicates: true });
-
-  if (error) {
-    console.warn(`[registerPlaceholderTechnology] Failed to persist "${placeholder.id}":`, error.message);
-  }
-
-  catalogs.technologies[placeholder.id] = placeholder;
-  return { registered: true, techId: placeholder.id };
-}
-
-export function buildPlatformCoexistenceGuidance(): string {
-  return `## Platform Modeling Styles
-
-Two valid approaches exist for modeling cloud/platform infrastructure:
-
-**Style A -- Platform-Committed**: A single platform container node (e.g. "aws", "azure", "gcp") acts as the root container. Platform-specific capabilities (RDS, Lambda, S3) are children of that platform node with kind=platform_capability. Use this when the project is built entirely on one cloud provider. Note: Supabase and Firebase are standalone managed nodes, NOT containers -- use Style B for them.
-
-**Style B -- Component-Composed**: No platform parent. Each service is modeled independently with its own role (database, serverless-function, object-storage) and a technology reference to the specific provider product. Use this for multi-cloud or provider-agnostic designs.
-
-**Orphan-Prevention Rule**: platform_capability nodes MUST have a parent platform node (kind=platform). An orphaned platform_capability (no parentId pointing to a platform-kind node) is invalid and will be rejected by validation.
-
-Choose ONE style per cloud provider within a project. Do not mix styles for the same provider.`;
-}
-
-export function buildCatalogDeploymentGuidance(
-  catalogs: CatalogData,
-  provider: string,
-  archetypes: string[],
-): string {
-  const patterns = catalogs.cloudProviderPatterns;
-  if (!patterns || patterns.length === 0) return '';
-
-  const parts: string[] = [];
-  for (const arch of archetypes) {
-    const match = patterns.find(p => p.provider === provider && p.archetype === arch);
-    if (match) parts.push(match.guidance);
-  }
-
-  if (parts.length === 0) {
-    const fallback = patterns.find(p => p.provider === provider);
-    if (fallback) parts.push(fallback.guidance);
-  }
-
-  return parts.join('\n\n');
 }

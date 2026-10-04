@@ -49,6 +49,12 @@ export function createMockProjectRepository(): ProjectRepository & { _data: Map<
       return { success: true, data: projects };
     },
 
+    // The mock has no roster: owned only, as the owner.
+    async listForUser(userId): Promise<RepositoryResult<Project[]>> {
+      const projects = Array.from(data.values()).filter((p) => p.ownerId === userId).map((p) => ({ ...p, role: 'owner' as const }));
+      return { success: true, data: projects };
+    },
+
     async update(id, updates): Promise<RepositoryResult<Project>> {
       const project = data.get(id);
       if (!project) {
@@ -482,16 +488,6 @@ function createMockProposalRepository(): ProposalRepository {
   };
 }
 
-function createMockCodeStructureRepository() {
-  return {
-    getByArtifactId: async () => null,
-    getByNodeId: async () => [],
-    getByProjectId: async () => [],
-    update: async (_id: string, updates: any) => updates as any,
-    delete: async () => {},
-  };
-}
-
 function createMockTemplateRepository() {
   return {
     getById: async () => ({ success: true as const, data: null }),
@@ -515,7 +511,6 @@ export function createMockRepositoryFactory(): RepositoryFactory {
     createArtifactRepository: () => createMockArtifactRepository(),
     createAIRunRepository: () => createMockAIRunRepository(),
     createProposalRepository: () => createMockProposalRepository(),
-    createCodeStructureRepository: () => createMockCodeStructureRepository(),
     createTemplateRepository: () => createMockTemplateRepository(),
     createSpecificationRepository: () => ({} as any),
     createRequirementsRepository: () => ({} as any),

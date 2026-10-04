@@ -1,15 +1,13 @@
 // P1-7 R2: the on-connect drift sweep + adopt-on-connect. Pure decision helpers (throttle,
-// self-push detection, residue classification) are tested directly; runDriftSweep's early exits
+// residue classification) are tested directly; runDriftSweep's early exits
 // are exercised over FakeSupabase — every path tested here returns BEFORE any provider fetch, so
 // the suite stays fully offline. anchorToPatches is validated against PatchOperationSchema: the
 // adopt path must emit patches the normal apply pipeline accepts without special-casing.
 import {
   shouldRunSweep,
-  isSelfPushOnly,
   classifySweepFiles,
   runDriftSweep,
   SWEEP_THROTTLE_MS,
-  SELF_PUSH_PREFIX,
   type ChangedFile,
 } from '../_shared/git-drift.ts';
 import { serializeModel, parseModel, anchorToPatches } from '../_shared/model-anchor.ts';
@@ -27,14 +25,6 @@ Deno.test('shouldRunSweep: null/invalid baseline always sweeps; throttle window 
   assert(!shouldRunSweep(recent, now), 'inside throttle window → skip');
   const stale = new Date(now - SWEEP_THROTTLE_MS - 5_000).toISOString();
   assert(shouldRunSweep(stale, now), 'outside throttle window → sweep');
-});
-
-Deno.test('isSelfPushOnly: all-NodeSpec ranges fast-forward; mixed or empty do not', () => {
-  const self = (n: number) => ({ message: `${SELF_PUSH_PREFIX} push ${n}` });
-  assert(isSelfPushOnly([self(1), self(2)]), 'all self-pushes');
-  assert(!isSelfPushOnly([]), 'empty range is NOT self-push (nothing to attribute)');
-  assert(!isSelfPushOnly([self(1), { message: 'fix: hand-edited hotfix' }]), 'mixed range');
-  assert(!isSelfPushOnly([{ message: 'feat: out-of-band work' }]), 'external only');
 });
 
 Deno.test('classifySweepFiles: anchor flags modelChanged; matched/removed/system paths are not residue', () => {
@@ -124,9 +114,11 @@ Deno.test('runDriftSweep: bound branch without baseline → unbaselined, after W
     'claim is compare-and-set against the value we read (null → IS NULL guard)',
   );
   const branchCall = sb.callsTo('branches', 'select')[0];
+  // AD.4 (D15): no branch named means the primary, found by its flag (never
+  // is_main, and never a row that happens to be called 'main').
   assert(
-    branchCall.filters.some((f) => f.method === 'eq' && f.args[0] === 'name' && f.args[1] === 'main'),
-    'main branch resolved by name (never is_main)',
+    branchCall.filters.some((f) => f.method === 'eq' && f.args[0] === 'is_primary' && f.args[1] === true),
+    'primary branch resolved by its flag',
   );
 });
 

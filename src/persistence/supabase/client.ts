@@ -7,14 +7,12 @@ export interface SupabaseConfig {
   anonKey: string;
 }
 
-// Production fallback for the deployed Netlify build only. Dev builds must never
-// reach production silently — a staging bench with a missing .env.local would
-// otherwise read and write the live customer database (task SB-0).
-const PROD_FALLBACK: SupabaseConfig = {
-  url: 'https://komnpkjlvgfworfbdrya.supabase.co',
-  anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtvbW5wa2psdmdmd29yZmJkcnlhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgxNTQ1NzcsImV4cCI6MjA4MzczMDU3N30.JikiJZHHfWIOTsW9UcTY-mRLfXbv74bbyYOqRDVX_AY',
-};
-
+// A build names its backend: VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY,
+// set when it is built (netlify.toml for the managed site, the .env of a
+// container). A build without them refuses to start. Dev builds used to be
+// the only ones refused (task SB-0); a production build fell back to the
+// managed backend, so a self-hosted or open source build with a missing .env
+// quietly read and wrote nodespec.io (audit, owner 2026-09-27).
 export function resolveSupabaseConfig(
   env: { url?: string; anonKey?: string } = {
     url: import.meta.env.VITE_SUPABASE_URL,
@@ -32,7 +30,10 @@ export function resolveSupabaseConfig(
         'at your staging bench (see docs/STAGING_RUNBOOK.md), then restart `npm run dev`.'
     );
   }
-  return PROD_FALLBACK;
+  throw new Error(
+    'This build has no backend: VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY were not set ' +
+      'when it was built. Set them (a container reads them from its .env) and build again.'
+  );
 }
 
 export function initializeSupabase(config: SupabaseConfig): SupabaseClient {

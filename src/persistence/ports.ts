@@ -15,14 +15,17 @@ import type {
   TemplateFilters,
 } from './types.js';
 import type { AIProposal, ProposalPatch, ProposalStatus } from '@nodespec/core/ai-proposal.js';
-import type { CodeStructure } from '@nodespec/core/code-structure.js';
 
 export interface ProjectRepository {
   create(name: string, ownerId: string, metadata?: Record<string, unknown>): Promise<RepositoryResult<Project>>;
   getById(id: string): Promise<RepositoryResult<Project | null>>;
   listByOwner(ownerId: string): Promise<RepositoryResult<Project[]>>;
+  /** V3 7.0: every project the user can open — owned, plus the seats on the roster (role per row). */
+  listForUser(userId: string): Promise<RepositoryResult<Project[]>>;
   update(id: string, updates: Partial<Pick<Project, 'name' | 'metadata'>>): Promise<RepositoryResult<Project>>;
-  delete(id: string): Promise<RepositoryResult<void>>;
+  /** Deletes the project and everything under it. A large project is
+   * removed in bounded slices; `onProgress` reports the rows gone so far. */
+  delete(id: string, onProgress?: (rowsDeleted: number) => void): Promise<RepositoryResult<void>>;
 }
 
 export interface BranchRepository {
@@ -135,14 +138,6 @@ export interface ProposalRepository {
   delete(proposalId: string): Promise<RepositoryResult<void>>;
 }
 
-export interface CodeStructureRepository {
-  getByArtifactId(artifactId: string): Promise<CodeStructure | null>;
-  getByNodeId(nodeId: string): Promise<CodeStructure[]>;
-  getByProjectId(projectId: string): Promise<CodeStructure[]>;
-  update(id: string, updates: Partial<CodeStructure>): Promise<CodeStructure>;
-  delete(id: string): Promise<void>;
-}
-
 export interface TemplateRepository {
   getById(id: string): Promise<RepositoryResult<ProjectTemplate | null>>;
   getBySlug(slug: string): Promise<RepositoryResult<ProjectTemplate | null>>;
@@ -163,7 +158,6 @@ export interface RepositoryFactory {
   createArtifactRepository(): ArtifactRepository;
   createAIRunRepository(): AIRunRepository;
   createProposalRepository(): ProposalRepository;
-  createCodeStructureRepository(): CodeStructureRepository;
   createTemplateRepository(): TemplateRepository;
   createSpecificationRepository(): any;
   createRequirementsRepository(): any;

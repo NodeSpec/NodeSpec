@@ -7,8 +7,6 @@
   index.ts keeps: env reads, real Stripe/Supabase client construction, signature
   verification, Deno.serve.
 */
-// N6.1: TOKEN_ADDON_* imports left with handleOneTimePayment (token-addon purchasing
-// retired). The stripe-plans module keeps them for the subscription plan table.
 import { resolvePlanInfoStrict } from '../_shared/stripe-plans.ts';
 import { canonicalizeTier } from '../_shared/tiers.ts';
 
@@ -60,18 +58,11 @@ export async function handleEvent(deps: WebhookDeps, event: StripeEventLike) {
 
   if (event.type === 'checkout.session.completed') {
     const session = stripeData as any;
-    // N6.1: token-addon purchasing is retired (UI, client session-creator, and the
-    // 'payment' checkout mode are all gone), so one-time payments are no longer
-    // provisioned here. Subscription handling below is unchanged; the invoice.paid
-    // token rollover stays (subscription-side accounting — D-series owns those tables).
+    // Only subscriptions are sold; a one-time payment provisions nothing here.
     if (session.mode !== 'subscription') {
       console.info(`Ignoring non-subscription checkout for customer: ${customerId}`);
       return;
     }
-  }
-
-  if (event.type === 'invoice.paid') {
-    await handleInvoicePaid(deps, customerId, stripeData as any, event.id);
   }
 
   if (SUBSCRIPTION_EVENTS.has(event.type) || event.type.startsWith('customer.subscription.')) {
@@ -90,107 +81,6 @@ async function resolveUserId(deps: WebhookDeps, customerId: string): Promise<str
   return customerMapping?.user_id ?? null;
 }
 
-async function expireStaleTokenEntries(deps: WebhookDeps, userId: string): Promise<void> {
-  const now = new Date().toISOString();
-
-  await deps.supabase
-    .from('token_addons')
-    .update({ status: 'expired' })
-    .eq('user_id', userId)
-    .eq('status', 'active')
-    .lt('expires_at', now);
-
-  await deps.supabase
-    .from('token_rollover')
-    .update({ status: 'expired' })
-    .eq('user_id', userId)
-    .eq('status', 'active')
-    .lt('expires_at', now);
-}
-
-async function handleInvoicePaid(
-  deps: WebhookDeps,
-  customerId: string,
-  invoice: any,
-  stripeEventId: string,
-): Promise<void> {
-  try {
-    if (invoice.billing_reason !== 'subscription_cycle') {
-      return;
-    }
-
-    const userId = await resolveUserId(deps, customerId);
-    if (!userId) return;
-
-    const { data: sub } = await deps.supabase
-      .from('stripe_subscriptions')
-      .select('token_limit, current_period_start, current_period_end, is_lifetime_limit, plan_name')
-      .eq('stripe_customer_id', customerId)
-      .maybeSingle();
-
-    if (!sub || !sub.token_limit || sub.token_limit === 0) return;
-    if (sub.is_lifetime_limit) return;
-    if (!sub.current_period_start || !sub.current_period_end) return;
-
-    const periodStart = new Date(sub.current_period_start).toISOString();
-    const periodEnd = new Date(sub.current_period_end).toISOString();
-
-    const { data: usageRows } = await deps.supabase
-      .from('token_usage')
-      .select('input_tokens, output_tokens')
-      .eq('user_id', userId)
-      .eq('source', 'platform')
-      .gte('created_at', periodStart)
-      .lt('created_at', periodEnd);
-
-    const totalUsed = (usageRows ?? []).reduce(
-      (sum: number, row: any) => sum + (row.input_tokens ?? 0) + (row.output_tokens ?? 0),
-      0,
-    );
-
-    const unusedTokens = Math.max(0, sub.token_limit - totalUsed);
-    if (unusedTokens === 0) return;
-
-    const newPeriodEnd = new Date(invoice.period_end * 1000);
-    const rolloverExpiry = new Date(newPeriodEnd);
-    rolloverExpiry.setMonth(rolloverExpiry.getMonth() + 1);
-
-    const { error: rolloverErr } = await deps.supabase
-      .from('token_rollover')
-      .insert({
-        user_id: userId,
-        rollover_tokens: unusedTokens,
-        source_period_start: periodStart,
-        source_period_end: periodEnd,
-        expires_at: rolloverExpiry.toISOString(),
-        status: 'active',
-      });
-
-    if (rolloverErr) {
-      console.error(`[invoice-paid] Failed to insert token rollover for user ${userId}:`, rolloverErr);
-    } else {
-      console.info(`[invoice-paid] Rolled over ${unusedTokens} unused tokens for user ${userId}, expires ${rolloverExpiry.toISOString()}`);
-    }
-
-    await deps.supabase.from('subscription_audit_log').insert({
-      user_id: userId,
-      source: 'webhook',
-      action: 'token_rollover',
-      new_values: {
-        rollover_tokens: unusedTokens,
-        source_period: `${periodStart} - ${periodEnd}`,
-        expires_at: rolloverExpiry.toISOString(),
-      },
-      stripe_event_id: stripeEventId,
-      metadata: { event_type: 'invoice.paid', billing_reason: 'subscription_cycle' },
-    });
-
-    await expireStaleTokenEntries(deps, userId);
-  } catch (error) {
-    console.error(`[invoice-paid] Error handling rollover for customer ${customerId}:`, error);
-  }
-}
-
 export async function syncCustomerFromStripe(
   deps: WebhookDeps,
   customerId: string,
@@ -206,7 +96,7 @@ export async function syncCustomerFromStripe(
 
     const { data: existingRow } = await deps.supabase
       .from('stripe_subscriptions')
-      .select('id, plan_name, status, amount_cents, billing_interval, token_limit, cancel_at_period_end')
+      .select('id, plan_name, status, amount_cents, billing_interval, cancel_at_period_end')
       .eq('stripe_customer_id', customerId)
       .maybeSingle();
 
@@ -262,7 +152,7 @@ export async function syncCustomerFromStripe(
     const subscription = subscriptions.data[0];
     const price = subscription.items.data[0]?.price;
     const priceId = price?.id ?? '';
-    const planInfo = price ? resolvePlanInfoStrict(price) : { name: 'unknown', tokenLimit: 0, amountCents: 0 };
+    const planInfo = price ? resolvePlanInfoStrict(price) : { name: 'unknown', amountCents: 0 };
     const billingInterval = price?.recurring?.interval === 'year' ? 'year' : 'month';
 
     const upsertData: Record<string, unknown> = {
@@ -275,8 +165,6 @@ export async function syncCustomerFromStripe(
       status: subscription.status,
       price_id: priceId,
       billing_interval: billingInterval,
-      token_limit: planInfo.tokenLimit,
-      is_lifetime_limit: false,
       current_period_start: new Date(subscription.current_period_start * 1000).toISOString(),
       current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
       cancel_at_period_end: subscription.cancel_at_period_end,
@@ -302,7 +190,6 @@ export async function syncCustomerFromStripe(
       status: existingRow.status,
       amount_cents: existingRow.amount_cents,
       billing_interval: existingRow.billing_interval,
-      token_limit: existingRow.token_limit,
       cancel_at_period_end: existingRow.cancel_at_period_end,
     } : null;
 
@@ -327,14 +214,11 @@ export async function syncCustomerFromStripe(
         status: subscription.status,
         amount_cents: planInfo.amountCents,
         billing_interval: billingInterval,
-        token_limit: planInfo.tokenLimit,
         cancel_at_period_end: subscription.cancel_at_period_end,
       },
       stripe_event_id: stripeEventId ?? null,
       metadata: eventType ? { event_type: eventType } : null,
     });
-
-    await expireStaleTokenEntries(deps, userId);
 
     console.info(`Successfully synced subscription for customer: ${customerId}, plan: ${planInfo.name}`);
   } catch (error) {

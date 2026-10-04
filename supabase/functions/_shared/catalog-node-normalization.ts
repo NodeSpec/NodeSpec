@@ -38,9 +38,10 @@ export function genericRoleForCategory(
 ): string | undefined {
   if (!category) return undefined;
   const preferred = PREFERRED_GENERIC_BY_CATEGORY[category];
-  if (preferred && catalogs.nodeRoles[preferred]) return preferred;
+  if (preferred && catalogs.nodeRoles[preferred] && !catalogs.nodeRoles[preferred].deprecated) return preferred;
+  // AG.0e: a retired role is never the generic a proposal falls to.
   const inCategory = Object.values(catalogs.nodeRoles)
-    .filter((r) => r.palette_category === category && !r.is_container)
+    .filter((r) => r.palette_category === category && !r.is_container && !r.deprecated)
     .sort((a, b) => (a.sort_order - b.sort_order) || a.id.localeCompare(b.id));
   return inCategory[0]?.id;
 }
@@ -50,52 +51,6 @@ export interface NodeNormalizationNote {
   from: string;
   to: string;
   reason: string;
-}
-
-/**
- * Ensure a proposed node has ports (2026-07-16). Canvas node components render React Flow
- * handles ONLY per port — a portless node has zero handles, and React Flow silently drops every
- * edge touching it (mermaid/data stay correct; only the render starves). Both in-app paths
- * always provision ports (the palette injects the role's catalog `default_ports`; the internal
- * agent's add_node always created an in+out pair) — external MCP proposals were the only path
- * that could produce portless nodes. This restores that choreography server-side:
- * existing ports pass through untouched; container roles get none (edges to containers are
- * forbidden); otherwise the role's `default_ports` are materialized, falling back to a generic
- * in/out pair (internal-agent parity).
- */
-export function ensureNodePorts(
-  catalogs: CatalogData,
-  resolvedType: string,
-  ports: unknown,
-): { ports: Array<Record<string, unknown>>; note?: NodeNormalizationNote } {
-  if (Array.isArray(ports) && ports.length > 0) {
-    return { ports: ports as Array<Record<string, unknown>> };
-  }
-
-  const role = catalogs.nodeRoles[resolvedType];
-  if (role?.is_container) {
-    return { ports: [] };
-  }
-
-  const defaults = role?.default_ports;
-  const materialized = (Array.isArray(defaults) && defaults.length > 0)
-    ? defaults.map((p) => ({ id: crypto.randomUUID(), name: p.name, direction: p.direction }))
-    : [
-      { id: crypto.randomUUID(), name: "input", direction: "in" },
-      { id: crypto.randomUUID(), name: "output", direction: "out" },
-    ];
-
-  return {
-    ports: materialized,
-    note: {
-      field: "ports",
-      from: "(none)",
-      to: materialized.map((p) => `${p.direction}:${p.name}`).join(", "),
-      reason: (Array.isArray(defaults) && defaults.length > 0)
-        ? `node had no ports; provisioned the role's default ports (edges cannot render on a portless node)`
-        : `node had no ports; provisioned a generic input/output pair (edges cannot render on a portless node)`,
-    },
-  };
 }
 
 export interface NormalizedNode {

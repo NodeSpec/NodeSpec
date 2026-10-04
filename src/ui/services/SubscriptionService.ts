@@ -5,7 +5,6 @@ export interface SubscriptionInfo {
   planName: string;
   status: string;
   billingInterval: string;
-  tokenLimit: number;
   amountCents: number;
   currency: string;
   currentPeriodStart: string | null;
@@ -55,7 +54,6 @@ export class SubscriptionService {
       planName: row.plan_name,
       status: row.status,
       billingInterval: row.billing_interval ?? 'month',
-      tokenLimit: row.token_limit ?? 0,
       amountCents: row.amount_cents ?? 0,
       currency: row.currency ?? 'usd',
       currentPeriodStart: row.current_period_start,

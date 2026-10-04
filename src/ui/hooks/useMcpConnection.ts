@@ -10,9 +10,9 @@
 // OAuth token, or an API key whose last_used_at has been stamped by an actual
 // request. Creating a key does not count until the AI uses it.
 //
-// The onboarding gate (MCPConnectStep) polls this same RPC on its own tight
-// loop because it is waiting on a connection in real time. This hook is the
-// ambient version: slower cadence, pauses when the tab is hidden, and stops
+// The walkthrough's connect stop refreshes this faster while it waits on a
+// connection in real time. On its own the hook is the ambient version:
+// slower cadence, pauses when the tab is hidden, and stops
 // polling once connected (a connection does not spontaneously un-happen; a
 // revoke shows up on the next mount or manual refresh).
 import { useCallback, useEffect, useRef, useState } from 'react';

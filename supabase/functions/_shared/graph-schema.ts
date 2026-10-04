@@ -122,30 +122,8 @@ export const GraphDataSchema = z.object({
 
 export type GraphData = z.infer<typeof GraphDataSchema>;
 
-export const GraphDataTopLevelSchema = z.object({
-  id: z.string().uuid(),
-  schemaVersion: z.number().int().positive(),
-  version: z.number().int().nonnegative(),
-  hash: z.string(),
-  nodes: z.record(z.unknown()),
-  edges: z.record(z.unknown()),
-  contracts: z.record(z.unknown()),
-  artifacts: z.record(z.unknown()),
-});
-
 export function validateGraphData(data: unknown): { valid: boolean; errors?: string[] } {
   const result = GraphDataSchema.safeParse(data);
-  if (result.success) return { valid: true };
-  return {
-    valid: false,
-    errors: result.error.issues.map(
-      (i) => `${i.path.join(".")}: ${i.message}`
-    ),
-  };
-}
-
-export function validateGraphDataTopLevel(data: unknown): { valid: boolean; errors?: string[] } {
-  const result = GraphDataTopLevelSchema.safeParse(data);
   if (result.success) return { valid: true };
   return {
     valid: false,

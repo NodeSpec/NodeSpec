@@ -1,10 +1,10 @@
 import { memo } from 'react';
-import { FallbackHandles } from './FallbackHandles.js';
+import { LeafHandles } from './LeafHandles.js';
 import { NodeActionToolbar, useNodeToolbarHover } from './NodeActionToolbar.js';
-import { Handle, Position } from '@xyflow/react';
 import type { RFNodeData } from '../../adapters/graph-to-reactflow.js';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { ContainerBadge } from './ContainerBadge.js';
+import { NodeIcon } from '../common/index.js';
 import { getTechnologyLogo, getTechnologyDisplayName } from '../../utils/technology-logo-map.js';
 
 interface EventBusNodeProps {
@@ -18,14 +18,6 @@ const BUS_COLORS: Record<string, string> = {
   'nats': '#27AAE1',
   'sqs': '#FF4F8B',
   'redis': '#DC382D',
-};
-
-const FALLBACK_ICONS: Record<string, string> = {
-  'kafka': '\u{1F4CA}',
-  'rabbitmq': '\u{1F430}',
-  'nats': '\u{26A1}',
-  'redis': '\u{1F534}',
-  'sqs': '\u{1F4EC}',
 };
 
 function EventBusNodeComponent({ data, selected }: EventBusNodeProps) {
@@ -79,51 +71,22 @@ function EventBusNodeComponent({ data, selected }: EventBusNodeProps) {
     flexShrink: 0,
   };
 
-  const inputPorts = data.ports.filter(p => p.direction === 'in');
-  const outputPorts = data.ports.filter(p => p.direction === 'out');
-
   return (
     <div style={containerStyles} className="event-bus-node" {...toolbarHover.nodeHoverProps}>
       <NodeActionToolbar visible={!!selected || toolbarHover.hoverVisible} data={data} bridgeProps={toolbarHover.bridgeProps} />
 
-      <FallbackHandles showTarget={inputPorts.length === 0} showSource={outputPorts.length === 0} />
-      {inputPorts.map((port) => (
-        <Handle
-          key={port.id}
-          type="target"
-          position={Position.Left}
-          id={port.id}
-          style={{
-            width: '14px',
-            height: '14px',
-            backgroundColor: c.surface,
-            border: `3px solid ${accentColor}`,
-            top: '50%',
-            left: '-7px',
-            boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
-          }}
-          title={port.name}
-        />
-      ))}
-
-      {outputPorts.map((port) => (
-        <Handle
-          key={port.id}
-          type="source"
-          position={Position.Right}
-          id={port.id}
-          style={{
-            width: '14px',
-            height: '14px',
-            backgroundColor: c.surface,
-            border: `3px solid ${accentColor}`,
-            top: '50%',
-            right: '-7px',
-            boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
-          }}
-          title={port.name}
-        />
-      ))}
+      <LeafHandles
+        style={{
+          width: '14px',
+          height: '14px',
+          backgroundColor: c.surface,
+          border: `3px solid ${accentColor}`,
+          top: '50%',
+          boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+        }}
+        targetStyle={{ left: '-7px' }}
+        sourceStyle={{ right: '-7px' }}
+      />
 
       <div style={headerStyles}>
         <div style={iconContainerStyles}>
@@ -134,9 +97,8 @@ function EventBusNodeComponent({ data, selected }: EventBusNodeProps) {
               style={{ width: '22px', height: '22px', objectFit: 'contain' }}
             />
           ) : (
-            <span style={{ fontSize: '18px' }}>
-              {FALLBACK_ICONS[busType.toLowerCase()] || '\u{1F4E8}'}
-            </span>
+            // No logo: the role icon, then the palette category icon (N4.8), never emoji.
+            <NodeIcon nodeType={data.nodeType} technology={data.technology} emojiIcon={data.icon} size={22} />
           )}
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>

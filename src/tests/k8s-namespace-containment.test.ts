@@ -10,7 +10,8 @@ describe('K8s Namespace Containment', () => {
 
       expect(namespace).toBeDefined();
       expect(namespace?.layer).toBe('orchestration');
-      expect(namespace?.canContain).toContain('docker-container');
+      // AG.11f: the offline list is the catalog's; a namespace runs workloads directly
+      expect(namespace?.canContain).toContain('worker');
       expect(namespace?.canContain).toContain('backend-service');
     });
 
@@ -326,7 +327,7 @@ describe('K8s Namespace Containment', () => {
   describe('Integration with AI Generation', () => {
     it('should validate parent-child relationships via canContainerHoldNode', () => {
       expect(canContainerHoldNode('orchestration.k8s-namespace', 'runtime.backend-service')).toBe(true);
-      expect(canContainerHoldNode('k8s-namespace', 'docker-container')).toBe(true);
+      expect(canContainerHoldNode('k8s-namespace', 'worker')).toBe(true);
       expect(canContainerHoldNode('k8s-namespace', 'backend-service')).toBe(true);
     });
 

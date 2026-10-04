@@ -125,7 +125,8 @@ export class PatchService {
       throw new Error('Failed to get branches: ' + branchesResult.error.message);
     }
 
-    const mainBranch = branchesResult.data.find((b: any) => b.name === 'main');
+    // AD.4 (D15): the primary branch by its flag; connect may have renamed it.
+    const mainBranch = branchesResult.data.find((b: any) => b.isPrimary);
 
     if (!mainBranch) {
       throw new Error('Main branch not found for project');
@@ -202,7 +203,6 @@ export class PatchService {
             generatedByAI: true,
             specificationId,
           },
-          ports: node.ports || [],
         },
       });
 
@@ -251,8 +251,6 @@ export class PatchService {
             source: edge.source,
             target: edge.target,
             contractId: edge.contractId,
-            sourcePortId: edge.sourcePortId,
-            targetPortId: edge.targetPortId,
             metadata: edge.metadata || {},
           },
         });

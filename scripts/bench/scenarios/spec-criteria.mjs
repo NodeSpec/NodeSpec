@@ -85,13 +85,23 @@ export const specDrift = {
     });
     s.check('restore-spec applies (mode=applied)', restore.data.success && restore.data.mode === 'applied',
       JSON.stringify(restore.data).slice(0, 300));
-    s.check('met evidence SURVIVED the load', (restore.data.counts?.criteriaPreserved ?? 0) >= 1,
+    // UAT hardening 2026-09-27: exact counts. One met criterion existed, two
+    // rows were in the spec and one was added; "at least one" hid a load that
+    // touched the wrong rows.
+    const counts = restore.data.counts ?? {};
+    s.check('met evidence SURVIVED the load: exactly the one met criterion, two rows updated, one added',
+      counts.criteriaPreserved === 1 && counts.updated === 2 && counts.added === 1,
       JSON.stringify(restore.data.counts));
 
     const [req1] = await rest(env).select('specification_requirements', `id=eq.${fx.ids.req1}&select=acceptance_criteria`);
     const kept = (req1.acceptance_criteria ?? []).find((c) => c.text === 'tasks persist across restarts');
     s.check('DB: the git-evidenced criterion is still met with provenance intact',
       kept?.met === true && kept?.provenance?.source === 'git', JSON.stringify(req1.acceptance_criteria).slice(0, 300));
+    const [renamed] = await rest(env).select('specification_requirements', `id=eq.${fx.ids.req2}&select=name,acceptance_criteria`);
+    s.check('the repo rename of REQ-002 landed on the same row, its criteria as they were',
+      renamed?.name === 'Query tasks fast' && renamed?.acceptance_criteria?.length === 1 &&
+      renamed.acceptance_criteria[0].text === 'filter by status works' && renamed.acceptance_criteria[0].met !== true,
+      JSON.stringify(renamed ?? null).slice(0, 200));
     const [spec2] = await rest(env).select('specification_requirements',
       `specification_id=eq.${fx.ids.spec}&requirement_id=eq.REQ-003&select=requirement_id,acceptance_criteria`);
     s.check('the repo-added requirement arrived (unmet)', !!spec2 &&

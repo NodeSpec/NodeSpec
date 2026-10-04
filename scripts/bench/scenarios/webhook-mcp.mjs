@@ -1,7 +1,7 @@
 // SB-4 scenarios 9–10: the webhook lane (testable for the FIRST time — GitHub
 // can never reach a localhost bench, but a locally-forged valid HMAC signature
 // exercises the identical verification path) and the MCP tool surface.
-import { callFn, rest, github, postSignedWebhook, mcpCall, uid, until, Scenario } from '../lib.mjs';
+import { callFn, rest, github, postSignedWebhook, mcpCall, uid, until, Scenario, parseMcp } from '../lib.mjs';
 import { createProject, connectRepo } from '../fixtures.mjs';
 
 const pendingCards = (env, projectId) =>
@@ -22,30 +22,43 @@ export const webhookLane = {
     const secret = `bench-secret-${uid().slice(0, 8)}`;
     await rest(env).update('git_integrations', `id=eq.${integrationId}`, { webhook_secret: secret });
 
+    // AD.1: a delivery wakes the sync check, which reads the real range.
     const gh = github(env);
-    const head = await gh.headSha('main');
     const payload = (message, sha) => ({
       ref: 'refs/heads/main', after: sha,
       head_commit: { id: sha, message, author: { username: 'bench' }, modified: ['src/api/index.ts'] },
     });
 
     // 1. Bad signature → rejected before any write.
-    const bad = await postSignedWebhook(env, integrationId, secret, payload('feat: forged', head), { badSignature: true });
+    const bad = await postSignedWebhook(env, integrationId, secret, payload('feat: forged', await gh.headSha('main')), { badSignature: true });
     s.check('bad signature is rejected (401)', bad.status === 401, `status=${bad.status} ${JSON.stringify(bad.data).slice(0, 200)}`);
-    // 2. Valid signature + external commit → pending card raised.
+
+    // 2. A real out-of-band commit, then its delivery → the sync check cards it.
+    await gh.putFile('src/api/index.ts', 'main', `export const edited = "${uid().slice(0, 6)}";\n`, 'feat: out-of-band via webhook');
+    const head = await gh.headSha('main');
     const ok = await postSignedWebhook(env, integrationId, secret, payload('feat: out-of-band via webhook', head));
-    s.check('valid signature accepted', ok.status === 200, `status=${ok.status} ${JSON.stringify(ok.data).slice(0, 200)}`);
+    s.check('valid delivery runs the sync check', ok.status === 200 && ok.data?.branchName === 'main' && !!ok.data?.sweep,
+      `status=${ok.status} ${JSON.stringify(ok.data).slice(0, 200)}`);
     const cards = await pendingCards(env, fx.ids.project);
-    const webhookCard = cards.find((c) => c.commit_message === 'feat: out-of-band via webhook');
-    s.check('webhook raised a pending card with matches', !!webhookCard &&
-      (webhookCard.metadata?.artifactMatches ?? []).length === 1, JSON.stringify(cards).slice(0, 300));
-    // 3. Self-push message → ignored (both prefixes are pinned offline; live-check the new one).
-    const selfCount = cards.length;
-    const self = await postSignedWebhook(env, integrationId, secret, payload('Update from NodeSpec: 2 files from main', head));
-    s.check('self-push ignored', self.status === 200 && /self-push/i.test(self.data?.message ?? ''),
-      JSON.stringify(self.data).slice(0, 200));
-    const after = await pendingCards(env, fx.ids.project);
-    s.check('self-push raised NO card', after.length === selfCount, `${selfCount} → ${after.length}`);
+    const card = cards.find((c) => c.metadata?.source === 'sweep');
+    s.check('the sync check raised one pending card with the bound file matched', cards.length === 1 &&
+      (card?.metadata?.artifactMatches ?? []).some((m) => m.path === 'src/api/index.ts'), JSON.stringify(cards).slice(0, 300));
+
+    // 3. NodeSpec's own push, then its delivery → no second card, and the
+    //    agent's edit is not overwritten (the push skips it).
+    const own = await callFn(env, session, 'git-push', { projectId: fx.ids.project, branchName: 'main', integrationId });
+    s.check('the push skips the file git changed', (own.data?.skipped ?? []).some((f) => f.path === 'src/api/index.ts') || own.data?.code === 'all-skipped',
+      JSON.stringify(own.data).slice(0, 300));
+    const after = own.data?.commitSha ?? await gh.headSha('main');
+    // UAT hardening 2026-09-27: the delivery's own answer is part of the proof
+    // (a webhook that 500s raises no card either), and the file is read at the
+    // push's commit, never at a branch ref that can still serve the old tree.
+    const selfDelivery = await postSignedWebhook(env, integrationId, secret, payload('Update from NodeSpec: bench', after));
+    const later = await pendingCards(env, fx.ids.project);
+    s.check('NodeSpec\'s own push raised NO second card', selfDelivery.status === 200 && later.length === 1,
+      `delivery ${selfDelivery.status} ${JSON.stringify(selfDelivery.data).slice(0, 160)}; cards ${cards.length} → ${later.length}`);
+    const file = await gh.getFile('src/api/index.ts', after);
+    s.check('the out-of-band edit is still in git', !!file?.content?.includes('export const edited'), `at ${after}: ${(file?.content ?? '').slice(0, 120)}`);
     return { s, fx, integrationId };
   },
 };
@@ -63,10 +76,8 @@ export const mcpTools = {
     s.check('setup push succeeds', push.data.success);
 
     // Parse the JSON-RPC tools/call envelope: result.content[0].text.
-    const parse = (r) => {
-      const text = r.data?.result?.content?.[0]?.text;
-      try { return JSON.parse(text); } catch { return { raw: text, isError: r.data?.result?.isError }; }
-    };
+    // The shared strict reader (lib.mjs): a call that failed below the tool is an error.
+    const parse = parseMcp;
 
     // R5d: whole-node completion — declaration recorded, criteria untouched.
     const before = await rest(env).select('specification_requirements',
@@ -81,7 +92,7 @@ export const mcpTools = {
       markData?.criteriaUntouched === true && markData?.unmetCriteria === 3, JSON.stringify(markData).slice(0, 200));
     const mappings = await rest(env).select('specification_mappings',
       `specification_id=eq.${fx.ids.spec}&node_id=eq.${fx.ids.nodeApi}&select=validation_status,validation_provenance`);
-    s.check('validation_status=valid with mcp provenance', mappings.every((m) =>
+    s.check('validation_status=valid with mcp provenance', mappings.length === 2 && mappings.every((m) =>
       m.validation_status === 'valid' && m.validation_provenance?.source === 'mcp' && m.validation_provenance?.actor === 'bench-harness'),
       JSON.stringify(mappings).slice(0, 300));
     const criteria = await rest(env).select('specification_requirements',
@@ -108,8 +119,8 @@ export const mcpTools = {
       status?.nextAction?.slice(0, 200));
 
     const pending = parse(await mcpCall(env, 'get_pending_changes', { project_id: fx.ids.project }));
-    const list = pending?.changes ?? pending?.pendingChanges ?? pending;
-    s.check('get_pending_changes returns the card', Array.isArray(list) ? list.length >= 1 : !!list,
+    // An error object used to count as "the card" (!!list).
+    s.check('get_pending_changes returns the card', Array.isArray(pending?.pendingChanges) && pending.pendingChanges.length >= 1,
       JSON.stringify(pending).slice(0, 200));
 
     // Resolver honesty (bench-audit hardening 2026-08-09): a project id that exists

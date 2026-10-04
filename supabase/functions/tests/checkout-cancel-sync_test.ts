@@ -12,15 +12,15 @@ Deno.test('checkout: ONLY the live Indie prices sell; placeholders refuse by nam
   // The live purchasable catalog: Indie monthly + Indie annual.
   assertEquals(validateCheckoutPrice('price_indie_monthly_new'), null);
   assertEquals(validateCheckoutPrice('price_indie_annual_new'), null);
-  // Team is a placeholder tier and the token add-on product is archived —
-  // both refuse with a message that says WHY, never a generic "invalid".
+  // Team is a placeholder tier: it refuses with a message that says WHY,
+  // never a generic "invalid".
   for (const key of Object.keys(PLAN_BY_LOOKUP_KEY)) {
     if (key.startsWith('price_indie_')) continue;
     const err = validateCheckoutPrice(key);
     assert(err !== null && err.includes('not available for purchase yet'), `${key}: ${err}`);
   }
-  const addonErr = validateCheckoutPrice('price_token_addon_1m');
-  assert(addonErr !== null && addonErr.includes('not currently offered'), String(addonErr));
+  // AH.2: the token add-on is no longer a known price.
+  assertEquals(validateCheckoutPrice('price_token_addon_1m'), 'Invalid price identifier: price_token_addon_1m');
   assert(validateCheckoutPrice('price_free_lunch') !== null, 'unknown key rejected');
   assert(validateCheckoutPrice('')!.includes('Invalid price identifier'), 'error names the problem');
 });
@@ -101,6 +101,7 @@ Deno.test('sync: reconciliation row carries resolved plan, interval, periods, pa
   assertEquals(upsertData.payment_method_brand, 'visa');
   assertEquals(upsertData.payment_method_last4, '4242');
   assertEquals(upsertData.current_period_start, new Date(1750000000 * 1000).toISOString());
+  assertEquals('token_limit' in upsertData, false, 'AH.2: no token allowance is written');
 });
 
 Deno.test('sync: unknown price falls back through nickname heuristics (the sync-only behavior)', () => {

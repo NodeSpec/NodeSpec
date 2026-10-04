@@ -2,11 +2,12 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 
 const BASE_URL = 'https://nodespec.io';
 
+// /pricing is not listed: signed out, it sends the visitor to the homepage, where the
+// plans are (AJ.2).
 const STATIC_URLS = [
   { loc: `${BASE_URL}/`, changefreq: 'weekly', priority: '1.0' },
   { loc: `${BASE_URL}/templates`, changefreq: 'weekly', priority: '0.8' },
   { loc: `${BASE_URL}/blog`, changefreq: 'daily', priority: '0.9' },
-  { loc: `${BASE_URL}/pricing`, changefreq: 'monthly', priority: '0.7' },
   { loc: `${BASE_URL}/government`, changefreq: 'monthly', priority: '0.7' },
   { loc: `${BASE_URL}/docs/mcp`, changefreq: 'monthly', priority: '0.6' },
   { loc: `${BASE_URL}/privacy`, changefreq: 'monthly', priority: '0.3' },
@@ -51,12 +52,12 @@ Deno.serve(async () => {
     const posts = blogResult.data ?? [];
     const templates = templateResult.data ?? [];
     const profiles = profileResult.data ?? [];
-    const today = new Date().toISOString().split('T')[0];
 
+    // No lastmod on the static pages: today's date on every request says they
+    // changed when they did not (AJ.2).
     const staticEntries = STATIC_URLS.map(
       (u) => `  <url>
     <loc>${escapeXml(u.loc)}</loc>
-    <lastmod>${today}</lastmod>
     <changefreq>${u.changefreq}</changefreq>
     <priority>${u.priority}</priority>
   </url>`,

@@ -1,6 +1,7 @@
 import { useTheme } from '../../theme/ThemeContext.js';
+import { useViewport } from '../../hooks/useViewport.js';
 import { Sparkles, GitBranch, FileUp } from 'lucide-react';
-import type { WorkflowOrigin } from '../panels/ProjectOnboardingWizard.js';
+import type { WorkflowOrigin } from '../panels/ProjectCreatePopup.js';
 
 interface EmptyCanvasPromptProps {
   workflowOrigin?: WorkflowOrigin;
@@ -21,7 +22,7 @@ const WORKFLOW_CONTENT: Record<WorkflowOrigin, { title: string; subtitle: string
   },
   'import-spec': {
     title: 'Import Your Specification',
-    subtitle: 'Paste your spec or PRD into your connected AI and ask it to load it into this project — it converts the document into vision and requirements you review and apply.',
+    subtitle: 'Stage your spec or PRD from the start card, then tell your connected AI to call get_project_status — it converts the document into vision and requirements you review and apply.',
     icon: FileUp,
     beta: true,
   },
@@ -29,7 +30,7 @@ const WORKFLOW_CONTENT: Record<WorkflowOrigin, { title: string; subtitle: string
 
 const DEFAULT_CONTENT = {
   title: 'Welcome to Your Canvas',
-  subtitle: 'Describe your vision to your connected AI, or add requirements and components by hand',
+  subtitle: 'Pick a start path above, describe your vision to your connected AI, or add requirements and components by hand',
   icon: Sparkles,
   beta: false,
 };
@@ -37,6 +38,7 @@ const DEFAULT_CONTENT = {
 export function EmptyCanvasPrompt({ workflowOrigin }: EmptyCanvasPromptProps = {}) {
   const { theme } = useTheme();
   const c = theme.colors;
+  const vp = useViewport();
 
   const content = workflowOrigin ? WORKFLOW_CONTENT[workflowOrigin] : DEFAULT_CONTENT;
   const Icon = content.icon;
@@ -54,19 +56,25 @@ export function EmptyCanvasPrompt({ workflowOrigin }: EmptyCanvasPromptProps = {
     zIndex: 5,
   };
 
+  // 9.14: 48px of padding around a 500px column overflows a 360px phone
+  // before a word is drawn. The column gives way to the viewport, and the
+  // padding comes in with it.
   const promptContainerStyles: React.CSSProperties = {
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    gap: '24px',
-    padding: '48px',
+    gap: vp.isPhone ? '16px' : '24px',
+    padding: vp.isPhone ? '24px 20px' : '48px',
+    width: '100%',
     maxWidth: '500px',
+    boxSizing: 'border-box',
     textAlign: 'center',
   };
 
   const iconContainerStyles: React.CSSProperties = {
-    width: '80px',
-    height: '80px',
+    width: vp.isPhone ? '60px' : '80px',
+    height: vp.isPhone ? '60px' : '80px',
+    flexShrink: 0,
     borderRadius: '50%',
     background: `linear-gradient(135deg, ${c.primary}20, ${c.primary}10)`,
     display: 'flex',
@@ -77,14 +85,14 @@ export function EmptyCanvasPrompt({ workflowOrigin }: EmptyCanvasPromptProps = {
   };
 
   const titleStyles: React.CSSProperties = {
-    fontSize: '24px',
+    fontSize: vp.isPhone ? '19px' : '24px',
     fontWeight: 600,
     color: c.text,
     marginBottom: '8px',
   };
 
   const subtitleStyles: React.CSSProperties = {
-    fontSize: '15px',
+    fontSize: vp.isPhone ? '13.5px' : '15px',
     color: c.textMuted,
     lineHeight: '1.6',
   };
@@ -108,7 +116,7 @@ export function EmptyCanvasPrompt({ workflowOrigin }: EmptyCanvasPromptProps = {
       <div style={overlayStyles}>
         <div style={promptContainerStyles}>
           <div style={iconContainerStyles}>
-            <Icon size={36} color={c.primary} />
+            <Icon size={vp.isPhone ? 26 : 36} color={c.primary} />
           </div>
 
           <div>

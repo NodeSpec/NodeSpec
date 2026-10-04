@@ -20,7 +20,6 @@
 
 export interface PlanInfo {
   name: string;
-  tokenLimit: number;
 }
 
 export interface PriceLike {
@@ -33,17 +32,17 @@ export interface PriceLike {
 
 export const PLAN_BY_LOOKUP_KEY: Record<string, PlanInfo> = {
   // Current products
-  price_indie_monthly_new: { name: 'indie', tokenLimit: 0 },
-  price_indie_annual_new: { name: 'indie', tokenLimit: 0 },
-  price_team_monthly: { name: 'team', tokenLimit: 35_000_000 },
-  price_team_annual: { name: 'team', tokenLimit: 35_000_000 },
+  price_indie_monthly_new: { name: 'indie' },
+  price_indie_annual_new: { name: 'indie' },
+  price_team_monthly: { name: 'team' },
+  price_team_annual: { name: 'team' },
   // Grandfathered V1 products (billing continues; tier resolves to the successor)
-  price_starter_monthly: { name: 'team', tokenLimit: 25_000_000 },
-  price_starter_annual: { name: 'team', tokenLimit: 25_000_000 },
-  price_architect_monthly: { name: 'team', tokenLimit: 25_000_000 },
-  price_architect_annual: { name: 'team', tokenLimit: 25_000_000 },
-  price_pro_monthly_new: { name: 'team', tokenLimit: 35_000_000 },
-  price_pro_annual_new: { name: 'team', tokenLimit: 35_000_000 },
+  price_starter_monthly: { name: 'team' },
+  price_starter_annual: { name: 'team' },
+  price_architect_monthly: { name: 'team' },
+  price_architect_annual: { name: 'team' },
+  price_pro_monthly_new: { name: 'team' },
+  price_pro_annual_new: { name: 'team' },
 };
 
 /** THE checkout construction map: plan id + interval -> Stripe lookup key.
@@ -53,15 +52,11 @@ export const PLAN_LOOKUP_KEYS: Record<'indie' | 'team', { month: string; year: s
   team: { month: 'price_team_monthly', year: 'price_team_annual' },
 };
 
-export const TOKEN_ADDON_LOOKUP_KEY = 'price_token_addon_1m';
-export const TOKEN_ADDON_AMOUNT = 1_000_000;
-
 /**
  * Owner ruling 2026-08-31 (Stripe catalog reset): the live purchasable catalog
  * is exactly Indie Monthly ($15/mo) and Indie Annual ($144/yr). Team is a
- * placeholder tier (its features are not built; planned separately) and the
- * token add-on product is archived, so CHECKOUT refuses both by name — while
- * PLAN_BY_LOOKUP_KEY keeps resolving every legacy/team key so grandfathered
+ * placeholder tier (its features are not built; planned separately), so
+ * CHECKOUT refuses it by name, while PLAN_BY_LOOKUP_KEY keeps resolving every legacy/team key so grandfathered
  * subscriptions bill and classify exactly as before (archiving a product
  * never cancels its subscriptions). When Team ships, add its keys here.
  */
@@ -72,15 +67,12 @@ export const CHECKOUT_LOOKUP_KEYS = new Set([
 
 /** Every lookup key the RESOLUTION side recognizes (webhook/sync — includes
  *  grandfathered and placeholder keys checkout no longer sells). */
-export const VALID_LOOKUP_KEYS = new Set([
-  ...Object.keys(PLAN_BY_LOOKUP_KEY),
-  TOKEN_ADDON_LOOKUP_KEY,
-]);
+export const VALID_LOOKUP_KEYS = new Set(Object.keys(PLAN_BY_LOOKUP_KEY));
 
 /** stripe-webhook behavior: known lookup keys only; anything else is 'unknown'. */
 export function resolvePlanInfoStrict(
   price: PriceLike,
-): { name: string; tokenLimit: number; amountCents: number } {
+): { name: string; amountCents: number } {
   const lookupKey = price.lookup_key ?? '';
   const plan = PLAN_BY_LOOKUP_KEY[lookupKey];
   const amountCents = price.unit_amount ?? 0;
@@ -91,32 +83,32 @@ export function resolvePlanInfoStrict(
 
   const productId = typeof price.product === 'string' ? price.product : price.product?.toString() ?? '';
   console.warn(`Unknown lookup key "${lookupKey}" for price ${price.id} (product: ${productId}), falling back to unknown`);
-  return { name: 'unknown', tokenLimit: 0, amountCents };
+  return { name: 'unknown', amountCents };
 }
 
 /** sync-subscription behavior: lookup key, then nickname, then amount heuristics. */
 export function resolvePlanInfoWithFallbacks(
   price: PriceLike,
-): { name: string; tokenLimit: number; amountCents: number } {
+): { name: string; amountCents: number } {
   const lookupKey = price.lookup_key ?? '';
   const plan = PLAN_BY_LOOKUP_KEY[lookupKey];
   const amountCents = price.unit_amount ?? 0;
   if (plan) return { ...plan, amountCents };
 
   const nickname = (price.nickname ?? '').toLowerCase();
-  if (nickname.includes('team')) return { name: 'team', tokenLimit: 35_000_000, amountCents };
-  if (nickname.includes('pro')) return { name: 'team', tokenLimit: 35_000_000, amountCents };
-  if (nickname.includes('architect')) return { name: 'team', tokenLimit: 25_000_000, amountCents };
-  if (nickname.includes('starter')) return { name: 'team', tokenLimit: 25_000_000, amountCents };
-  if (nickname.includes('indie')) return { name: 'indie', tokenLimit: 0, amountCents };
+  if (nickname.includes('team')) return { name: 'team', amountCents };
+  if (nickname.includes('pro')) return { name: 'team', amountCents };
+  if (nickname.includes('architect')) return { name: 'team', amountCents };
+  if (nickname.includes('starter')) return { name: 'team', amountCents };
+  if (nickname.includes('indie')) return { name: 'indie', amountCents };
 
   // The current Indie amounts by exact value BEFORE the magnitude ladder —
   // Indie Annual is $144 (14400¢), which the >= 7900 team rung would
   // otherwise swallow when a price is missing its lookup key.
-  if (amountCents === 1500 || amountCents === 14400) return { name: 'indie', tokenLimit: 0, amountCents };
-  if (amountCents >= 7900) return { name: 'team', tokenLimit: 35_000_000, amountCents };
-  if (amountCents >= 4000) return { name: 'team', tokenLimit: 25_000_000, amountCents };
-  if (amountCents >= 1200) return { name: 'indie', tokenLimit: 0, amountCents };
+  if (amountCents === 1500 || amountCents === 14400) return { name: 'indie', amountCents };
+  if (amountCents >= 7900) return { name: 'team', amountCents };
+  if (amountCents >= 4000) return { name: 'team', amountCents };
+  if (amountCents >= 1200) return { name: 'indie', amountCents };
 
-  return { name: 'unknown', tokenLimit: 0, amountCents };
+  return { name: 'unknown', amountCents };
 }

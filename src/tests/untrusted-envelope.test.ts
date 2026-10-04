@@ -61,10 +61,8 @@ describe('P0-7: envelope behavior', () => {
 
 describe('P0-7: blast radius — shared agent-loop code must never import the envelope', () => {
   const FORBIDDEN_IMPORTERS = [
-    'supabase/functions/_shared/agent-loop-v4.ts',
     'supabase/functions/_shared/task-document-generator.ts',
     'supabase/functions/_shared/test-document-generator.ts',
-    'supabase/functions/_shared/tool-executor.ts',
   ];
 
   for (const file of FORBIDDEN_IMPORTERS) {

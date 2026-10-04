@@ -3,6 +3,8 @@
 // not managed = hands off). Fully offline — catalog + spec loads run over FakeSupabase.
 import { refreshTaskPackets } from '../_shared/packet-freshness.ts';
 import { computeTaskContextFingerprint } from '../_shared/task-document-generator.ts';
+import { servedSentences, servedVisionText } from '../_shared/served-vision.ts';
+import { visionSentenceId } from '../_shared/vision-sentences.ts';
 import { computeTestContextFingerprint } from '../_shared/test-document-generator.ts';
 import { FakeSupabase, assert, assertEquals } from './helpers.ts';
 
@@ -175,15 +177,30 @@ function scriptCatalogAndSpecWithVision(sb: FakeSupabase, vision: string) {
   sb.script('specification_mappings', 'select', { data: [], error: null });
 }
 
-Deno.test('R6: a VISION EDIT alone stales the packet and the regen embeds the new vision', async () => {
+// AA.6: a packet carries the vision sentences its node's outcomes cite, and
+// its freshness hashes that block (servedVisionText), not the whole vision.
+function scriptServedChain(sb: FakeSupabase, sentence: string) {
+  sb.script('specification_mappings', 'select', { data: [{ requirement_id: 'r1', node_id: N1 }], error: null });
+  sb.script('specification_requirements', 'select', { data: [{ id: 'r1', requirement_id: 'REQ-001', name: 'Auth', description: 'd', category: 'functional', status: 'pending', acceptance_criteria: [] }], error: null });
+  sb.script('outcome_derivations', 'select', { data: [{ candidate_id: 'o1', requirement_row_id: 'r1' }], error: null });
+  sb.script('requirement_candidates', 'select', { data: [{ id: 'o1', status: 'pending', evidence: { serves: [{ id: visionSentenceId(sentence), text: sentence }] } }], error: null });
+}
+
+Deno.test('R6 + AA.6: an edit to a sentence the node serves stales the packet and the regen carries the new words', async () => {
   const sb = new FakeSupabase();
-  scriptCatalogAndSpecWithVision(sb, 'THE NEW VISION: tasks for small teams.');
+  for (const t of ['node_roles', 'technology_catalog', 'deployment_targets', 'legacy_type_mappings', 'cloud_provider_patterns', 'scope_archetypes']) {
+    sb.script(t, 'select', { data: [], error: null });
+  }
+  // Same sentence id (case and punctuation), new words on the page.
+  sb.script('project_specifications', 'select', { data: { id: 'spec-1', vision: 'Tasks for SMALL teams! Nothing else.' }, error: null });
+  scriptServedChain(sb, 'Tasks for small teams.');
   const graph = baseGraph(true);
-  // Stamped when the vision read "THE OLD VISION" — nothing else changed.
   const node = graph.nodes[N1];
+  const reqs = [{ requirementId: 'REQ-001', name: 'Auth', description: 'd', category: 'functional', status: 'pending', acceptanceCriteria: [] }];
+  const old = servedSentences('Tasks for small teams. Nothing else.', [{ serves: [visionSentenceId('Tasks for small teams.')] }]);
   const fp = computeTaskContextFingerprint(
     { id: node.id, label: node.label, type: node.type, technology: node.technology, ports: node.ports },
-    graph, [], 'THE OLD VISION',
+    graph, reqs, servedVisionText(old), EMPTY_CATALOGS,
   );
   graph.artifacts[TASK] = {
     id: TASK, nodeId: N1, kind: 'task', path: '.nodespec/tasks/api-service.task.md',
@@ -193,20 +210,25 @@ Deno.test('R6: a VISION EDIT alone stales the packet and the regen embeds the ne
 
   const r = await refreshTaskPackets(sb as never, 'proj-1', graph);
   assertEquals(r.checked, 1);
-  assertEquals(r.refreshed, 1, 'the exact Discovered #9 shape: vision edit must stale the packet');
+  assertEquals(r.refreshed, 1, 'the served sentence changed on the page: the packet is stale');
   const a = graph.artifacts[TASK];
-  assert(a.content.includes('THE NEW VISION'), 'regenerated Project Context carries the new vision');
+  assert(a.content.includes('- Tasks for SMALL teams!'), 'the regenerated packet carries the new words');
+  assert(!a.content.includes('Nothing else.'), 'and not the sentence the node does not serve');
   assert(a.metadata.taskContextFingerprint.fingerprint !== fp.fingerprint, 'fingerprint advanced');
 });
 
-Deno.test('R6: unchanged vision → packet stays fresh (no spurious regen)', async () => {
+Deno.test('R6 + AA.6: an edit to a sentence the node does not serve leaves the packet fresh', async () => {
   const sb = new FakeSupabase();
-  scriptCatalogAndSpecWithVision(sb, 'THE SAME VISION');
+  for (const t of ['node_roles', 'technology_catalog', 'deployment_targets', 'legacy_type_mappings', 'cloud_provider_patterns', 'scope_archetypes']) {
+    sb.script(t, 'select', { data: [], error: null });
+  }
+  sb.script('project_specifications', 'select', { data: { id: 'spec-1', vision: 'THE SAME VISION. A reworded second sentence.' }, error: null });
+  sb.script('specification_mappings', 'select', { data: [], error: null });
   const graph = baseGraph(true);
   const node = graph.nodes[N1];
   const fp = computeTaskContextFingerprint(
     { id: node.id, label: node.label, type: node.type, technology: node.technology, ports: node.ports },
-    graph, [], 'THE SAME VISION', EMPTY_CATALOGS,
+    graph, [], servedVisionText(servedSentences('THE SAME VISION. The second sentence.', [])), EMPTY_CATALOGS,
   );
   graph.artifacts[TASK] = {
     id: TASK, nodeId: N1, kind: 'task', path: '.nodespec/tasks/api-service.task.md',
@@ -215,7 +237,7 @@ Deno.test('R6: unchanged vision → packet stays fresh (no spurious regen)', asy
   };
   const r = await refreshTaskPackets(sb as never, 'proj-1', graph);
   assertEquals(r.checked, 1);
-  assertEquals(r.refreshed, 0);
+  assertEquals(r.refreshed, 0, 'the node serves no sentence, so a vision edit is not its content');
   assertEquals(graph.artifacts[TASK].content, 'OLD GENERATED CONTENT');
 });
 

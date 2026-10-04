@@ -16,10 +16,8 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import type { Graph, PatchOperation, ActorType } from '@nodespec/core/types.js';
-import type { SpecificationData } from '../../hooks/useRealtimeSpecification.js';
-import type { ProjectExportTestCase } from '../../utils/export-context.js';
-import { deriveRFState, computeCrossContainerSummaries, generateContainerSummaryEdges, enrichNodesWithCriteriaProgress, enrichNodesWithTestSummary, type TestSummaryByNodeId, type SpecGraphRFNode, type SpecGraphRFEdge, type ArchitectureLayerMode, type DeriveRFStateOptions } from '../../adapters/graph-to-reactflow.js';
-import { isContainerType, isLogicalBoundaryType } from '../../adapters/rf-visual-type-resolver.js';
+import { deriveRFState, computeCrossContainerSummaries, generateContainerSummaryEdges, isBoxNode, isPartNode, layoutParts, enrichNodesWithCriteriaProgress, enrichNodesWithTestSummary, type TestSummaryByNodeId, type SpecGraphRFNode, type SpecGraphRFEdge, type ArchitectureLayerMode, type DeriveRFStateOptions } from '../../adapters/graph-to-reactflow.js';
+import { isLogicalBoundaryType } from '../../adapters/rf-visual-type-resolver.js';
 import { layoutContainerChildren, computeAllContainerLayouts } from '../../utils/container-child-layout.js';
 import { providerOfNode } from '@nodespec/core/container-types.js';
 import {
@@ -49,8 +47,8 @@ import { calculateAutoLayout } from '../../utils/auto-layout.js';
 import { calculateElkLayout } from '../../utils/elk-layout.js';
 import { ViewToggle, CanvasDock, type CanvasViewMode } from '../common/index.js';
 import type { NodeSizeMode } from '../common/CanvasDock.js';
-import { DecompositionCanvas } from './DecompositionCanvas.js';
-import { SpecificationMarkdownView } from './SpecificationMarkdownView.js';
+import { WorkSurface } from '../work/WorkSurface.js';
+import type { WorkFocus } from '../work/work-focus.js';
 import type { ProjectSpecification } from '../../services/SpecificationService.js';
 import { CatalogService } from '../../services/CatalogService.js';
 import type { CatalogResolver, TechnologyCatalogEntry, NodeRole } from '../../../persistence/supabase/catalog-repository.js';
@@ -58,14 +56,22 @@ import { TechnologyPicker } from '../common/TechnologyPicker.js';
 import { UsagePicker, type UsageOption } from '../common/UsagePicker.js';
 import { usagePhraseForRole, providerPlatformRoleId } from '../../utils/node-nature.js';
 import { resolveNodeCreationParams } from '../../utils/palette-roles.js';
-import { liveDropAffinities } from '../../utils/palette-list.js';
+import { liveDropAffinities, technologyVisibleInProject } from '../../utils/palette-list.js';
 import { isCustomDependencyRole } from '../../utils/node-nature.js';
 import { buildNodePatchesFromRole } from '../../utils/node-creation.js';
 import { useDragReparent } from '../../hooks/useDragReparent.js';
+import type { NodeLease } from '../ideation/node-leases.js';
+import { edgeScopeState, type CanvasScope } from '../ideation/change-scope-model.js';
 import { zoomBandForZoom, demotesToIcon, type ZoomBand } from '../../utils/semantic-zoom.js';
 
 interface CanvasProps {
   graph: Graph;
+  /** AA.5: fresh leases per node; a leased node wears the holder's badge. */
+  leases?: ReadonlyMap<string, NodeLease>;
+  /** AA.2: the active change's scope while it is shown: out of scope fades, crossing edges highlight. */
+  changeScope?: CanvasScope | null;
+  /** AA.2: the line naming the active change, drawn at the top of the architecture view. */
+  changeLine?: React.ReactNode;
   onPatchesGenerated?: (patches: PatchOperation[]) => void;
   onWarning?: (message: string) => void;
   onError?: (message: string) => void;
@@ -82,18 +88,25 @@ interface CanvasProps {
   onViewModeChange?: (mode: CanvasViewMode) => void;
   isRefreshing?: boolean;
   refreshCounter?: number;
-  workflowOrigin?: 'idea' | 'code' | 'import-spec';
+  /** M.2: bumped on every realtime specification_requirements batch, so
+   *  Work sees a lock (or any row edit) an agent made over MCP without
+   *  waiting for a graph refresh. */
+  specSignal?: number;
   onNodeExport?: (nodeId: string) => void;
+  /** AA.3b: open a file on the canvas (a table's schema or model file, from its group). */
+  onOpenFile?: (artifactId: string, nodeId: string) => void;
   criteriaByNodeId?: Map<string, Array<{ text: string; met?: boolean; testId?: string }>>;
   testSummaryByNodeId?: TestSummaryByNodeId;
-  testRefreshCounter?: number;
   onExportProject?: () => void;
-  specRealtimeData?: SpecificationData;
-  projectName?: string;
-  testSuiteData?: ProjectExportTestCase[];
-  onSpecDirtyChange?: (dirty: boolean) => void;
+  /** V3 task 3.4: repo-import nav entry, threaded to the Ideation view. */
+  /** 8.1: the Ideation queue's canvas proposals hand off to the Changes review. */
+  onOpenChanges?: (focusProposalId?: string) => void;
+  /** V3 task 4.5: the active branch — couplings are branch-scoped. */
   branchId?: string | null;
-  onSpecImportComplete?: () => void;
+  /** Work's Lives on chips open Architecture on that node. */
+  onOpenArchitecture?: (nodeId: string) => void;
+  /** A record the Architecture rail asked Work to open. */
+  workFocus?: WorkFocus | null;
 }
 
 const POSITIONS_STORAGE_KEY = 'specgraph_node_positions';
@@ -104,6 +117,8 @@ type FocusMode = 'off' | 'highlight' | 'isolate';
 
 const VISUAL_META_KEYS = new Set([
   'containerExpanded',
+  // AB.7: whether an exploded node shows its parts (functional view), the viewer's own.
+  'partsShown',
   'width',
   'height',
   'expandedWidth',
@@ -164,6 +179,9 @@ function saveVisualMetaToStorage(meta: Map<string, Record<string, unknown>>, pro
 
 function CanvasInner({
   graph,
+  leases,
+  changeScope,
+  changeLine,
   onPatchesGenerated,
   onWarning,
   onError,
@@ -175,22 +193,20 @@ function CanvasInner({
   projectId,
   specification,
   onEditSpecification,
-  viewMode: externalViewMode = 'decomposition',
+  viewMode: externalViewMode = 'ideation',
   onViewModeChange,
   isRefreshing = false,
   refreshCounter,
-  workflowOrigin,
+  specSignal,
   onNodeExport,
+  onOpenFile,
   criteriaByNodeId,
   testSummaryByNodeId,
-  testRefreshCounter,
   onExportProject,
-  specRealtimeData,
-  projectName: canvasProjectName,
-  testSuiteData,
-  onSpecDirtyChange,
+  onOpenChanges,
   branchId,
-  onSpecImportComplete,
+  onOpenArchitecture,
+  workFocus,
 }: CanvasProps) {
   const { theme } = useTheme();
   const reactFlowInstance = useReactFlow();
@@ -436,6 +452,20 @@ function CanvasInner({
       }
     }
 
+    if (visualUpdates.partsShown === true) {
+      // AB.7: an opened node lays its parts out inside it.
+      const { positions } = layoutParts(nodeId, effectiveGraph, catalog);
+      setLocalPositions((prev) => {
+        const next = new Map(prev);
+        for (const pos of positions) {
+          next.set(pos.id, { x: pos.x, y: pos.y });
+          savedPositions.current.set(pos.id, { x: pos.x, y: pos.y });
+        }
+        return next;
+      });
+      savePositionsToStorage(savedPositions.current, projectId);
+    }
+
     if (Object.keys(visualUpdates).length > 0) {
       updateVisualMeta(nodeId, visualUpdates);
     }
@@ -451,7 +481,7 @@ function CanvasInner({
       );
       onPatchesGenerated?.([patch]);
     }
-  }, [effectiveGraph.nodes, actorType, onPatchesGenerated, reactFlowInstance, updateVisualMeta]);
+  }, [effectiveGraph, catalog, projectId, actorType, onPatchesGenerated, reactFlowInstance, updateVisualMeta]);
 
   const debouncedDimensionSave = useCallback((nodeId: string, width: number, height: number) => {
     pendingDimensionUpdatesRef.current.set(nodeId, { width, height });
@@ -657,8 +687,9 @@ function CanvasInner({
   }, [effectiveGraph, catalog, localPositions, handleUpdateNodeMetadata, reactFlowInstance]);
 
   const handleCollapseExpandAll = useCallback((expand: boolean) => {
+    // AA.3: every box, an exploded node's included.
     const containerNodeIds = Object.entries(effectiveGraph.nodes)
-      .filter(([_, n]) => isContainerType(n.type, catalog) || isLogicalBoundaryType(n.type, catalog))
+      .filter(([_, n]) => isBoxNode(n, effectiveGraph, catalog))
       .map(([id]) => id);
 
     if (containerNodeIds.length === 0) return;
@@ -808,7 +839,7 @@ function CanvasInner({
   }, [viewMode, layerMode, handleLayerModeToggle, nodeSize, setNodeSize]);
 
   const effectiveNodeSize = layerMode === 'flat' ? nodeSize : 'regular';
-  const nonCompactableTypes = new Set(['container', 'logicalBoundary', 'group', 'requirement', 'addSectionButton', 'architectureExplanation']);
+  const nonCompactableTypes = new Set(['container', 'logicalBoundary', 'group', 'requirement', 'addSectionButton', 'architectureExplanation', 'tableGroup']);
 
   const focusRelatedNodeIds = useMemo(() => {
     if (focusMode === 'off' || !lockedFocusNodeId) return null;
@@ -840,12 +871,16 @@ function CanvasInner({
       });
       const shouldCompact = (effectiveNodeSize === 'compact' || zoomDemoted) && !nonCompactableTypes.has(node.type || '');
       const isDimmed = focusRelatedNodeIds !== null && !focusRelatedNodeIds.has(node.id);
+      // AA.2: while a change's scope is shown, what it does not touch fades.
+      const outOfScope = !!changeScope && !changeScope.keepNodeIds.has(node.id);
       const resultNode: SpecGraphRFNode = {
         ...node,
         type: shouldCompact ? 'icon' : node.type,
         style: isDimmed
           ? { ...node.style, opacity: 0.2, transition: 'opacity 0.25s ease' }
-          : { ...node.style, opacity: 1, transition: 'opacity 0.25s ease' },
+          : outOfScope
+            ? { ...node.style, opacity: 0.3, transition: 'opacity 0.25s ease' }
+            : { ...node.style, opacity: 1, transition: 'opacity 0.25s ease' },
         position: localPositions.get(node.id)
           ?? savedPositions.current.get(node.id)
           ?? metadataPos
@@ -854,6 +889,8 @@ function CanvasInner({
           ...node.data,
           highlighted: highlightedNodeIds.has(node.id),
           isLocked: lockedNodesSet.has(node.id),
+          lease: leases?.get(node.id) ?? null,
+          changeConstraints: changeScope?.constraintsByNode.get(node.id) ?? 0,
           isDropTarget: dropTargetId === node.id,
           crossContainerSummaries: crossContainerMap.get(node.id),
           layerMode,
@@ -863,6 +900,7 @@ function CanvasInner({
           onUpdateMetadata: (updates: Record<string, unknown>) => handleUpdateNodeMetadata(node.id, updates),
           onFitChildren: () => handleFitChildren(node.id),
           onExport: onNodeExport ? () => onNodeExport(node.id) : undefined,
+          onOpenFile,
           onUndock: graph.nodes[node.id]?.parentId ? () => handleUndockNode(node.id) : undefined,
           onDelete: () => handleDeleteNode(node.id),
           // UX-1.3: Add-to-Container moved from the deprecated right-click
@@ -881,7 +919,7 @@ function CanvasInner({
     });
 
     return result;
-  }, [rfState.nodes, localPositions, highlightedNodeIds, lockedNodesSet, handleToggleLock, handleUpdateNodeMetadata, crossContainerMap, layerMode, effectiveNodeSize, transitionPhase, handleFitChildren, dropTargetId, handleUndockNode, handleDeleteNode, handleAssignToContainer, graph.nodes, onNodeExport, focusRelatedNodeIds, zoomBand]);
+  }, [rfState.nodes, localPositions, highlightedNodeIds, lockedNodesSet, leases, changeScope, handleToggleLock, handleUpdateNodeMetadata, crossContainerMap, layerMode, effectiveNodeSize, transitionPhase, handleFitChildren, dropTargetId, handleUndockNode, handleDeleteNode, handleAssignToContainer, graph.nodes, onNodeExport, onOpenFile, focusRelatedNodeIds, zoomBand]);
 
   const edges = useMemo(() => {
     const effectiveFocusNodeId = lockedFocusNodeId ?? focusedNodeId;
@@ -893,6 +931,7 @@ function CanvasInner({
         focusedNodeId: effectiveFocusNodeId,
         sourceNodeId: e.source,
         targetNodeId: e.target,
+        scopeState: edgeScopeState(changeScope, e.id),
       },
     });
 
@@ -915,7 +954,7 @@ function CanvasInner({
     }
 
     return result.map(injectFocusData);
-  }, [rfState.edges, layerMode, containerSummaryEdges, focusedEdgeId, focusedNodeId, lockedFocusNodeId]);
+  }, [rfState.edges, layerMode, containerSummaryEdges, focusedEdgeId, focusedNodeId, lockedFocusNodeId, changeScope]);
 
   const availableContractKinds = useMemo(() => {
     const kinds = new Set<string>();
@@ -1283,7 +1322,6 @@ function CanvasInner({
               type: nodeType,
               label: displayName,
               technology,
-              ports: [],
               data: {},
               metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
               status: 'draft',
@@ -1443,7 +1481,7 @@ function CanvasInner({
         return;
       }
 
-      const technologies = catalog.getTechnologiesForRole(role.id);
+      const technologies = catalog.getTechnologiesForRole(role.id).filter((t) => technologyVisibleInProject(t, projectId));
 
       if (technologies.length >= 2) {
         setTechPickerState({
@@ -1472,7 +1510,7 @@ function CanvasInner({
     }
 
     createNodeFromDrop(droppedType, droppedType, flowPosition, parentContainerId);
-  }, [reactFlowInstance, catalog, createNodeFromDrop, notifyLayerMismatch]);
+  }, [reactFlowInstance, catalog, createNodeFromDrop, notifyLayerMismatch, projectId]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1528,18 +1566,20 @@ function CanvasInner({
   }, [selectedNodes, selectedEdges, graph, actorType, onPatchesGenerated, onWarning, onError]);
 
   const handleAutoLayout = useCallback(() => {
+    // AB.7: a hidden part keeps its place inside its node; it is not laid out on its own.
+    const laidOut = nodes.filter((n) => !(n.hidden && effectiveGraph.nodes[n.id] && isPartNode(effectiveGraph.nodes[n.id], effectiveGraph, catalog)));
     void (async () => {
       let newPositions: Array<{ id: string; x: number; y: number }>;
       let containerSizes: Map<string, { width: number; height: number }> | null = null;
 
       try {
-        const elkResult = await calculateElkLayout(nodes, edges, { direction: 'LR', catalog });
+        const elkResult = await calculateElkLayout(laidOut, edges, { direction: 'LR', catalog });
         newPositions = elkResult.positions;
         containerSizes = elkResult.containerSizes;
       } catch (err) {
         // ELK failure should never strand the user without a layout.
         console.warn('[auto-layout] ELK layout failed, using legacy layout:', err);
-        newPositions = calculateAutoLayout(nodes, edges, { direction: 'LR', graph, catalog });
+        newPositions = calculateAutoLayout(laidOut, edges, { direction: 'LR', graph, catalog });
       }
 
       const updatedPositions = new Map(localPositions);
@@ -1566,7 +1606,7 @@ function CanvasInner({
         reactFlowInstance?.fitView({ padding: 0.2, duration: 300 });
       }, 50);
     })();
-  }, [nodes, edges, localPositions, reactFlowInstance, graph, catalog, handleUpdateNodeMetadata]);
+  }, [nodes, edges, localPositions, reactFlowInstance, graph, effectiveGraph, catalog, handleUpdateNodeMetadata]);
 
   handleAutoLayoutRef.current = handleAutoLayout;
 
@@ -1629,28 +1669,9 @@ function CanvasInner({
         }}
         onExport={onExportProject}
       />
-      {viewMode === 'specification' && specRealtimeData && projectId ? (
-        <SpecificationMarkdownView
-          projectId={projectId}
-          branchId={branchId ?? undefined}
-          specRealtimeData={specRealtimeData}
-          graph={graph}
-          projectName={canvasProjectName || 'Untitled Project'}
-          testSuite={testSuiteData}
-          onWarning={onWarning}
-          onDirtyChange={onSpecDirtyChange}
-          workflowOrigin={workflowOrigin}
-          onSpecImportComplete={onSpecImportComplete}
-        />
-      ) : viewMode === 'decomposition' ? (
-        <DecompositionCanvas
-          projectId={projectId || null}
-          hasEmptyState={Object.keys(graph.nodes).length === 0}
-          refreshCounter={refreshCounter}
-          workflowOrigin={workflowOrigin}
-          testRefreshCounter={testRefreshCounter}
-          liveGraph={graph}
-        />
+      {viewMode === 'architecture' && changeLine}
+      {viewMode === 'ideation' ? (
+        <WorkSurface projectId={projectId} branchId={branchId} graph={graph} onOpenChanges={onOpenChanges} refreshSignal={(refreshCounter ?? 0) + (specSignal ?? 0)} onWarning={onWarning} onOpenArchitecture={onOpenArchitecture} focus={workFocus} onPatches={onPatchesGenerated} />
       ) : (
       <>
       <ReactFlow

@@ -9,13 +9,11 @@
 // survives, every count surface excludes it, its binding releases) → REVIVAL
 // (a fresh report on the retired test_id clears retirement and re-proves the
 // criterion). All DB assertions are REST reads of the real rows — no simulation.
-import { rest, mcpCall, Scenario } from '../lib.mjs';
+import { rest, mcpCall, Scenario, parseMcp } from '../lib.mjs';
 import { createProject } from '../fixtures.mjs';
 
-const parse = (r) => {
-  const text = r.data?.result?.content?.[0]?.text;
-  try { return JSON.parse(text); } catch { return { raw: text, isError: r.data?.result?.isError }; }
-};
+// The shared strict reader (lib.mjs): a call that failed below the tool is an error.
+const parse = parseMcp;
 
 export const testCrud = {
   name: 'test-crud',
@@ -104,7 +102,9 @@ export const testCrud = {
       JSON.stringify(retiredRow));
     const after = parse(await mcpCall(env, 'get_project_status', { project_id: fx.ids.project }));
     s.check('status counts EXCLUDE the retired case (budget gauge drops by one)',
-      (after?.testBudget?.testCases ?? -1) === (before?.testBudget?.testCases ?? 0) - 1,
+      // Both counts must be there: two missing counts used to read -1 === -1.
+      typeof before?.testBudget?.testCases === 'number' && typeof after?.testBudget?.testCases === 'number' &&
+        after.testBudget.testCases === before.testBudget.testCases - 1,
       JSON.stringify({ before: before?.testBudget?.testCases, after: after?.testBudget?.testCases }));
     [req1] = await db.select('specification_requirements', `id=eq.${fx.ids.req1}&select=acceptance_criteria`);
     const latency = req1.acceptance_criteria.find((c) => c.text === 'queries return within 200ms');

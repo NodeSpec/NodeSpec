@@ -47,8 +47,8 @@ describe('N4.8 (1) the Recently-Used picker is gone', () => {
     expect(sidebar).not.toContain('Recently Used');
   });
 
-  it('the three browse sections stay', () => {
-    for (const header of ['Structure', 'Technology', 'Functional Node Types']) {
+  it('the browse sections stay (AG.1: four, named for the model\'s layers)', () => {
+    for (const header of ['Node types', 'Platforms and hosts', 'Structure', 'Technologies']) {
       expect(sidebar).toContain(header);
     }
   });
@@ -114,12 +114,12 @@ describe('N6.1 header reduction', () => {
     expect(topBarN61).toContain('availableBranches');
   });
 
-  it('undo/redo controls replace them; Merge to Main survives', () => {
+  it('undo/redo controls replace them (Merge to Main retired with multi-branch, V3 1.2)', () => {
     expect(topBarN61).toContain('Undo (Cmd/Ctrl+Z)');
     expect(topBarN61).toContain('Redo (Cmd/Ctrl+Shift+Z)');
     expect(topBarN61).toContain('canUndo');
     expect(topBarN61).toContain('canRedo');
-    expect(topBarN61).toContain('Merge to Main');
+    expect(topBarN61).not.toContain('Merge to Main');
     // The autosave indicator stays — it is how the user knows work is pending.
     expect(topBarN61).toContain('hasUnsavedChanges');
   });

@@ -82,29 +82,28 @@ describe('R5e wiring — the accept lane, best-effort, never the accept itself',
     expect(source).toContain('evidence stale — re-verify');
   });
 
-  it('the Spec view toggle clears the stale mark and stamps UI provenance', () => {
-    const source = read('ui/components/spec-v3/SpecRequirementCard.tsx');
-    expect(source).toContain('const { evidenceStale: _cleared, ...rest }');
-    expect(source).toContain("provenance: { source: 'ui', at: new Date().toISOString() }");
+  it('9.10: no hand toggle survives the Spec sidebar; a stale mark clears on a fresh report, and the verify lane says so', () => {
+    // The Spec view is retired, and with it the toggle that let a person flip
+    // a criterion by hand. Evidence is the only thing that moves one now.
+    const lane = read('ui/components/ideation/verify-lane.ts');
+    expect(lane).toContain("return 'Re-run the bound test and report it; a fresh result re-verifies this criterion.';");
+    expect(lane).toContain("isStale(c, test) ? 'stale' : 'green'");
+    const view = read('ui/components/ideation/VerifyLane.tsx');
+    expect(view).not.toContain("provenance: { source: 'ui'");
   });
 
-  it('the criterion row shows the stale chip and drops the settled strikethrough', () => {
-    const source = read('ui/components/spec-v3/SpecRequirementCard.tsx');
-    expect(source).toContain('evidence stale — re-verify');
-    expect(source).toContain("ac.met && !ac.evidenceStale ? 'line-through' : 'none'");
+  it('the verify lane buckets a stale criterion on its own row', () => {
+    const lane = read('ui/components/ideation/verify-lane.ts');
+    expect(lane).toContain("stale: 'met, but a source the test covers changed since'");
+    expect(lane).toContain('isStale');
   });
 });
 
 describe('R5d wiring (client half) — the declaration badge beside criteria state', () => {
-  it('validationStatus flows repository → hook → panel → card', () => {
+  it('validationStatus flows repository → hook, for whatever surface reads it next', () => {
+    // The card that rendered the DONE badge retired with the Spec sidebar;
+    // the declaration itself still travels, and still never implies criteria.
     expect(read('persistence/supabase/mappings-repository.ts')).toContain('validationStatus: row.validation_status');
     expect(read('ui/hooks/useRealtimeMappings.ts')).toContain('validationStatus: row.validation_status');
-    expect(read('ui/components/spec-v3/SpecificationPanelV3.tsx')).toContain('validationStatus: m.validationStatus');
-  });
-
-  it('the DONE badge never replaces criteria state, and its tooltip says so', () => {
-    const source = read('ui/components/spec-v3/SpecRequirementCard.tsx');
-    expect(source).toContain("m.validationStatus === 'valid'");
-    expect(source).toContain('This never implies the acceptance criteria are met');
   });
 });

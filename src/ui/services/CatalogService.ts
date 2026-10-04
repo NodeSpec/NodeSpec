@@ -1,7 +1,7 @@
 import { loadCatalog, type CatalogResolver, type NodeRole, type TechnologyCatalogEntry } from '../../persistence/supabase/catalog-repository.js';
-import { populateDomains, type DomainNodeType, type NodeTypeDomain, type PortTemplate, type AIContext, type MetadataFieldSchema, type SuggestedFile, type SetupInstruction } from '@nodespec/core/node-types.js';
+import { populateDomains, type DomainNodeType, type NodeTypeDomain, type AIContext, type MetadataFieldSchema, type SuggestedFile, type SetupInstruction } from '@nodespec/core/node-types.js';
 import type { AiContext } from '@nodespec/core/catalog-schemas.js';
-import { hasCanContainRules, populateContainerTypes, setRoleResolver, setTechnologyTreatmentResolver, type ContainerTypeDefinition, type RoleInfo } from '@nodespec/core/container-types.js';
+import { hasCanContainRules, populateContainerTypes, PART_CAPABILITY_TAG, setRoleResolver, setTechnologyTreatmentResolver, type ContainerTypeDefinition, type RoleInfo } from '@nodespec/core/container-types.js';
 import { treatmentForRole } from '@nodespec/core/ontology.js';
 import { registerProviderFamilies } from '@nodespec/core/provider-inference.js';
 import { populateRFVisualTypes } from '../adapters/rf-visual-type-resolver.js';
@@ -91,14 +91,6 @@ function asTechAIContext(raw: Record<string, unknown> | null): AiContext | null 
   return raw as AiContext;
 }
 
-function asPortTemplates(raw: unknown[]): PortTemplate[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.filter(
-    (p): p is PortTemplate =>
-      typeof p === 'object' && p !== null && 'name' in p && 'direction' in p
-  );
-}
-
 function asSuggestedFiles(raw: unknown): SuggestedFile[] | undefined {
   if (!Array.isArray(raw) || raw.length === 0) return undefined;
   const filtered: SuggestedFile[] = [];
@@ -151,7 +143,6 @@ function buildNodeType(
     icon: role.iconName,
     color: tech?.brandColor || role.color,
     aiContext,
-    defaultPorts: asPortTemplates(role.defaultPorts),
     suggestedContracts: (role.suggestedContracts as string[]) || [],
     commonConnections: formatCommonConnections(tech?.commonConnections),
     metadataSchema: tech?.metadataSchema as Record<string, MetadataFieldSchema> | undefined,
@@ -231,6 +222,9 @@ function buildRoleResolverFromCatalog(resolver: CatalogResolver): (roleId: strin
       containerStyle: role.containerStyle,
       // M1b: derived from nature + containment rather than read from a column.
       treatmentMode: treatmentForRole({ nature: role.nature, is_container: role.isContainer }),
+      // AA.3: the depth rule reads what a role lists and whether it is a part.
+      canContain: role.canContain ?? [],
+      isPart: (role.capabilityTags ?? []).includes(PART_CAPABILITY_TAG),
     };
   };
 }
@@ -329,6 +323,14 @@ export class CatalogService {
     if (direct) return direct;
     const resolved = cachedResolver.resolveNodeType(nodeType);
     return resolved?.role ?? null;
+  }
+
+  /** AA.4: a technology's display name from the loaded catalog, or null
+   *  while it has not loaded (never a fetch). */
+  static getTechnologyName(technologyId: string | undefined): string | null {
+    if (!cachedResolver || !technologyId) return null;
+    const tech = cachedResolver.getTechnology(technologyId);
+    return tech ? (tech.displayName || tech.name) : null;
   }
 
   static getSetupInstructions(technologyId: string | undefined): SetupInstruction[] {

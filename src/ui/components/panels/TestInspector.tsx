@@ -77,8 +77,9 @@ function TestInspectorComponent({ testCaseId, projectId, archNodeIds = [], onClo
         try {
           const graphRepo = services.persistence.getGraphRepository();
           const branchRepo = services.persistence.getBranchRepository();
-          const branchResult = await branchRepo.getByName(projectId, 'main');
-          const mainBranch = branchResult.success ? branchResult.data : null;
+          // AD.4 (D15): the primary branch by its flag; connect may have renamed it.
+          const branchesResult = await branchRepo.listByProject(projectId);
+          const mainBranch = branchesResult.success ? branchesResult.data.find((b) => b.isPrimary) ?? null : null;
           if (mainBranch) {
             const snapResult = await graphRepo.loadSnapshot(mainBranch.id);
             const snapshot = snapResult.success ? snapResult.data : null;

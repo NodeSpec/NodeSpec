@@ -408,20 +408,27 @@ export const SetEdgeCriticalityPatchSchema = z.object({
 // at metadata.config). The MCP lane rejects unknown change keys loudly using
 // these key sets, DERIVED from the schemas above so they can never drift.
 // The UI lane keeps lenient parsing (typed builders; zero behavior change).
+// AG.13 (owner 2026-09-28): ports came out of the model, so a node's ports
+// and an edge's port ids are not keys an update may set (the schemas keep
+// them so stored history still parses and replays).
+const PORT_KEYS = new Set(['ports', 'sourcePortId', 'targetPortId']);
 const changeKeys = (schema: z.ZodObject<z.ZodRawShape>): ReadonlySet<string> =>
-  new Set(Object.keys(schema.shape).filter((k) => k !== 'id'));
+  new Set(Object.keys(schema.shape).filter((k) => k !== 'id' && !PORT_KEYS.has(k)));
 export const UPDATE_CHANGE_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
   update_node: changeKeys(NodeSchema),
   update_edge: changeKeys(EdgeSchema),
   update_contract: changeKeys(ContractSchema),
   update_artifact: changeKeys(ArtifactSchema),
-  update_port: changeKeys(PortSchema),
   update_node_group: changeKeys(NodeGroupSchema),
 };
 /** Field-specific guidance for the traps we have seen agents hit. */
+const NO_PORTS_HINT = 'ports are not part of the model: an edge joins two nodes and its contract says what the connection is';
 export const UNKNOWN_CHANGE_KEY_HINTS: Readonly<Record<string, string>> = {
   configuration: 'node configuration lives at metadata.config (metadata is replaced wholesale on update — send the complete metadata object)',
   config: 'node configuration lives at metadata.config (metadata is replaced wholesale on update — send the complete metadata object)',
+  ports: NO_PORTS_HINT,
+  sourcePortId: NO_PORTS_HINT,
+  targetPortId: NO_PORTS_HINT,
 };
 
 export const PatchOperationSchema = z.discriminatedUnion('type', [

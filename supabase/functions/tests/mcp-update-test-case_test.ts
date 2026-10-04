@@ -83,7 +83,7 @@ Deno.test('update_test_case retire: soft-retirement (never a delete) + bound cri
   ]);
   scriptCase(sb);
   sb.script('test_cases', 'update', { data: null, error: null });
-  sb.script('specification_requirements', 'update', { data: null, error: null }); // release
+  sb.script('rpc', 'apply_criteria_ops', { data: { found: true, applied: 2, changed: true }, error: null }); // release
 
   const r = await handleUpdateTestCase(sb as never, AUTH, {
     project_id: PROJECT_UUID, requirement_id: 'REQ-001', test_id: 'TC-1',
@@ -96,15 +96,22 @@ Deno.test('update_test_case retire: soft-retirement (never a delete) + bound cri
   assertEquals(sb.callsTo('test_cases', 'delete').length, 0, 'NEVER a hard delete — evidence is preserved');
 
   // The release: a criterion must never keep reading proven-by a hidden case.
-  const release = sb.callsTo('specification_requirements', 'update')[0].payload as Any;
-  const a = release.acceptance_criteria.find((c: Any) => c.text === 'A holds');
-  assertEquals(a.testId, undefined, 'binding stripped');
-  assertEquals(a.met, true, 'met PRESERVED — evidence-due, not silently unproven');
-  assertEquals(a.evidenceStale.reason, 'case-retired', 'the R5e object mark, with the honest reason');
-  assert(typeof a.evidenceStale.at === 'string' && a.evidenceStale.at.length > 0);
-  assertEquals(a.provenance.testCaseId, CASE1, 'provenance history preserved');
-  const b = release.acceptance_criteria.find((c: Any) => c.text === 'B holds');
-  assertEquals(b.testId, OTHER_CASE, 'foreign bindings untouched');
+  // R2 — this travels as OPS to the one locked writer, so "met preserved",
+  // "provenance preserved" and "foreign bindings untouched" are now properties
+  // of the writer (pinned in criteria-ops.test.ts and proven on the database),
+  // and what this tool owes is the right ops, in the right ORDER, on the right
+  // requirement. The order is the subtle part: mark_stale selects by the testId
+  // the criterion still carries, so it must land BEFORE unbind strips it.
+  assertEquals(sb.callsTo('specification_requirements', 'update').length, 0, 'nothing writes the array directly');
+  const releaseCall = sb.callsTo('rpc', 'apply_criteria_ops')[0];
+  assertEquals((releaseCall.payload as Any).p_requirement_id, REQ_ROW, 'released on the owning requirement');
+  const ops = (releaseCall.payload as Any).p_ops as Any[];
+  assertEquals(ops.map((o) => o.op), ['mark_stale', 'unbind'], 'the mark lands before the binding is stripped');
+  assertEquals(ops[0].test_id, CASE1, 'selects exactly this case — foreign bindings are never touched');
+  assertEquals(ops[0].value.reason, 'case-retired', 'the R5e object mark, with the honest reason');
+  assert(typeof ops[0].value.at === 'string' && ops[0].value.at.length > 0);
+  assertEquals(ops[1].test_id, CASE1);
+  assert(!ops.some((o) => o.op === 'set_met'), 'met is PRESERVED — evidence-due, never silently unproven');
   assertEquals((r.data as Any).releasedCriteria, ['A holds']);
   assert(((r.data as Any).notes as string[]).some((n) => n.includes('revives')), 'revival lane is taught');
 });
@@ -146,7 +153,7 @@ Deno.test('update_test_case reassign: case moves DELIBERATELY STALE and the old 
   });
   sb.script('test_cases', 'select', { data: null, error: null }); // collision check on the TARGET
   sb.script('test_cases', 'update', { data: null, error: null });
-  sb.script('specification_requirements', 'update', { data: null, error: null }); // release on the OLD owner
+  sb.script('rpc', 'apply_criteria_ops', { data: { found: true, applied: 2, changed: true }, error: null }); // release on the OLD owner
 
   const r = await handleUpdateTestCase(sb as never, AUTH, {
     project_id: PROJECT_UUID, requirement_id: 'REQ-001', test_id: 'TC-1', reassign_to: 'REQ-002',
@@ -156,12 +163,12 @@ Deno.test('update_test_case reassign: case moves DELIBERATELY STALE and the old 
   assertEquals(p.requirement_id, TARGET_ROW);
   assertEquals(p.stale, true, 'a moved test has proven NOTHING about its new home');
   assertEquals(p.staleness_reason, 'Reassigned from REQ-001');
-  const release = sb.callsTo('specification_requirements', 'update')[0];
-  assert(release.filters.some((f) => f.method === 'eq' && f.args[1] === REQ_ROW), 'release targets the OLD owner');
-  const a = (release.payload as Any).acceptance_criteria.find((c: Any) => c.text === 'A holds');
-  assertEquals(a.testId, undefined);
-  assertEquals(a.met, true, 'met preserved — the board reads evidence-due');
-  assertEquals(a.evidenceStale.reason, 'case-reassigned');
+  const release = sb.callsTo('rpc', 'apply_criteria_ops')[0];
+  assertEquals((release.payload as Any).p_requirement_id, REQ_ROW, 'release targets the OLD owner');
+  const ops = (release.payload as Any).p_ops as Any[];
+  assertEquals(ops.map((o) => o.op), ['mark_stale', 'unbind']);
+  assertEquals(ops[0].value.reason, 'case-reassigned');
+  assert(!ops.some((o) => o.op === 'set_met'), 'met preserved — the board reads evidence-due');
   const data = r.data as Any;
   assertEquals(data.requirementId, 'REQ-002');
   assert((data.nextAction as string).includes('report_test_results'), 're-run + re-report is the stated next step');
@@ -216,16 +223,18 @@ Deno.test('update_test_case rebind: criterion_text binds by exact text and NEVER
   const sb = new FakeSupabase();
   scriptBase(sb, [{ text: 'A holds', met: false }]);
   scriptCase(sb);
-  sb.script('specification_requirements', 'update', { data: null, error: null });
+  sb.script('rpc', 'apply_criteria_ops', { data: { found: true, applied: 1, changed: true }, error: null });
 
   const r = await handleUpdateTestCase(sb as never, AUTH, {
     project_id: PROJECT_UUID, requirement_id: 'REQ-001', test_id: 'TC-1', criterion_text: 'A holds',
   });
   assert(r.success, JSON.stringify(r));
-  const bind = sb.callsTo('specification_requirements', 'update')[0].payload as Any;
-  const a = bind.acceptance_criteria.find((c: Any) => c.text === 'A holds');
-  assertEquals(a.testId, CASE1);
-  assertEquals(a.met, false, 'binding alone NEVER flips met');
+  const bindOps = (sb.callsTo('rpc', 'apply_criteria_ops')[0].payload as Any).p_ops as Any[];
+  assertEquals(bindOps.length, 1, 'one op: the bind');
+  assertEquals(bindOps[0].op, 'bind');
+  assertEquals(bindOps[0].criterion_text, 'A holds', 'selected by exact text');
+  assertEquals(bindOps[0].value, CASE1);
+  assert(!bindOps.some((o) => o.op === 'set_met'), 'binding alone NEVER flips met');
   const data = r.data as Any;
   assertEquals(data.criterionBinding, 'bound');
   assert((data.notes as string[]).some((n) => n.includes('never flips met')), 'the proof lane is taught');
@@ -241,7 +250,7 @@ Deno.test('update_test_case rebind: conflict (never steals), manual-lane (refuse
       project_id: PROJECT_UUID, requirement_id: 'REQ-001', test_id: 'TC-1', criterion_text: text,
     });
     assert(r.success, JSON.stringify(r));
-    assertEquals(sb.callsTo('specification_requirements', 'update').length, 0, 'no binding write');
+    assertEquals(sb.callsTo('rpc', 'apply_criteria_ops').length, 0, 'no binding write');
     return r.data as Any;
   };
   const conflict = await run([{ text: 'A holds', met: true, testId: OTHER_CASE }], 'A holds');
@@ -315,9 +324,9 @@ Deno.test('update_test_case: registered with write scope (tool #30) and dispatch
   const tool = MCP_TOOLS.find((t) => t.name === 'update_test_case');
   assert(tool, 'registered in MCP_TOOLS');
   assertEquals(tool!.requiredScope, 'write');
-  assert(tool!.description.includes('NEVER hard-deleted'), 'the evidence-preservation rule is stated to the calling AI');
-  assert(tool!.description.includes('DELIBERATELY marks it stale'), 'reassign staleness doctrine stated');
-  assert(tool!.description.includes('binding alone NEVER flips met'), 'the rebind lane cannot be mistaken for proof');
+  assert(tool!.description.includes('never hard-deleted'), 'the evidence-preservation rule is stated to the calling AI');
+  assert(tool!.description.includes("marks it stale ('Reassigned from REQ-xxx')"), 'reassign staleness doctrine stated');
+  assert(tool!.description.includes('binding alone never flips met'), 'the rebind lane cannot be mistaken for proof');
   const schema = tool!.inputSchema as Any;
   assertEquals(schema.required, ['project_id', 'requirement_id', 'test_id']);
   assert(schema.properties.retire_reason, 'retire_reason is a declared parameter');

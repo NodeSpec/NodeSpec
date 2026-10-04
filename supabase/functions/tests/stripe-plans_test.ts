@@ -22,13 +22,19 @@ Deno.test('lookup keys map to the expected tiers', () => {
 });
 
 Deno.test('resolution recognizes every key; checkout SELLS only live Indie (owner 2026-08-31)', () => {
-  assertEquals(VALID_LOOKUP_KEYS.size, 11);
-  assert(VALID_LOOKUP_KEYS.has('price_token_addon_1m'), 'addon key still resolves');
+  assertEquals(VALID_LOOKUP_KEYS.size, 10);
+  assert(!VALID_LOOKUP_KEYS.has('price_token_addon_1m'), 'AH.2: the token add-on is gone');
   assert(!VALID_LOOKUP_KEYS.has('price_enterprise_secret'), 'unknown keys rejected');
   // The purchasable catalog after the Stripe reset: Indie monthly + annual.
-  // Team is a placeholder (features unbuilt, planned separately) and the
-  // token add-on product is archived.
+  // Team is a placeholder (features unbuilt, planned separately).
   assertEquals([...CHECKOUT_LOOKUP_KEYS].sort(), ['price_indie_annual_new', 'price_indie_monthly_new']);
+});
+
+Deno.test('AH.2: a resolved plan carries its name and amount, and no token allowance', () => {
+  assertEquals(resolvePlanInfoStrict({ lookup_key: 'price_team_monthly', unit_amount: 7900 }), { name: 'team', amountCents: 7900 });
+  assertEquals(resolvePlanInfoWithFallbacks({ nickname: 'Pro Plan', unit_amount: 7900 }), { name: 'team', amountCents: 7900 });
+  assertEquals(resolvePlanInfoWithFallbacks({ unit_amount: 14400 }), { name: 'indie', amountCents: 14400 });
+  for (const plan of Object.values(PLAN_BY_LOOKUP_KEY)) assertEquals(Object.keys(plan), ['name']);
 });
 
 Deno.test('strict resolver (webhook behavior): unknown lookup key -> unknown, no heuristics', () => {

@@ -289,8 +289,6 @@ export function createSupabaseTemplateRepository(client: SupabaseClient): Templa
         };
       }
 
-      await client.rpc('increment_template_use_count', { tid: templateId });
-
       return { success: true, data: rowToUsage(data) };
     },
 

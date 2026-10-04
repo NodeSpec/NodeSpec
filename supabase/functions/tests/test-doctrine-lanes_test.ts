@@ -249,10 +249,10 @@ Deno.test('WS3 registry: verification field documented on requirement writes; ma
     const items = (tool.inputSchema as Any).properties.acceptance_criteria.items;
     assertEquals(items.anyOf[1].properties.verification.enum, ['automated', 'manual'], `${name}: object form schema`);
   }
-  assert(byName('update_requirement').description.includes('met/testId/provenance/verification'), 'carry-forward discipline documented');
+  assert(byName('update_requirement').description.includes('met, testId, provenance and verification forward'), 'carry-forward discipline documented');
   assert(byName('report_test_results').description.includes("manual-lane"), 'refusal outcome named');
   const gtp = byName('get_test_plan');
-  assert(gtp.description.includes('plans follow schemas (contract-first TDD)'), 'ordering doctrine on get_test_plan');
+  assert(gtp.description.includes('Plans follow schemas'), 'ordering doctrine on get_test_plan (the long form is in docs/WORK_LOOP_PLAN.md Phase C5)');
   assert(gtp.description.includes('schemaBlockedContracts'), 'response field documented');
 });
 

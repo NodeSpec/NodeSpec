@@ -1,14 +1,16 @@
-// UX-1.1b (owner spec 2026-08-21): commit mode for NodeSpec pushes — direct
-// commit (the default, today's behavior) or a pull request opened from a
-// nodespec/push-* work branch. Pure helpers so the decision and the branch
-// naming are testable offline.
+// UX-1.1b (owner spec 2026-08-21): commit mode for NodeSpec pushes: direct
+// commit (the default) or a pull request opened from a nodespec/push-* work
+// branch. Pure helpers so the decision and the branch naming are testable
+// offline.
 //
-// WHY THE PR LANE IS SAFE ON EXISTING RAILS: the work-branch push carries the
-// SELF_PUSH_PREFIX commit message, so the webhook's self-push guard skips it
-// (no drift card against our own commit); and when the PR merges, the target
-// branch's webhook event lands in the EXISTING merge-arrival lane, which
-// fast-forwards the baseline. That is also why a PR-mode push must NOT
-// advance branches.last_synced_commit — the target has not moved yet.
+// V3 AD.4 (finding D14, ruling 6): one work branch per tracked ref and one
+// open pull request on it. Each push used to cut a new work branch and open a
+// new pull request. Now a push adds a commit to the open pull request, and
+// with none open the work branch starts again at the tracked branch's head.
+// A pull request push does not move branches.last_synced_commit (the tracked
+// branch has not moved); the sync check recognises the merge by the blobs
+// NodeSpec recorded for that pull request's pushes, whatever the merge did to
+// the shas, so a squash title needs no prefix.
 
 export const COMMIT_MODES = ["direct", "pull-request"] as const;
 export type CommitMode = (typeof COMMIT_MODES)[number];
@@ -19,10 +21,18 @@ export function resolveCommitMode(row: { commit_mode?: string | null } | null | 
   return row?.commit_mode === "pull-request" ? "pull-request" : "direct";
 }
 
-/** Work-branch name for a PR-mode push: recognizably NodeSpec's, scoped to
- *  the target ref, unique per push. */
-export function workBranchName(targetRef: string, seed?: string): string {
-  const stamp = (seed ?? Date.now().toString(36)).replace(/[^a-z0-9]/gi, "").slice(0, 12) || "x";
+/** Every PR-mode work branch starts with this. AD.4 (D16): such a branch is a
+ *  pull request's source, never a branch a project tracks, so it is not
+ *  offered at connect and is refused at save. */
+export const WORK_BRANCH_PREFIX = "nodespec/push-";
+
+export function isWorkBranch(ref: string | null | undefined): boolean {
+  return typeof ref === "string" && ref.startsWith(WORK_BRANCH_PREFIX);
+}
+
+/** The work branch for pull requests into `targetRef`: recognizably
+ *  NodeSpec's, one per tracked ref (AD.4), sanitized for a git ref name. */
+export function workBranchName(targetRef: string): string {
   const safe = targetRef.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "branch";
-  return `nodespec/push-${safe}-${stamp}`;
+  return `${WORK_BRANCH_PREFIX}${safe}`;
 }

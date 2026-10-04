@@ -62,6 +62,34 @@ export function flagStaleCriteria(
 }
 
 /**
+ * V3 AD.3 (D22): the nodes whose bound files a batch of accepted patches
+ * changed. Evidence used to go stale only on the Git panel's file accept; a
+ * proposal that brings a file change onto the canvas (an agent reconciling a
+ * change, a load of git's model, a binding pulled from a commit) flags the
+ * same criteria. Only an existing file whose content differs counts: a new
+ * binding has nothing to make stale. Pure.
+ */
+export function nodesWithChangedFiles(
+  patches: Array<{ type: string; payload?: unknown }>,
+  artifactsBefore: Record<string, { nodeId?: string | null; content?: string; contentHash?: string } | undefined>,
+): string[] {
+  const nodes = new Set<string>();
+  for (const p of patches) {
+    if (p.type !== 'update_artifact') continue;
+    const payload = (p.payload ?? {}) as { id?: string; changes?: { content?: unknown; contentHash?: unknown; nodeId?: unknown } };
+    const changes = payload.changes;
+    if (!payload.id || !changes || typeof changes.content !== 'string') continue;
+    const before = artifactsBefore[payload.id];
+    if (!before) continue;
+    if (before.content === changes.content) continue;
+    if (before.contentHash && typeof changes.contentHash === 'string' && before.contentHash === changes.contentHash) continue;
+    const nodeId = typeof changes.nodeId === 'string' ? changes.nodeId : before.nodeId;
+    if (nodeId) nodes.add(nodeId);
+  }
+  return [...nodes];
+}
+
+/**
  * The accept-lane entry point: an out-of-band change to `nodeId`'s artifact was
  * just accepted — walk this node's mapped requirements and flag their git-evidenced
  * met criteria. Fire-and-forget from the caller; a failure here must never affect
@@ -103,16 +131,26 @@ export async function flagNodeEvidenceStale(
 
   const at = new Date().toISOString();
   for (const row of (reqRows ?? []) as Array<{ id: string; requirement_id: string; acceptance_criteria: unknown }>) {
-    const { criteria, flaggedTexts } = flagStaleCriteria(row.acceptance_criteria, {
+    // flagStaleCriteria still decides WHICH criteria are due; the array it
+    // builds is no longer what gets written.
+    const { flaggedTexts } = flagStaleCriteria(row.acceptance_criteria, {
       at,
       ...(commitSha ? { commitSha } : {}),
       reason: 'source-changed',
     });
     if (flaggedTexts.length === 0) continue;
-    const { error } = await supabase
-      .from('specification_requirements')
-      .update({ acceptance_criteria: criteria, updated_at: at })
-      .eq('id', row.id);
+    // R2: the marks travel as OPS to the one locked writer (through the member
+    // wrapper, which re-checks membership and clearance). Writing the array
+    // here would clobber any met flip that landed between the read above and
+    // this write — exactly the lost update the concurrency review reproduced.
+    const { error } = await supabase.rpc('apply_criteria_ops_as_member', {
+      p_requirement_id: row.id,
+      p_ops: flaggedTexts.map((text) => ({
+        op: 'mark_stale',
+        criterion_text: text,
+        value: { at, ...(commitSha ? { commitSha } : {}), reason: 'source-changed' },
+      })),
+    });
     if (error) {
       console.warn(`[evidenceStale] flag write failed for ${row.requirement_id}: ${error.message}`);
       continue;

@@ -35,9 +35,11 @@ export interface UnfinishedItem {
   sha?: string | null;
 }
 
-/** Legacy cards carry no branchName — they belong to main (R3-3c convention). */
-export function changeBranch(change: GitChangeEvent): string {
-  return change.branchName || 'main';
+/** The branch a card belongs to. GitService names a legacy card (no
+ *  branchName, R3-3c) after the primary branch as it reads it (AD.4); a card
+ *  that still names none belongs to no branch. */
+export function changeBranch(change: GitChangeEvent): string | null {
+  return change.branchName || null;
 }
 
 export function shortSha(sha: string | null | undefined): string {
@@ -117,7 +119,7 @@ export function deriveUnfinishedBusiness(opts: {
       title: 'This canvas is behind its git branch',
       detail:
         sweepStatus === 'behind_in_sync'
-          ? 'The working copy is untouched since its baseline — loading the repository model is safe.'
+          ? 'The working copy is untouched since its baseline. Loading the repository\'s model files it as a proposal to accept.'
           : 'The repository moved and this canvas has local changes. Review the detected change before loading.',
       sha: headSha ?? null,
     });
@@ -198,6 +200,110 @@ export function shouldAutoPushOnAccept(opts: {
  * at its detection time, labelled with how it ended. Inventing a second
  * timestamp would be a nicer-looking lie.
  */
+/** V3 AD.1: what a push left alone, in the person's words, or '' when it
+ *  wrote everything. A push never writes over a file git changed since the
+ *  last sync; those wait on their change card. */
+export function pushSkipNote(result: { skipped?: Array<{ path: string }> }): string {
+  const paths = (result.skipped ?? []).map((s) => s.path);
+  if (paths.length === 0) return '';
+  const shown = paths.slice(0, 3).join(', ') + (paths.length > 3 ? ` and ${paths.length - 3} more` : '');
+  return ` ${paths.length} file${paths.length === 1 ? ' was' : 's were'} left as ${paths.length === 1 ? 'it is' : 'they are'} in git because ${paths.length === 1 ? 'it' : 'they'} changed there since the last sync (${shown}). Review the pending change, then commit again.`;
+}
+
+/** V3 AD.2b: what loading the repository's model did. A load is a proposal
+ *  now: nothing on the canvas changes until the person accepts it. */
+export function loadModelMessage(result: {
+  status: 'filed' | 'already-filed' | 'identical';
+  patchCount?: number;
+  notApplied?: string[];
+  note?: string;
+}): string {
+  if (result.status === 'identical') {
+    return `The canvas already holds the repository's model.${result.note ? ` ${result.note}` : ''}`;
+  }
+  const n = result.patchCount ?? 0;
+  const held = result.notApplied ?? [];
+  const heldNote = held.length > 0
+    ? ` ${held.length} change${held.length === 1 ? '' : 's'} in git cannot be proposed and stay${held.length === 1 ? 's' : ''} as the canvas has ${held.length === 1 ? 'it' : 'them'}: ${held.slice(0, 2).join(' ')}${held.length > 2 ? ` and ${held.length - 2} more.` : ''}`
+    : '';
+  return `The repository's model is waiting in Proposals: ${n} change${n === 1 ? '' : 's'} to review. Nothing on the canvas changes until you accept it.${heldNote}`;
+}
+
+/** V3 AD.3 (D23): a card's files grouped by who changed them. Each file
+ *  appears once, under the authors whose commits changed it; a file the card
+ *  cannot attribute comes last with no label. A card without attribution
+ *  (older ones) is one unlabeled group, as it was. */
+export function groupCardFiles<F extends { path: string }>(
+  files: F[],
+  authors?: Array<{ author: string; files: string[] }>,
+): Array<{ label: string | null; files: F[] }> {
+  if (!authors || authors.length === 0) return [{ label: null, files }];
+  const groups = new Map<string, F[]>();
+  const rest: F[] = [];
+  for (const f of files) {
+    const who = authors.filter((a) => a.files.includes(f.path)).map((a) => a.author);
+    if (who.length === 0) { rest.push(f); continue; }
+    const label = who.join(', ');
+    groups.set(label, [...(groups.get(label) ?? []), f]);
+  }
+  return [
+    ...[...groups.entries()].map(([label, g]) => ({ label, files: g })),
+    ...(rest.length > 0 ? [{ label: null, files: rest }] : []),
+  ];
+}
+
+/** V3 AD.3 (ruling 3): criteria ticked in a doc that a test result proves.
+ *  No passing test has marked them met (a tick shows only on an unmet
+ *  criterion); a person may still mark them met, and it is recorded as
+ *  theirs. Empty when there are none. */
+export function automatedTicksNote(deltas: Array<{ direction: string; verification?: string }>): string {
+  const n = deltas.filter((d) => d.direction === 'tick' && d.verification === 'automated').length;
+  if (n === 0) return '';
+  return n === 1
+    ? 'One ticked criterion needs a test result: no passing test has marked it met. Marking it met here records it as met by you.'
+    : `${n} ticked criteria need a test result: no passing test has marked them met. Marking them met here records them as met by you.`;
+}
+
+/** V3 AD.2c: what a requirements load did: what arrived or changed, how much
+ *  evidence survived, and what stayed as it was (requirements git does not
+ *  have, and locked ones git changed). */
+export function loadSpecMessage(result: {
+  mode: 'adopted' | 'applied';
+  counts?: { added?: number; updated?: number; criteriaPreserved?: number; requirements?: number; criteria?: number; mappings?: number; mappingsRemoved?: number };
+  keptLocal?: string[];
+  locked?: string[];
+  note?: string;
+}): string {
+  const c = result.counts ?? {};
+  const n = (count: number | undefined, one: string, many: string) => `${count ?? 0} ${(count ?? 0) === 1 ? one : many}`;
+  const parts: string[] = [];
+  if (result.mode === 'adopted') {
+    parts.push(`${n(c.requirements, 'requirement', 'requirements')} with ${n(c.criteria, 'acceptance criterion', 'acceptance criteria')}`);
+  } else {
+    parts.push(`${c.added ?? 0} added`, `${c.updated ?? 0} updated`, `${n(c.criteriaPreserved, 'met criterion', 'met criteria')} kept ${(c.criteriaPreserved ?? 0) === 1 ? 'its' : 'their'} evidence`);
+    if (c.mappingsRemoved) parts.push(`${n(c.mappingsRemoved, 'mapping', 'mappings')} git removed ${c.mappingsRemoved === 1 ? 'was' : 'were'} removed`);
+  }
+  const kept = result.keptLocal ?? [];
+  const keptNote = kept.length
+    ? ` ${n(kept.length, 'requirement', 'requirements')} the repository does not have ${kept.length === 1 ? 'is' : 'are'} kept, not deleted: ${kept.join(', ')}.`
+    : '';
+  const locked = result.locked ?? [];
+  const lockedNote = locked.length
+    ? ` ${locked.length === 1 ? 'A locked requirement git changed stays' : `${locked.length} locked requirements git changed stay`} as ${locked.length === 1 ? 'it is' : 'they are'}: ${locked.join(', ')}.`
+    : '';
+  return `Loaded the repository's requirements: ${parts.join(', ')}.${keptNote}${lockedNote}${result.note ? ` ${result.note}` : ''}`;
+}
+
+/** V3 AD.2: the values a push kept out of git because they looked like
+ *  credentials, named so the person knows git does not hold them. */
+export function pushWithheldNote(result: { withheld?: Array<{ name: string; path: string }> }): string {
+  const held = result.withheld ?? [];
+  if (held.length === 0) return '';
+  const named = held.map((w) => `${w.name} ${w.path}`);
+  const shown = named.slice(0, 3).join(', ') + (named.length > 3 ? ` and ${named.length - 3} more` : '');
+  return ` ${held.length} value${held.length === 1 ? '' : 's'} looked like ${held.length === 1 ? 'a credential and was' : 'credentials and were'} kept out of git (${shown}); the canvas keeps ${held.length === 1 ? 'it' : 'them'}.`;
+}
+
 export function mergeRepoActivity(opts: {
   syncEvents: RepoSyncEvent[];
   changes: GitChangeEvent[];

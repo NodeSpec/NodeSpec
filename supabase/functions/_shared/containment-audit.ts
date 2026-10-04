@@ -7,7 +7,11 @@
 // scripts/audit-containment.sql, which the owner can run in Studio at any time.
 //
 // Finding kinds:
-//   dead-ref        (error)  can_contain references a deprecated role
+//   dead-ref        (error)  can_contain references a deprecated role and the container
+//                            admits no live role of that role's category
+//                   (note)   AG.11e: the same, where the container also admits a live
+//                            role of that category; a retired type is kept in every list
+//                            on purpose (AG.4, AG.10), so existing nesting stays valid
 //   unknown-ref     (error)  can_contain references a role id that does not exist
 //   empty-container (warn)   is_container=true but no populated rules (admits nothing
 //                            explicitly; note server treats [] as allow-all — the
@@ -16,12 +20,18 @@
 //                            unreachable by nesting. Boundary-treated roles are exempt
 //                            (the N2.3 precedence bypasses can_contain for them), as are
 //                            host-nature and Logical roles (root-level by design).
+//
+// AA.3 (owner 2026-09-23): a role that is not a container may list parts in can_contain
+// (the depth rule), so references are checked on every role, and a role listing parts
+// admits them. A part (capability tag 'part') is admitted only by a role naming it by id:
+// a container admitting by nature or provider never counts for it.
 
 import type { CanContainRule, NodeRoleRow } from "./catalog-loader.ts";
 import { treatmentForRole } from "./ontology.ts";
+import { isPartRole } from "./role-registry.ts";
 
 export interface ContainmentFinding {
-  severity: "error" | "warn";
+  severity: "error" | "warn" | "note";
   kind: "dead-ref" | "unknown-ref" | "empty-container" | "starved-role";
   roleId: string;
   detail: string;
@@ -61,6 +71,7 @@ function hasAnyRule(canContain: NodeRoleRow["can_contain"]): boolean {
 function containerAdmits(container: NodeRoleRow, role: NodeRoleRow): boolean {
   const cc = container.can_contain;
   if (Array.isArray(cc)) return cc.includes(role.id);
+  if (isPartRole(role)) return ruleRoleIds(cc).includes(role.id);
   if (cc && typeof cc === "object") {
     const r = cc as CanContainRule;
     if (r.roleIds?.includes(role.id)) return true;
@@ -78,20 +89,24 @@ function containerAdmits(container: NodeRoleRow, role: NodeRoleRow): boolean {
 export function auditContainmentMatrix(roles: NodeRoleRow[]): ContainmentFinding[] {
   const findings: ContainmentFinding[] = [];
   const byId = new Map(roles.map((r) => [r.id, r]));
-  const liveContainers = roles.filter((r) => r.is_container && !r.deprecated);
+  // AA.3: every live role with rules admits: containers, and the roles listing parts.
+  const liveContainers = roles.filter((r) => !r.deprecated && (r.is_container || hasAnyRule(r.can_contain)));
 
   for (const role of roles) {
-    if (!role.is_container) continue;
     const refs = ruleRoleIds(role.can_contain);
     for (const ref of refs) {
       const target = byId.get(ref);
       if (!target) {
         findings.push({ severity: "error", kind: "unknown-ref", roleId: role.id, detail: `can_contain references unknown role "${ref}"` });
       } else if (target.deprecated) {
-        findings.push({ severity: "error", kind: "dead-ref", roleId: role.id, detail: `can_contain references deprecated role "${ref}"` });
+        const replacement = target.palette_category ? roles.find((r) => !r.deprecated && r.id !== ref
+          && r.palette_category === target.palette_category && containerAdmits(role, r)) : undefined;
+        findings.push(replacement
+          ? { severity: "note", kind: "dead-ref", roleId: role.id, detail: `can_contain keeps retired role "${ref}" for existing graphs; it also admits "${replacement.id}"` }
+          : { severity: "error", kind: "dead-ref", roleId: role.id, detail: `can_contain references deprecated role "${ref}", and admits no live ${target.palette_category} role in its place` });
       }
     }
-    if (!role.deprecated && !hasAnyRule(role.can_contain)) {
+    if (role.is_container && !role.deprecated && !hasAnyRule(role.can_contain)) {
       findings.push({ severity: "warn", kind: "empty-container", roleId: role.id, detail: "live container with no populated can_contain rules" });
     }
   }

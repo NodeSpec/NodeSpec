@@ -15,6 +15,8 @@
 // sentinel strings — so this rolls the proposal + run back and throws
 // rather than leaving a proposal that lies about its artifacts.
 
+import { GIT_CONTENT_SENTINEL } from "./content-sentinels.ts";
+
 export const EXTERNALIZED_CONTENT_SENTINEL = "__stored_externally__";
 const ARTIFACT_BATCH_SIZE = 50;
 
@@ -51,6 +53,10 @@ export async function writeProposal(
 ): Promise<WriteProposalResult> {
   const artifactContents: Array<{ artifactId: string; content: string; contentHash: string | null }> = [];
   const stripped = opts.patches.map((p) => {
+    // A bindings-only artifact (RI-5 hubs, C1 content_ref) carries the git
+    // sentinel, not a body — nothing to externalize; the accept path pulls
+    // the bytes from git via payload.metadata.contentSource.
+    if (p.type === "add_artifact" && p.payload?.content === GIT_CONTENT_SENTINEL) return p;
     if (p.type === "add_artifact" && typeof p.payload?.content === "string" && p.payload.content.length > 0) {
       artifactContents.push({
         artifactId: String(p.payload.id),

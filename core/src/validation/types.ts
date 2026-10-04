@@ -8,7 +8,6 @@ export type ValidationCategory =
   | 'contract_schema'
   | 'artifact_consistency'
   | 'dependency_alignment'
-  | 'port_configuration'
   | 'configuration_consistency'
   | 'containment';
 
@@ -21,7 +20,6 @@ export interface GraphValidationIssue {
   nodeId?: string;
   edgeId?: string;
   artifactId?: string;
-  portId?: string;
   quickFixes: ValidationQuickFix[];
 }
 
@@ -35,11 +33,9 @@ export interface ValidationQuickFix {
 export type QuickFixAction =
   | { type: 'create_artifact'; artifactKind: string; nodeId: string; templateContent?: string }
   | { type: 'link_schema'; contractId: string; artifactId: string }
-  | { type: 'add_port'; nodeId: string; direction: 'in' | 'out'; contractKind: ContractKind }
   | { type: 'create_edge'; sourceId: string; targetId: string; contractKind: ContractKind }
   | { type: 'update_contract'; edgeId: string; updates: object }
   | { type: 'run_ai_validation'; nodeId: string; validationType: 'schema_match' | 'dependency_check' }
-  | { type: 'reconcile_ports'; nodeId: string; suggestedPorts: Array<{ name: string; direction: 'in' | 'out'; required?: boolean }> }
   | { type: 'mark_artifacts_stale'; nodeId: string; reason: string }
   | { type: 'unparent_node'; nodeId: string }
   | { type: 'regenerate_task'; nodeId: string }
@@ -59,7 +55,6 @@ export interface NodeValidationResult {
   issues: GraphValidationIssue[];
   completeness: {
     hasRequiredArtifacts: boolean;
-    allPortsConnected: boolean;
     allContractsHaveSchemas: boolean;
   };
 }

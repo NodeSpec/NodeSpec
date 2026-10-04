@@ -93,7 +93,7 @@ export interface ArchivedLineage {
 }
 
 export function computeArchivedLineage(
-  requirements: Array<Pick<Requirement, 'id' | 'requirementId' | 'name' | 'status' | 'acceptanceCriteria' | 'updatedAt'>>,
+  requirements: Array<Pick<Requirement, 'id' | 'requirementId' | 'name' | 'status' | 'acceptanceCriteria' | 'updatedAt' | 'archivedAt'>>,
   relations: RequirementRelation[],
 ): ArchivedLineage {
   const byId = new Map(requirements.map(r => [r.id, r]));

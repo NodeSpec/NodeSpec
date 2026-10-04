@@ -1,3 +1,33 @@
+// The THREE agent files: CLAUDE.md, AGENTS.md and .cursor/rules/nodespec.mdc.
+//
+// 9.13 (owner review): they had drifted into carrying different DATA when the
+// only thing that should differ is the MECHANISM each tool reads them by.
+// CLAUDE.md alone listed open work, and only the first unmet criterion of
+// each requirement. AGENTS.md alone carried the tech stack, and reduced the
+// criteria to an "[n unmet]" tag. Cursor's rules carried no open work at all.
+// An agent's answer to "what am I building, and how do I know it is done"
+// therefore depended on which tool the reader happened to be.
+//
+// One core, three renderings. The core is what any coding agent needs:
+//
+//   what it is · the stack · the architecture and how it connects ·
+//   the constraints that bind · the OPEN WORK, with every unmet acceptance
+//   criterion in full · which node owns which files · where deeper context is
+//
+// What legitimately differs is HOW each file is read:
+//
+//   CLAUDE.md  read whole, every session, and supports @import, so its deep
+//              context is a list of imports the reader actually follows.
+//   AGENTS.md  read by ~20 tools with no import mechanism, so it is the
+//              self-contained one: per-component detail is inline.
+//   Cursor     auto-attached by glob WHILE a file is being edited, so it is
+//              the terse one: directives, not documentation, and it points at
+//              the context directory rather than listing every file in it.
+//
+// The human-facing document is Specification.md (export-specification.ts).
+// It is the only one that carries MET criteria, test coverage and progress
+// tables, because those answer "where are we", which is a question a reader
+// asks and an agent does not.
 import type { ProjectExportData } from './export-context.js';
 
 function extractTechStack(data: ProjectExportData): {
@@ -63,6 +93,83 @@ function extractConstraints(data: ProjectExportData): string[] {
   return data.specification.constraints.map(c => `${c.type}: ${c.description}`);
 }
 
+/** A requirement with work left on it, and EVERY criterion still unmet.
+ *  This is the one thing an agent cannot infer from the architecture: what
+ *  "done" means for the thing it is being asked to build. All three files
+ *  carry it, in full, because a truncated list of criteria is worse than
+ *  none — it reads as complete. */
+export interface OpenRequirement {
+  requirementId: string;
+  name: string;
+  description: string;
+  category: string;
+  /** The node it is filed under, when it is filed. */
+  sectionName?: string;
+  unmet: string[];
+  metCount: number;
+  totalCount: number;
+}
+
+export function extractOpenWork(data: ProjectExportData): OpenRequirement[] {
+  return (data.specification?.requirements ?? [])
+    .map((r) => ({
+      requirementId: r.requirementId,
+      name: r.name,
+      description: r.description,
+      category: r.category,
+      sectionName: r.sectionName,
+      unmet: r.acceptanceCriteria.filter((ac) => !ac.met).map((ac) => ac.text),
+      metCount: r.acceptanceCriteria.filter((ac) => ac.met).length,
+      totalCount: r.acceptanceCriteria.length,
+    }))
+    .filter((r) => r.unmet.length > 0);
+}
+
+/** node label → the paths it owns. Shared by all three files. */
+export function extractFileOwnership(data: ProjectExportData): Map<string, string[]> {
+  const byNode = new Map<string, string[]>();
+  for (const artifact of data.artifacts) {
+    if (!artifact.path) continue;
+    if (!byNode.has(artifact.nodeLabel)) byNode.set(artifact.nodeLabel, []);
+    byNode.get(artifact.nodeLabel)!.push(artifact.path);
+  }
+  return byNode;
+}
+
+/** The stack, as one line. */
+function stackLine(stack: ReturnType<typeof extractTechStack>): string | null {
+  const parts: string[] = [];
+  if (stack.languages.length > 0) parts.push(stack.languages.join(', '));
+  if (stack.frameworks.length > 0) parts.push(stack.frameworks.join(', '));
+  if (stack.databases.length > 0) parts.push(stack.databases.join(', '));
+  if (parts.length === 0 && !stack.deploymentTarget) return null;
+  return `${parts.join(' | ')}${stack.deploymentTarget ? `${parts.length ? ' | ' : ''}Deploy: ${stack.deploymentTarget}` : ''}`;
+}
+
+/** The Open Work section, rendered the same way wherever it appears. A
+ *  checkbox per unmet criterion: an agent can tick them off, and the next
+ *  export regenerates the list from the criteria themselves. */
+function openWorkSection(open: OpenRequirement[]): string[] {
+  if (open.length === 0) return [];
+  const lines: string[] = [];
+  lines.push('## Open Work');
+  lines.push('');
+  lines.push('Each requirement below has acceptance criteria that are not met yet. A criterion is the definition of done -- treat the wording as exact.');
+  lines.push('');
+  for (const r of open) {
+    lines.push(`### ${r.requirementId} -- ${r.name}${r.sectionName ? ` (${r.sectionName})` : ''}`);
+    lines.push('');
+    if (r.description) {
+      lines.push(r.description);
+      lines.push('');
+    }
+    for (const text of r.unmet) lines.push(`- [ ] ${text}`);
+    if (r.metCount > 0) lines.push(`- ${r.metCount} of ${r.totalCount} criteria already met.`);
+    lines.push('');
+  }
+  return lines;
+}
+
 function extractGlobPatterns(data: ProjectExportData): string[] {
   const dirPrefixes = new Set<string>();
   for (const artifact of data.artifacts) {
@@ -82,10 +189,22 @@ export function formatAsClaude(data: ProjectExportData): string {
   const lines: string[] = [];
   const connections = extractConnectionPatterns(data);
   const constraints = extractConstraints(data);
+  const stack = stackLine(extractTechStack(data));
+  const open = extractOpenWork(data);
 
   const vision = data.specification?.vision ?? '';
-  lines.push(`# ${data.meta.projectName}${vision ? ' -- ' + vision.split('.')[0] + '.' : ''}`);
+  lines.push(`# ${data.meta.projectName}`);
   lines.push('');
+  // The vision in FULL, not its first sentence. Truncating at the first
+  // period cut the half of it that said what the product is for.
+  if (vision) {
+    lines.push(vision);
+    lines.push('');
+  }
+  if (stack) {
+    lines.push(`**Stack:** ${stack}`);
+    lines.push('');
+  }
 
   lines.push('## Architecture');
   lines.push('');
@@ -121,26 +240,11 @@ export function formatAsClaude(data: ProjectExportData): string {
     lines.push('');
   }
 
-  const unmetRequirements = (data.specification?.requirements ?? []).filter(
-    r => r.acceptanceCriteria.some(ac => !ac.met),
-  );
+  // Was "## Tasks", and it printed the FIRST unmet criterion of each
+  // requirement and dropped the rest — an agent read it as the whole job.
+  lines.push(...openWorkSection(open));
 
-  if (unmetRequirements.length > 0) {
-    lines.push('## Tasks');
-    lines.push('');
-    for (const req of unmetRequirements) {
-      const unmet = req.acceptanceCriteria.filter(ac => !ac.met).map(ac => ac.text);
-      lines.push(`- **${req.name}**: ${unmet[0] ?? req.description}`);
-    }
-    lines.push('');
-  }
-
-  const artifactsByNode = new Map<string, string[]>();
-  for (const art of data.artifacts) {
-    if (!art.path) continue;
-    if (!artifactsByNode.has(art.nodeLabel)) artifactsByNode.set(art.nodeLabel, []);
-    artifactsByNode.get(art.nodeLabel)!.push(art.path);
-  }
+  const artifactsByNode = extractFileOwnership(data);
 
   if (artifactsByNode.size > 0) {
     lines.push('## File Ownership');
@@ -172,6 +276,7 @@ export function formatAsCursorRules(data: ProjectExportData): string {
   const topology = extractContainerTopology(data);
   const globs = extractGlobPatterns(data);
   const constraints = extractConstraints(data);
+  const open = extractOpenWork(data);
 
   // Frontmatter -- Cursor expects globs as a single comma-separated string
   lines.push('---');
@@ -191,12 +296,9 @@ export function formatAsCursorRules(data: ProjectExportData): string {
   }
 
   // Stack (compact)
-  const stackParts: string[] = [];
-  if (stack.languages.length > 0) stackParts.push(stack.languages.join(', '));
-  if (stack.frameworks.length > 0) stackParts.push(stack.frameworks.join(', '));
-  if (stack.databases.length > 0) stackParts.push(stack.databases.join(', '));
-  if (stackParts.length > 0) {
-    lines.push(`**Stack:** ${stackParts.join(' | ')}${stack.deploymentTarget ? ` | Deploy: ${stack.deploymentTarget}` : ''}`);
+  const compactStack = stackLine(stack);
+  if (compactStack) {
+    lines.push(`**Stack:** ${compactStack}`);
     lines.push('');
   }
 
@@ -266,12 +368,7 @@ export function formatAsCursorRules(data: ProjectExportData): string {
   }
 
   // File ownership
-  const artifactsByNode = new Map<string, string[]>();
-  for (const artifact of data.artifacts) {
-    if (!artifact.path) continue;
-    if (!artifactsByNode.has(artifact.nodeLabel)) artifactsByNode.set(artifact.nodeLabel, []);
-    artifactsByNode.get(artifact.nodeLabel)!.push(artifact.path);
-  }
+  const artifactsByNode = extractFileOwnership(data);
 
   if (artifactsByNode.size > 0) {
     lines.push('## File Ownership');
@@ -282,16 +379,29 @@ export function formatAsCursorRules(data: ProjectExportData): string {
     lines.push('');
   }
 
-  // Deep context references
+  // 9.13: this file is attached by glob WHILE a file is being edited, so it
+  // carries the open work in its terse form — the criterion text, which is
+  // what the edit has to satisfy, without the per-requirement prose that the
+  // other two files have room for.
+  if (open.length > 0) {
+    lines.push('## Open Work');
+    lines.push('');
+    lines.push('Unmet acceptance criteria. Treat the wording as exact.');
+    lines.push('');
+    for (const r of open) {
+      lines.push(`- **${r.requirementId} ${r.name}**${r.sectionName ? ` (${r.sectionName})` : ''}`);
+      for (const text of r.unmet) lines.push(`  - [ ] ${text}`);
+    }
+    lines.push('');
+  }
+
+  // Deep context: a POINTER, not a listing. Cursor re-reads this file on
+  // every matching edit, and one line per node turned a rules file into a
+  // directory index.
   if (data.nodes.length > 0) {
     lines.push('## Deep Context');
     lines.push('');
-    lines.push('Per-node architectural context (integrations, requirements, test cases):');
-    lines.push('');
-    for (const node of data.nodes) {
-      const slug = node.label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-      lines.push(`- @.nodespec/context/${slug}.md`);
-    }
+    lines.push(`Per-node architectural context for all ${data.nodes.length} components is in \`.nodespec/context/\` (one file per node, slugged from its label).`);
     lines.push('');
   }
 
@@ -304,6 +414,7 @@ export function formatAsAgents(data: ProjectExportData): string {
   const topology = extractContainerTopology(data);
   const connections = extractConnectionPatterns(data);
   const constraints = extractConstraints(data);
+  const open = extractOpenWork(data);
 
   // Project overview
   lines.push(`# ${data.meta.projectName}`);
@@ -429,14 +540,23 @@ export function formatAsAgents(data: ProjectExportData): string {
     lines.push('');
   }
 
-  // Requirements summary (compact)
-  if (data.specification?.requirements && data.specification.requirements.length > 0) {
-    lines.push('## Requirements');
+  // 9.13: the requirement list used to reduce every criterion to a count —
+  // "[3 unmet]" told an agent that work remained and nothing about what it
+  // was. The open work now carries the criteria; the settled requirements
+  // stay as a one-line roll so the agent knows what is already proved and
+  // does not redo it.
+  lines.push(...openWorkSection(open));
+
+  const settled = (data.specification?.requirements ?? []).filter(
+    (r) => r.acceptanceCriteria.length > 0 && r.acceptanceCriteria.every((ac) => ac.met),
+  );
+  if (settled.length > 0) {
+    lines.push('## Met Requirements');
     lines.push('');
-    for (const req of data.specification.requirements) {
-      const unmetCount = req.acceptanceCriteria.filter(ac => !ac.met).length;
-      const statusTag = unmetCount > 0 ? ` [${unmetCount} unmet]` : ' [done]';
-      lines.push(`- **${req.name}** (${req.category})${statusTag}: ${req.description}`);
+    lines.push('Already proved. Do not rebuild these; changing them means changing their criteria first.');
+    lines.push('');
+    for (const req of settled) {
+      lines.push(`- **${req.requirementId} ${req.name}** (${req.category}): ${req.description}`);
     }
     lines.push('');
   }

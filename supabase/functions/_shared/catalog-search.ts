@@ -1,6 +1,5 @@
-// N3.6: catalog search/lookup, extracted OUT of tool-executor.ts (the D-series-doomed
-// internal agent loop) so the retrieval survives deletion and can serve the MCP server —
-// the same extract-before-delete pattern as C3b. This is how an EXTERNAL AI discovers the
+// N3.6: catalog search/lookup, extracted out of the old internal agent loop (since
+// deleted) so the retrieval serves the MCP server. This is how an EXTERNAL AI discovers the
 // catalog at scale: technologies via the weighted FTS RPC (migration 20260317014759:
 // name=A, id=A, purpose=B, typicalTech=C), roles via in-memory matching (~120 rows needs
 // no FTS). Results carry `when_to_use` (previously UI-only) and a plain-language NATURE
@@ -8,18 +7,15 @@
 // src/ui/utils/node-nature.ts — keep the phrases aligned.
 import type { CatalogData, NodeRoleRow, TechnologyRow } from "./catalog-loader.ts";
 import { effectiveTreatment, effectiveTreatmentForRole, treatmentForRole, paletteOwnershipDefault } from "./ontology.ts";
-import { inferProviderPrefix } from "./role-registry.ts";
+import { holdingLine, inferProviderPrefix } from "./role-registry.ts";
 
 // deno-lint-ignore no-explicit-any
 type AnyClient = any;
 
 export function describeNature(role: NodeRoleRow | undefined, tech?: TechnologyRow | null): string {
   if (!role) return "Unknown role";
-  if (role.is_container) {
-    return role.container_style === "logical-boundary"
-      ? "Grouping — optional; organizes related nodes, nothing runs here"
-      : "Hosting environment — runs other nodes";
-  }
+  // AG.12c: a container is described by how it holds (the result's `holds` line).
+  if (role.is_container) return "Container";
   if (role.nature === "call") return "External service — you call it, someone else runs it";
   if (role.nature === "host") return "Platform — hosts parts of your system";
   if (role.nature === "integrate") {
@@ -38,6 +34,9 @@ export function describeNature(role: NodeRoleRow | undefined, tech?: TechnologyR
   const cm = aiCtx?.configMode;
   const providerBacked = tech ? inferProviderPrefix(tech.id) !== null : false;
   if (providerBacked || cm === "declarative" || cm === "external") {
+    // AG.3 (owner 2026-09-28): a self-hostable technology (PostgreSQL, Redis, Kafka) is
+    // not only a provider's to run, so it does not read as one.
+    if (!providerBacked && cm === "declarative") return "Provider-managed, or operated by you if self-hosted";
     return cm === "code"
       ? "Managed runtime — you write the code, the provider runs it"
       : "Managed service — provider runs it, you configure it";
@@ -63,12 +62,13 @@ export interface CatalogSearchResult {
   roles: Array<{
     id: string;
     label: string;
-    kind: string;
     treatment: string;
     ownership: string;
-    altitude: string;
+    nature: string;
+    interfaceKind: string;
     whenToUse: string | null;
     description: string;
+    holds: string;
   }>;
 }
 
@@ -158,6 +158,8 @@ export async function searchCatalog(
     ownership: paletteOwnershipDefault(row.nature),
     whenToUse: row.when_to_use ?? null,
     description: describeNature(row),
+    // AG.12c: how the type holds, runs, places, groups or leaf, and what it may hold.
+    holds: holdingLine(catalogs, row.id, 8),
   }));
 
   return { success: true, data: { technologies, roles } };

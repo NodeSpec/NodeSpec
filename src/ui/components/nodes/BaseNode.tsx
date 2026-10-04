@@ -1,10 +1,9 @@
 import { memo } from 'react';
-import { FallbackHandles } from './FallbackHandles.js';
+import { LeafHandles } from './LeafHandles.js';
 import { NodeActionToolbar, useNodeToolbarHover } from './NodeActionToolbar.js';
-import { Handle, Position } from '@xyflow/react';
 import type { RFNodeData } from '../../adapters/graph-to-reactflow.js';
 import { useTheme } from '../../theme/ThemeContext.js';
-import { LucideIcon, isLucideIconName } from '../common/index.js';
+import { LucideIcon, NodeIcon, isLucideIconName } from '../common/index.js';
 import { ContainerBadge } from './ContainerBadge.js';
 import { getTechnologyLogo, getTechnologyColors, getTechnologyDisplayName } from '../../utils/technology-logo-map.js';
 
@@ -51,14 +50,6 @@ function BaseNodeComponent({ data, selected, accentColor, highlighted }: BaseNod
     border: `2px solid ${effectiveAccent ?? c.primary}`,
   };
 
-  const inputHandleStyles: React.CSSProperties = {
-    ...handleStyles,
-  };
-
-  const outputHandleStyles: React.CSSProperties = {
-    ...handleStyles,
-  };
-
   const HIGHLIGHT_COLOR = '#22c55e';
 
   const styles: React.CSSProperties = {
@@ -75,9 +66,6 @@ function BaseNodeComponent({ data, selected, accentColor, highlighted }: BaseNod
     boxShadow: selected ? `0 0 0 2px ${c.primary}40` : highlighted ? `0 0 0 2px ${HIGHLIGHT_COLOR}30` : undefined,
   };
 
-  const inputPorts = data.ports?.filter(p => p.direction === 'in') || [];
-  const outputPorts = data.ports?.filter(p => p.direction === 'out') || [];
-
   const frameworkContainerStyles: React.CSSProperties = {
     display: 'flex',
     alignItems: 'center',
@@ -90,44 +78,20 @@ function BaseNodeComponent({ data, selected, accentColor, highlighted }: BaseNod
     <div style={styles} {...toolbarHover.nodeHoverProps}>
       <NodeActionToolbar visible={!!selected || toolbarHover.hoverVisible} data={data} bridgeProps={toolbarHover.bridgeProps} />
 
-      <FallbackHandles showTarget={inputPorts.length === 0} showSource={outputPorts.length === 0} />
-      {inputPorts.map((port, index) => (
-        <Handle
-          key={port.id}
-          type="target"
-          position={Position.Left}
-          id={port.id}
-          style={{
-            ...inputHandleStyles,
-            top: `${((index + 1) * 100) / (inputPorts.length + 1)}%`,
-          }}
-          title={port.name}
-        />
-      ))}
-
-      {outputPorts.map((port, index) => (
-        <Handle
-          key={port.id}
-          type="source"
-          position={Position.Right}
-          id={port.id}
-          style={{
-            ...outputHandleStyles,
-            top: `${((index + 1) * 100) / (outputPorts.length + 1)}%`,
-          }}
-          title={port.name}
-        />
-      ))}
+      <LeafHandles style={handleStyles} />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexDirection: 'column', width: '100%' }}>
         <div style={frameworkContainerStyles}>
-          {techLogo ? (
-            <img src={techLogo} alt={data.technology} style={{ width: '28px', height: '28px', objectFit: 'contain' }} />
-          ) : isLucideIconName(data.icon) ? (
+          {!techLogo && isLucideIconName(data.icon) ? (
             <LucideIcon name={data.icon} size={28} color={effectiveAccent ?? c.textMuted} />
-          ) : data.icon && (data.icon.startsWith('http') || data.icon.startsWith('/')) ? (
+          ) : !techLogo && data.icon && (data.icon.startsWith('http') || data.icon.startsWith('/')) ? (
             <img src={data.icon} alt={data.nodeType} style={{ width: '28px', height: '28px', objectFit: 'contain' }} />
-          ) : null}
+          ) : (
+            // The technology's logo, and when it has none (a custom technology, or
+            // no icon in storage) or it fails to load, the role icon and then the
+            // palette category icon: the chain the compact node uses (N4.8).
+            <NodeIcon nodeType={data.nodeType} technology={data.technology} emojiIcon={data.icon} size={28} />
+          )}
         </div>
         <span style={{ fontWeight: 500, fontSize: '12px', textAlign: 'center', width: '100%', lineHeight: '1.3' }}>{data.label}</span>
         {techDisplayName && (

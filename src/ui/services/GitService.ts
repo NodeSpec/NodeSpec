@@ -1,5 +1,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+/** The server's WORK_BRANCH_PREFIX (supabase/functions/_shared/commit-mode.ts); pinned equal. */
+export const WORK_BRANCH_PREFIX = 'nodespec/push-';
+
 export interface GitIntegration {
   id: string;
   projectId: string;
@@ -47,12 +50,26 @@ export interface RepoSyncEvent {
   metadata?: Record<string, unknown> | null;
 }
 
+export interface IndexFreshnessSummary {
+  status: 'refreshed' | 'no_index' | 'unsupported' | 'tree_truncated' | 'error';
+  added?: number;
+  modified?: number;
+  deleted?: number;
+  unverified?: number;
+  refreshed?: number;
+  pendingRefresh?: number;
+  staleNodes?: Array<{ nodeId: string; modified: number; deleted: number; unverified: number; samples: string[] }>;
+  detail?: string;
+}
+
 export interface GitChangeEvent {
   id: string;
   commitSha: string;
   commitMessage: string;
   author: string;
   changedFiles: Array<{ path: string; action: 'added' | 'modified' | 'removed' }>;
+  /** AD.3: the files grouped by the author of the commits that changed them. */
+  authors?: Array<{ author: string; commits: string[]; files: string[] }>;
   status: 'pending' | 'accepted' | 'dismissed';
   branch?: string;
   createdAt: string;
@@ -68,6 +85,8 @@ export interface GitChangeEvent {
   ignoredResidue?: string[];
   /** R3-1: sweep metadata — the range touched .nodespec/model.json (enables Load-from-repo). */
   modelChanged?: boolean;
+  /** RI-9: repo index freshness for this head (accepted imports) — stale components by blob sha. */
+  indexFreshness?: IndexFreshnessSummary;
   /** R5b: acceptance criteria ticked in the changed task docs — evidence awaiting approval. */
   criterionDeltas?: CriterionDeltaPayload;
   /** R5c: this card's criteria were already applied (prevents a double-apply). */
@@ -84,6 +103,13 @@ export interface GitChangeEvent {
   specDiff?: CappedSpecDiff;
   /** R3-2: entity-level anchor diff (project → repo direction: what LOADING would do). */
   modelDiff?: CappedModelDiff;
+  /** AD.1: the planes a load already answered on this card ('model', 'spec'). */
+  restoredPlanes?: string[];
+  /** AD.1: an agent filed this proposal to reconcile the change; the card
+   *  resolves when a person accepts it. */
+  reconcileProposalId?: string;
+  /** AD.1: the ticks a dismiss set aside. */
+  ticksDismissed?: { at: string; criteria: number; tasks: number };
 }
 
 /**
@@ -105,7 +131,8 @@ export interface TaskDeltaPayload {
 }
 
 export interface CriterionDeltaPayload {
-  deltas: Array<{ requirementId: string; text: string; direction: 'tick' | 'untick' }>;
+  /** AD.3: verification is the criterion's lane; absent on older cards. */
+  deltas: Array<{ requirementId: string; text: string; direction: 'tick' | 'untick'; verification?: 'automated' | 'manual' }>;
   flagged: Array<{ requirementId: string; text: string; reason: string }>;
 }
 
@@ -151,9 +178,17 @@ export interface PushResult {
   commitMode?: 'pull-request';
   prUrl?: string;
   prNumber?: number;
+  /** AD.4: the push added to the pull request already open. */
+  prReused?: boolean;
   workBranch?: string;
   /** Byte-identical tree: commitSha is the EXISTING head, no commit was minted (and no PR opened). */
   unchanged?: boolean;
+  /** AD.1: files the push left as they are because git changed them since the last sync. */
+  skipped?: Array<{ path: string; reason: string }>;
+  /** AD.2: values kept out of git because they looked like credentials. */
+  withheld?: Array<{ entity: 'node' | 'contract'; id: string; name: string; path: string }>;
+  /** AD.1: whether the last sync moved to this commit, and why not when it did not. */
+  baseline?: { moved: boolean; reason: string };
 }
 
 /** R2.2: connect-time anchor outcome returned by save-git-integration. */
@@ -170,18 +205,21 @@ export interface AnchorAdoptResult {
    * readable, not inferred.
    */
   spec?: SpecAdoptResult;
-  /** R3-6: repo branches materialized as design branches on this connect. */
-  branchDetect?: BranchDetectResult;
   /** C3: no anchor + empty graph → the server created (or resumed) an import
    *  job for the brownfield entry; the client drives its stages. */
   importJob?: { id: string; status: string; resumed?: boolean };
+  /** AD.0: what the person adds in GitHub or GitLab. The secret is returned to
+   *  the owner on every save; `created` says it is new (a first connect, or a
+   *  different repository). */
+  webhook?: WebhookSetup;
 }
 
-/** R3-6: connect-time design-branch detection outcome. */
-export interface BranchDetectResult {
-  created: Array<{ name: string; nodes: number }>;
-  skipped: Array<{ name: string; reason: string }>;
-  capped?: number;
+/** AD.0: the webhook NodeSpec asks the person to add; NodeSpec never
+ *  registers it through the provider API (owner ruling 2026-09-24). */
+export interface WebhookSetup {
+  url: string;
+  secret: string;
+  created: boolean;
 }
 
 export interface SpecAdoptResult {
@@ -205,13 +243,6 @@ export class PushOverwriteBlockedError extends Error {
   }
 }
 
-export interface PullResult {
-  files: PulledFile[];
-  fileCount: number;
-  totalMatched: number;
-  truncated: boolean;
-}
-
 export interface RawTreeScanEntry {
   path: string;
   size: number;
@@ -229,6 +260,8 @@ export interface SelectiveFetchResult {
   requestedCount: number;
   truncatedFiles: string[];
 }
+
+export const REPOSITORY_SETTINGS_REFUSAL = 'Changing the repository settings needs the project owner or a maintainer.';
 
 export class GitService {
   private supabase: SupabaseClient;
@@ -307,19 +340,27 @@ export class GitService {
 
   /** B2: flip the per-integration auto-sync flag (Settings row in the Git panel). */
   async setCommitMode(integrationId: string, mode: 'direct' | 'pull-request'): Promise<void> {
-    const { error } = await this.supabase
-      .from('git_integrations')
-      .update({ commit_mode: mode })
-      .eq('id', integrationId);
-    if (error) throw new Error(`Failed to update commit mode: ${error.message}`);
+    await this.updateRepositorySettings(integrationId, { commit_mode: mode });
   }
 
   async setAutoSync(integrationId: string, enabled: boolean): Promise<void> {
-    const { error } = await this.supabase
+    await this.updateRepositorySettings(integrationId, { auto_sync: enabled });
+  }
+
+  /** The repository settings are the owner's or a maintainer's (owner
+   *  2026-09-27). Row security refuses anyone else by updating no row, so
+   *  an update that reaches no row is a refusal, said as one. */
+  private async updateRepositorySettings(
+    integrationId: string,
+    changes: { commit_mode: 'direct' | 'pull-request' } | { auto_sync: boolean },
+  ): Promise<void> {
+    const { data, error } = await this.supabase
       .from('git_integrations')
-      .update({ auto_sync: enabled })
-      .eq('id', integrationId);
-    if (error) throw error;
+      .update(changes)
+      .eq('id', integrationId)
+      .select('id');
+    if (error) throw new Error(`Failed to update the repository settings: ${error.message}`);
+    if (!data || data.length === 0) throw new Error(REPOSITORY_SETTINGS_REFUSAL);
   }
 
   /**
@@ -358,6 +399,8 @@ export class GitService {
   }
 
   /** Owner 2026-07-30 (setup UX): list a repository's branches + its provider default, for the default-branch select. Read-only. */
+  // AD.4 (D16): NodeSpec's pull request work branches (WORK_BRANCH_PREFIX in
+  // commit-mode.ts) are never offered: a project tracks the branch they merge into.
   async listRemoteBranches(provider: string, accessToken: string, owner: string, repo: string, baseUrl?: string): Promise<{ branches: string[]; defaultBranch: string | null }> {
     if (provider === 'github') {
       const base = ((baseUrl && baseUrl.trim()) || 'https://api.github.com').replace(/\/$/, '');
@@ -367,7 +410,7 @@ export class GitService {
         fetch(`${base}/repos/${owner}/${repo}`, { headers }),
       ]);
       if (!branchesResp.ok) throw new Error(`Branch list failed (${branchesResp.status}) — check owner/name and token access`);
-      const branches = (await branchesResp.json() as Array<{ name: string }>).map(b => b.name);
+      const branches = (await branchesResp.json() as Array<{ name: string }>).map(b => b.name).filter(b => !b.startsWith(WORK_BRANCH_PREFIX));
       const defaultBranch = repoResp.ok ? ((await repoResp.json()).default_branch ?? null) : null;
       return { branches, defaultBranch };
     }
@@ -380,7 +423,7 @@ export class GitService {
         fetch(`${base}/projects/${projectId}`, { headers }),
       ]);
       if (!branchesResp.ok) throw new Error(`Branch list failed (${branchesResp.status}) — check owner/name and token access`);
-      const branches = (await branchesResp.json() as Array<{ name: string }>).map(b => b.name);
+      const branches = (await branchesResp.json() as Array<{ name: string }>).map(b => b.name).filter(b => !b.startsWith(WORK_BRANCH_PREFIX));
       const defaultBranch = projResp.ok ? ((await projResp.json()).default_branch ?? null) : null;
       return { branches, defaultBranch };
     }
@@ -398,17 +441,30 @@ export class GitService {
     // R2.2: the connect-time anchor outcome is USER-FACING now — a repo carrying a
     // NodeSpec model must be surfaced, never silently proposal'd (the owner's
     // disaster-recovery test connected to a surviving anchor and heard nothing).
-    const result = await this.callFunction<{ anchorAdopt?: AnchorAdoptResult; specAdopt?: SpecAdoptResult; branchDetect?: BranchDetectResult }>(
+    const result = await this.callFunction<{ anchorAdopt?: AnchorAdoptResult; specAdopt?: SpecAdoptResult; webhook?: { integrationId: string; secret: string; created: boolean } }>(
       'save-git-integration',
       { projectId, ...config },
     );
     // R7b: fold the spec outcome onto the same result object so every caller
-    // reports both planes from one place. R3-6 adds branch detection.
+    // reports both planes from one place. AD.0 adds the webhook to add. (R3-6's
+    // branch detection was retired in V3 AD.2b.)
     return {
       ...(result.anchorAdopt ?? { detected: false }),
       spec: result.specAdopt ?? { detected: false },
-      ...(result.branchDetect ? { branchDetect: result.branchDetect } : {}),
+      ...(result.webhook?.secret ? {
+        webhook: {
+          url: this.webhookUrl(result.webhook.integrationId),
+          secret: result.webhook.secret,
+          created: result.webhook.created === true,
+        },
+      } : {}),
     };
+  }
+
+  /** AD.0: where the provider delivers pushes (git-webhook runs without a
+   *  Supabase JWT; the secret is what proves a delivery). */
+  webhookUrl(integrationId: string): string {
+    return `${this.baseUrl}/functions/v1/git-webhook?integration_id=${encodeURIComponent(integrationId)}`;
   }
 
   /**
@@ -442,14 +498,6 @@ export class GitService {
     return data as PushResult;
   }
 
-  async pull(integrationId: string, path?: string): Promise<PullResult> {
-    return this.callFunction<PullResult>('git-pull', {
-      integrationId,
-      path,
-      mode: 'content-fetch',
-    });
-  }
-
   async treeScan(integrationId: string, path?: string): Promise<TreeScanResponse> {
     return this.callFunction<TreeScanResponse>('git-pull', {
       integrationId,
@@ -472,19 +520,31 @@ export class GitService {
   }
 
   /**
-   * R3-1 THE LOADER: restore the graph from the repo's model anchor (git→canvas).
-   * Whole-graph replace via a new snapshot; graph_patches are never rewritten.
-   * Explicit invocation only — a card button or the blocked-push panel.
+   * V3 AD.2b: load the repository's model onto a branch as a PROPOSAL. The
+   * server compares git's `.nodespec/model.json` with the canvas and files one
+   * proposal of ordinary patches that keep positions, file content and values
+   * git withheld; nothing on the canvas changes until a person accepts it in
+   * Proposals, and the last sync moves then. `identical` means the canvas
+   * already holds git's design. `automatic` marks a load the app asked for on
+   * its own (a page load), which never re-anchors a rewritten history.
    */
-  async restoreModel(integrationId: string, branchName?: string): Promise<{
-    restored: boolean;
+  async restoreModel(integrationId: string, branchName?: string, opts?: { automatic?: boolean }): Promise<{
+    status: 'filed' | 'already-filed' | 'identical';
     headSha: string;
-    modelHash: string;
-    counts: { nodes: number; edges: number; contracts: number; artifacts: number };
+    proposalId?: string;
+    patchCount?: number;
+    /** Changes in git no patch can express; the canvas keeps its value. */
+    notApplied?: string[];
+    baselineMoved?: boolean;
     note?: string;
   }> {
-    return this.callFunction('git-pull', { integrationId, mode: 'restore-model', ...(branchName ? { branchName } : {}) });
+    return this.callFunction('git-pull', {
+      integrationId, mode: 'restore-model',
+      ...(branchName ? { branchName } : {}),
+      ...(opts?.automatic ? { automatic: true } : {}),
+    });
   }
+
 
   /**
    * R7c: load `.nodespec/spec.json` from the branch's bound ref. Separate action
@@ -500,6 +560,8 @@ export class GitService {
   async applyCriterionDeltas(integrationId: string, changeEventId: string): Promise<{
     success: boolean;
     applied: number;
+    /** A4: the card's task ticks, applied in the same call. */
+    tasksApplied?: number;
     requirements: string[];
   }> {
     return this.callFunction('git-pull', { integrationId, mode: 'apply-criteria', changeEventId });
@@ -510,31 +572,14 @@ export class GitService {
     mode: 'adopted' | 'applied';
     headSha: string;
     specHash: string;
-    counts: { added?: number; updated?: number; criteriaPreserved?: number; requirements?: number; criteria?: number; mappings: number };
+    counts: { added?: number; updated?: number; criteriaPreserved?: number; requirements?: number; criteria?: number; mappings: number; mappingsRemoved?: number };
     keptLocal?: string[];
+    /** AD.2c: locked requirements git changed; not written. */
+    locked?: string[];
+    baselineMoved?: boolean;
+    note?: string;
   }> {
     return this.callFunction('git-pull', { integrationId, mode: 'restore-spec', ...(branchName ? { branchName } : {}) });
-  }
-
-  /**
-   * R3-3a: create a REAL git branch for a just-created NodeSpec branch (1:1 ref
-   * binding) — branched from the source NodeSpec branch's bound ref. Binds git_ref
-   * + baseline on the branch row so its first push/sweep is coherent from birth.
-   */
-  async createRemoteBranch(projectId: string, integrationId: string, newBranchName: string, fromBranchName = 'main'): Promise<{
-    created: boolean;
-    ref: string;
-    sha: string;
-    alreadyExists: boolean;
-    fromRef: string;
-  }> {
-    return this.callFunction('git-push', {
-      projectId,
-      branchName: newBranchName,
-      integrationId,
-      action: 'create-branch',
-      fromBranchName,
-    });
   }
 
   /** R3-3b: the branch's bound git ref (null = local-only / pre-binding branch). */
@@ -567,43 +612,6 @@ export class GitService {
   }
 
   /**
-   * R3-3b: a design merge IS a git merge, and the DEFAULT vehicle is a pull request.
-   * Call push() first (the normal lane — guard + freshness gate); this only opens the
-   * PR with the entity diff as its body. An already-open PR is a bindable outcome.
-   */
-  async openPullRequest(projectId: string, branchName: string, integrationId: string, targetBranchName = 'main'): Promise<{
-    prUrl: string;
-    prNumber?: number;
-    alreadyExists: boolean;
-    sourceRef: string;
-    targetRef: string;
-  }> {
-    return this.callFunction('git-push', {
-      projectId, branchName, integrationId,
-      action: 'open-pr', targetBranchName,
-    });
-  }
-
-  /**
-   * R3-3b: the explicit secondary option — a REAL provider merge commit, no PR.
-   * Never a DB copy; deletes nothing. `targetInSync` = the target's canvas matched
-   * its ref before the merge, so the caller may auto-run restoreModel() on it.
-   */
-  async mergeBranchDirect(projectId: string, branchName: string, integrationId: string, targetBranchName = 'main'): Promise<{
-    merged: boolean;
-    mergeSha: string | null;
-    alreadyMerged: boolean;
-    targetInSync: boolean;
-    targetRef: string;
-    prUrl?: string;
-  }> {
-    return this.callFunction('git-push', {
-      projectId, branchName, integrationId,
-      action: 'merge-direct', targetBranchName,
-    });
-  }
-
-  /**
    * Owner 2026-07-30 (recovery lane): resolved cards are not gone — their
    * content stays reachable at the recorded commit sha. Newest-first, capped.
    */
@@ -616,7 +624,8 @@ export class GitService {
       .order('created_at', { ascending: false })
       .limit(limit);
     if (error) throw error;
-    return (data || []).map((e: any) => this.mapChangeEventRow(e));
+    const primary = await this.primaryBranchName(projectId);
+    return (data || []).map((e: any) => this.mapChangeEventRow(e, primary));
   }
 
   /**
@@ -632,7 +641,8 @@ export class GitService {
       .order('created_at', { ascending: false })
       .limit(limit);
     if (error) throw error;
-    return (data || []).map((e: any) => this.mapChangeEventRow(e));
+    const primary = await this.primaryBranchName(projectId);
+    return (data || []).map((e: any) => this.mapChangeEventRow(e, primary));
   }
 
   /**
@@ -670,28 +680,47 @@ export class GitService {
       .order('created_at', { ascending: false });
 
     if (error) throw error;
-    return (data || []).map((e: any) => this.mapChangeEventRow(e));
+    const primary = await this.primaryBranchName(projectId);
+    return (data || []).map((e: any) => this.mapChangeEventRow(e, primary));
   }
 
-  // One row mapper for pending AND resolved reads.
+  /** AD.4 (D15): the primary branch's name, by its flag; the server's naming
+   *  fallback (getPrimaryBranch) when no row carries it. Null when it cannot
+   *  be read. */
+  private async primaryBranchName(projectId: string): Promise<string | null> {
+    const { data } = await this.supabase
+      .from('branches')
+      .select('name, is_primary')
+      .eq('project_id', projectId);
+    const rows = (data ?? []) as Array<{ name: string; is_primary: boolean | null }>;
+    const row = rows.find((b) => b.is_primary === true) ?? rows.find((b) => b.name === 'main');
+    return row?.name ?? null;
+  }
+
+  // One row mapper for pending AND resolved reads. AD.4 (D15): a card from
+  // before R3-3c names no branch and is the primary branch's, so it is named
+  // here with the primary's real name; a card for a ref no branch is bound to
+  // (unmappedRef) stays nobody's.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private mapChangeEventRow(e: any): GitChangeEvent {
+  private mapChangeEventRow(e: any, primaryBranchName: string | null = null): GitChangeEvent {
     return {
       id: e.id,
       commitSha: e.commit_sha,
       commitMessage: e.commit_message,
       author: e.author,
       changedFiles: e.changed_files || [],
+      ...(Array.isArray(e.metadata?.authors) ? { authors: e.metadata.authors } : {}),
       status: e.status,
       branch: e.metadata?.branch,
       createdAt: e.created_at,
       artifactMatches: e.metadata?.artifactMatches || [],
       matchError: e.metadata?.matchError,
       source: e.metadata?.source,
-      branchName: e.metadata?.branchName,
+      branchName: e.metadata?.branchName ?? (e.metadata?.unmappedRef ? undefined : primaryBranchName ?? undefined),
       residuePaths: e.metadata?.residuePaths || [],
       ignoredResidue: e.metadata?.ignoredResidue || [],
       modelChanged: e.metadata?.modelChanged === true,
+      indexFreshness: e.metadata?.indexFreshness,
       modelDiff: e.metadata?.modelDiff,
       specChanged: e.metadata?.specChanged === true,
       specDiff: e.metadata?.specDiff,
@@ -700,6 +729,9 @@ export class GitService {
       taskDeltas: e.metadata?.taskDeltas,
       ticksApplied: e.metadata?.ticksApplied,
       bindingResolution: e.metadata?.bindingResolution,
+      restoredPlanes: Array.isArray(e.metadata?.restoredPlanes) ? e.metadata.restoredPlanes : undefined,
+      reconcileProposalId: e.metadata?.reconcileProposalId,
+      ticksDismissed: e.metadata?.ticksDismissed,
     };
   }
 
@@ -746,55 +778,39 @@ export class GitService {
     return (result.files || []).map(f => ({ path: f.path, content: f.content }));
   }
 
-  async resolveChangeEvent(changeEventId: string, resolution: 'accepted' | 'dismissed', extraMetadata?: Record<string, unknown>): Promise<void> {
-    const { data: { user } } = await this.supabase.auth.getUser();
-    const { data: event } = await this.supabase
-      .from('git_change_events')
-      .select('id, project_id, commit_sha, metadata')
-      .eq('id', changeEventId)
-      .maybeSingle();
+  /**
+   * V3 AD.1 (D8): resolve a change card on the server, through the one
+   * resolver and the one baseline writer. The card resolves only while it is
+   * pending and only as the version the person read (`change.commitSha`): a
+   * card the sync check has since rewritten to cover new commits is refused,
+   * and the person reviews it again. The baseline only moves forward; when
+   * the provider cannot confirm that, the card stays pending.
+   * `stamps` are the accept lane's audit marks (autoSynced, declarationsBound);
+   * the server keeps no other key from the browser.
+   */
+  async resolveChangeEvent(
+    integrationId: string,
+    change: { id: string; commitSha: string | null },
+    resolution: 'accepted' | 'dismissed',
+    stamps?: Record<string, unknown>,
+  ): Promise<{ baseline?: { moved: boolean; outcome: string; note?: string } }> {
+    return this.callFunction('git-pull', {
+      integrationId,
+      mode: 'resolve-change',
+      changeEventId: change.id,
+      commitSha: change.commitSha ?? '',
+      resolution,
+      ...(stamps ? { stamps } : {}),
+    });
+  }
 
-    const { error } = await this.supabase
-      .from('git_change_events')
-      .update({
-        status: resolution,
-        resolved_by: user?.id,
-        resolved_at: new Date().toISOString(),
-        // B2: audit stamps (e.g. autoSynced) fold into the SAME resolve write.
-        ...(extraMetadata
-          ? { metadata: { ...((event?.metadata as Record<string, unknown>) ?? {}), ...extraMetadata } }
-          : {}),
-      })
-      .eq('id', changeEventId);
-
-    if (error) throw error;
-
-    // P1-7 R2: for SWEEP events, advance the sync baseline on accept AND dismiss — a
-    // resolved event's range is dealt with either way, and without this the next sweep
-    // re-raises the same commits forever.
-    // R2.2: the connect-anchor-mismatch card is DIFFERENT — dismiss means "keep the repo
-    // copy protected", so only ACCEPT establishes the baseline there; advancing on
-    // dismiss would silently disarm the push overwrite guard. And never write a non-sha
-    // sentinel as the baseline (early mismatch cards carried "unknown" on HEAD-fetch failure).
-    // R3-3c: advance the baseline on the branch the card BELONGS to (metadata.branchName;
-    // legacy cards = main) — the unconditional name='main' write would have stamped a
-    // feature branch's sha onto main's baseline. ref-deleted lifecycle cards never touch
-    // any baseline (their commit_sha is the old baseline itself, not a new sync point).
-    const meta = (event as { metadata?: { source?: string; branchName?: string; unmappedRef?: string } } | null)?.metadata;
-    const source = meta?.source;
-    if (source === 'ref-deleted') return;
-    // R3-4a: a webhook card for a ref no NodeSpec branch is bound to — resolving it
-    // must not advance ANY branch's baseline (the old default would have moved main).
-    if (!meta?.branchName && meta?.unmappedRef) return;
-    if (source === 'connect-anchor-mismatch' && resolution === 'dismissed') return;
-    if (event?.commit_sha === 'unknown') return;
-    if (event?.commit_sha && event?.project_id) {
-      await this.supabase
-        .from('branches')
-        .update({ last_synced_commit: event.commit_sha })
-        .eq('project_id', event.project_id)
-        .eq('name', meta?.branchName ?? 'main');
-    }
+  /** V3 AD.1: the baseline an accepted proposal carries. An adopt at connect
+   *  sets the branch's first baseline at the commit its model was read from;
+   *  an agent's reconcile of a change card resolves that card as the version
+   *  the agent read. Best-effort for the caller: nothing moves otherwise, and
+   *  the card or the push guard keeps asking. */
+  async proposalBaseline(integrationId: string, proposalId: string): Promise<{ baseline?: { moved: boolean; outcome: string; note?: string } }> {
+    return this.callFunction('git-pull', { integrationId, mode: 'proposal-baseline', proposalId });
   }
 
   /**

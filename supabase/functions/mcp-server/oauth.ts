@@ -5,9 +5,32 @@
 // back by index.ts's router. Edge-safe: type-only SupabaseClient + relative ./shared.ts specifiers.
 import type { SupabaseClient } from "jsr:@supabase/supabase-js@2";
 import { getBaseUrl, sha256Hex } from "./shared.ts";
-import { isSelfHosted } from "../_shared/deployment.ts";
+import { getEffectiveTier, isSelfHosted } from "../_shared/deployment.ts";
+import { agentConnectionCapMessage, agentConnectionLimit } from "../_shared/feature-rules.ts";
+import { oauthClientId } from "../_shared/oauth-client.ts";
 
 const ALLOWED_SCOPES = new Set(['read', 'write', 'propose']);
+
+/** JSON for an inline <script>: JSON.stringify leaves "</script>" and the line
+ *  separators as they are, so a query value could close the script and open another
+ *  (the RLS audit, 2026-09-30). Exported for tests. */
+export function scriptJson(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
+/** Where an approved code goes, as the consent page names it; null for a redirect_uri
+ *  that is not a URL or would run in the page. Exported for tests. */
+export function redirectDestination(uri: string): string | null {
+  let u: URL;
+  try { u = new URL(uri); } catch { return null; }
+  if (['javascript:', 'data:', 'vbscript:', 'file:', 'blob:'].includes(u.protocol)) return null;
+  return u.protocol === 'http:' || u.protocol === 'https:' ? u.host : `${u.protocol}//${u.host}`;
+}
 
 function escapeHtml(str: string): string {
   return str
@@ -74,7 +97,7 @@ export function handleOAuthMetadata(req: Request): Response {
     authorization_endpoint: `${baseUrl}/authorize`,
     token_endpoint: `${baseUrl}/token`,
     response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
     scopes_supported: ["read", "write", "propose"],
     token_endpoint_auth_methods_supported: ["none"],
@@ -111,7 +134,9 @@ export async function handleClientRegistration(req: Request): Promise<Response> 
     if (body.client_name) clientName = String(body.client_name);
     if (Array.isArray(body.redirect_uris)) redirectUris = body.redirect_uris.map(String);
   } catch {}
-  const clientId = crypto.randomUUID();
+  // AL.2: the client's own name rides in the id we mint ("claude-code.<uuid>"),
+  // so every card, hold and roster row can name the agent without a column.
+  const clientId = oauthClientId(clientName, crypto.randomUUID());
   return new Response(JSON.stringify({
     client_id: clientId,
     client_name: clientName,
@@ -212,7 +237,7 @@ export function handleOAuthResume(_req: Request): Response {
   </div>
   <script>
     (function () {
-      var BASE = ${JSON.stringify(baseUrl)};
+      var BASE = ${scriptJson(baseUrl)};
       var raw = null;
       try { raw = sessionStorage.getItem('nodespec_mcp_authreq') || localStorage.getItem('nodespec_mcp_authreq'); } catch (_e) { /* storage unavailable */ }
       try { sessionStorage.removeItem('nodespec_mcp_authreq'); } catch (_e) { /* ignore */ }
@@ -272,6 +297,13 @@ export async function handleAuthorizeGet(req: Request, supabase: SupabaseClient)
       headers: { ...oauthCors, 'Content-Type': 'text/plain' },
     });
   }
+  const destination = redirectDestination(redirectUri);
+  if (destination === null) {
+    return new Response('redirect_uri must be a URL your MCP client listens on', {
+      status: 400,
+      headers: { ...oauthCors, 'Content-Type': 'text/plain' },
+    });
+  }
 
   const validScopes = scope.split(' ').filter((s: string) => ALLOWED_SCOPES.has(s));
   if (validScopes.length === 0) {
@@ -301,7 +333,7 @@ export async function handleAuthorizeGet(req: Request, supabase: SupabaseClient)
 
   const turnstileSiteKey = Deno.env.get('TURNSTILE_SITE_KEY') || '0x4AAAAAAC35x_nOg9ZE0X0Z';
 
-  const jsParams = JSON.stringify({
+  const jsParams = scriptJson({
     baseUrl,
     clientId,
     redirectUri,
@@ -320,7 +352,7 @@ export async function handleAuthorizeGet(req: Request, supabase: SupabaseClient)
     // signed up with Google have no password identity, so without this they
     // cannot authorize MCP at all (owner-reported 2026-08-29). Self-hosted
     // stacks keep the exact page they had — the button never renders there.
-    googleEnabled: !isSelfHosted(),
+    googleEnabled: !isSelfHosted() || consentGoogleOptIn(),
   });
 
   const consentHtml = `<!DOCTYPE html>
@@ -368,7 +400,7 @@ export async function handleAuthorizeGet(req: Request, supabase: SupabaseClient)
 <body>
   <div class="card">
     <div class="logo">NodeSpec</div>
-    <div class="subtitle">An external agent wants to connect to your projects.</div>
+    <div class="subtitle">An external agent wants to connect to your projects. When you approve, its access is sent to <strong>${escapeHtml(destination)}</strong>; approve only if that is your MCP client.</div>
 
     <div class="section-label">Requested Permissions</div>
     <div class="scopes">
@@ -757,6 +789,30 @@ async function mintCodeAndRedirect(
   state: string,
   oauthCors: Record<string, string>,
 ): Promise<Response> {
+  // I.1 (owner ruling 2026-09-21): a new OAuth client is a new connection,
+  // and the plan caps how many one person keeps live. The client renewing
+  // its own connection is left out of the count, so a re-authorization
+  // never trips the cap. A count the database cannot give refuses rather
+  // than minting blind. The refusal rides back to the client the OAuth way
+  // (error=access_denied on the redirect) with the same sentence the
+  // Connected tab and create_api_key speak.
+  const tier = await getEffectiveTier(supabase, userId);
+  const counted = await supabase.rpc('agent_connection_count', { p_user_id: userId, p_except_client_id: clientId });
+  if (counted.error) {
+    return new Response('Could not count your connected agents. Try again.', {
+      status: 500,
+      headers: { ...oauthCors, 'Content-Type': 'text/plain' },
+    });
+  }
+  const live = typeof counted.data === 'number' ? counted.data : Number(counted.data ?? 0);
+  if (live >= agentConnectionLimit(tier)) {
+    const denied = new URL(redirectUri);
+    denied.searchParams.set('error', 'access_denied');
+    denied.searchParams.set('error_description', agentConnectionCapMessage(tier));
+    if (state) denied.searchParams.set('state', state);
+    return Response.redirect(denied.toString(), 302);
+  }
+
   const code = generateRandomToken(32);
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
   const scopes = scope.split(' ').filter(Boolean);
@@ -808,6 +864,9 @@ export async function handleTokenExchange(req: Request, supabase: SupabaseClient
 
   const grantType = params.get('grant_type');
 
+  if (grantType === 'refresh_token') {
+    return await handleRefreshGrant(params, supabase, oauthCors);
+  }
   if (grantType !== 'authorization_code') {
     return new Response(JSON.stringify({ error: 'unsupported_grant_type' }), {
       status: 400,
@@ -870,40 +929,151 @@ export async function handleTokenExchange(req: Request, supabase: SupabaseClient
     });
   }
 
-  await supabase
+  // Claim the code: only the exchange that flips it from unused gets tokens, so two
+  // exchanges of one code at the same moment cannot both succeed (the RLS audit).
+  const { data: claimed } = await supabase
     .from('mcp_oauth_codes')
     .update({ used: true })
-    .eq('id', codeEntry.id);
+    .eq('id', codeEntry.id)
+    .eq('used', false)
+    .select('id');
+  if (!Array.isArray(claimed) || claimed.length === 0) {
+    return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Authorization code already used' }), {
+      status: 400,
+      headers: { ...oauthCors, 'Content-Type': 'application/json' },
+    });
+  }
 
+  return await issueTokenPair(supabase, oauthCors, {
+    userId: codeEntry.user_id,
+    clientId: codeEntry.client_id,
+    scopes: codeEntry.scopes as string[],
+  });
+}
+
+// ── 4b.4: token pairs, rotation, reuse detection ─────────────────────────────
+// The access token keeps the 7-day TTL it always had (a client that never
+// refreshes regresses nothing); the refresh token renews it silently for a
+// sliding 60-day window. Rotation on every refresh; a refresh token presented
+// AFTER it was rotated is reuse — the whole family is revoked and the client
+// must authorize again.
+export const ACCESS_TOKEN_TTL_DAYS = 7;
+export const REFRESH_TOKEN_TTL_DAYS = 60;
+const REFRESH_FAMILY_HOP_LIMIT = 64;
+
+/** Self-hosted stacks whose GoTrue has the Google provider configured opt
+ *  the consent page's Google button in explicitly (MCP_CONSENT_GOOGLE=true);
+ *  hosted always renders it. */
+export function consentGoogleOptIn(env: { get(name: string): string | undefined } = Deno.env): boolean {
+  return env.get('MCP_CONSENT_GOOGLE') === 'true';
+}
+
+async function issueTokenPair(
+  supabase: SupabaseClient,
+  oauthCors: Record<string, string>,
+  grant: { userId: string; clientId: string; scopes: string[]; rotatedFrom?: string },
+): Promise<Response> {
   const accessToken = `nst_${generateRandomToken(32)}`;
-  const tokenHash = await sha256Hex(accessToken);
-  const TOKEN_TTL_DAYS = 7;
-  const tokenExpiresAt = new Date(Date.now() + TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
-
-  const { error: tokenError } = await supabase
+  const refreshToken = `nsr_${generateRandomToken(32)}`;
+  const now = Date.now();
+  const expiresAt = new Date(now + ACCESS_TOKEN_TTL_DAYS * 86400 * 1000).toISOString();
+  const refreshExpiresAt = new Date(now + REFRESH_TOKEN_TTL_DAYS * 86400 * 1000).toISOString();
+  const { data: inserted, error: tokenError } = await supabase
     .from('mcp_oauth_tokens')
     .insert({
-      access_token_hash: tokenHash,
-      user_id: codeEntry.user_id,
-      client_id: codeEntry.client_id,
-      scopes: codeEntry.scopes,
-      expires_at: tokenExpiresAt,
-    });
-
+      access_token_hash: await sha256Hex(accessToken),
+      refresh_token_hash: await sha256Hex(refreshToken),
+      user_id: grant.userId,
+      client_id: grant.clientId,
+      scopes: grant.scopes,
+      expires_at: expiresAt,
+      refresh_expires_at: refreshExpiresAt,
+      ...(grant.rotatedFrom ? { rotated_from: grant.rotatedFrom } : {}),
+    })
+    .select('id')
+    .maybeSingle();
   if (tokenError) {
     return new Response(JSON.stringify({ error: 'server_error', error_description: 'Failed to create access token' }), {
       status: 500,
       headers: { ...oauthCors, 'Content-Type': 'application/json' },
     });
   }
-
+  if (grant.rotatedFrom) {
+    // The old row retires: it points at its successor and stops authenticating.
+    await supabase
+      .from('mcp_oauth_tokens')
+      .update({ rotated_to: (inserted as { id: string } | null)?.id ?? null, revoked_at: new Date(now).toISOString(), last_used_at: new Date(now).toISOString() })
+      .eq('id', grant.rotatedFrom);
+  }
   return new Response(JSON.stringify({
     access_token: accessToken,
     token_type: 'Bearer',
-    expires_in: TOKEN_TTL_DAYS * 86400,
-    scope: (codeEntry.scopes as string[]).join(' '),
+    expires_in: ACCESS_TOKEN_TTL_DAYS * 86400,
+    refresh_token: refreshToken,
+    refresh_token_expires_in: REFRESH_TOKEN_TTL_DAYS * 86400,
+    scope: grant.scopes.join(' '),
   }), {
     status: 200,
     headers: { ...oauthCors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
   });
+}
+
+/** Reuse detection: revoke the presented row and everything it rotated into. */
+export async function revokeTokenFamily(supabase: SupabaseClient, startId: string): Promise<number> {
+  let id: string | null = startId;
+  let revoked = 0;
+  for (let hop = 0; id && hop < REFRESH_FAMILY_HOP_LIMIT; hop++) {
+    const { data } = await supabase
+      .from('mcp_oauth_tokens')
+      .update({ revoked_at: new Date().toISOString() })
+      .eq('id', id)
+      .select('id, rotated_to')
+      .maybeSingle();
+    const row = data as { id: string; rotated_to: string | null } | null;
+    if (!row) break;
+    revoked += 1;
+    id = row.rotated_to;
+  }
+  return revoked;
+}
+
+export async function handleRefreshGrant(
+  params: URLSearchParams,
+  supabase: SupabaseClient,
+  oauthCors: Record<string, string>,
+): Promise<Response> {
+  const bad = (error: string, description: string, status = 400) =>
+    new Response(JSON.stringify({ error, error_description: description }), {
+      status, headers: { ...oauthCors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+    });
+  const refreshToken = params.get('refresh_token');
+  if (!refreshToken) return bad('invalid_request', 'refresh_token is required');
+  const { data, error } = await supabase
+    .from('mcp_oauth_tokens')
+    .select('id, user_id, client_id, scopes, revoked_at, refresh_expires_at, rotated_to')
+    .eq('refresh_token_hash', await sha256Hex(refreshToken))
+    .maybeSingle();
+  const row = data as { id: string; user_id: string; client_id: string; scopes: string[]; revoked_at: string | null; refresh_expires_at: string | null; rotated_to: string | null } | null;
+  if (error || !row) return bad('invalid_grant', 'Unknown refresh token — authorize again');
+  if (row.rotated_to) {
+    // Presented after rotation: someone else holds the live pair, or this
+    // client replayed. Either way the family dies; the user authorizes again.
+    await revokeTokenFamily(supabase, row.id);
+    return bad('invalid_grant', 'Refresh token reuse detected — this connection was revoked. Authorize again in your MCP client.');
+  }
+  if (row.revoked_at) return bad('invalid_grant', 'This connection was revoked — authorize again');
+  if (!row.refresh_expires_at || new Date(row.refresh_expires_at) < new Date()) {
+    return bad('invalid_grant', 'Refresh token expired — authorize again in your MCP client');
+  }
+  const clientIdParam = params.get('client_id');
+  if (clientIdParam && clientIdParam !== row.client_id) return bad('invalid_grant', 'client_id mismatch');
+  const requestedScope = params.get('scope');
+  let scopes = row.scopes;
+  if (requestedScope) {
+    // A refresh may narrow scopes, never widen them.
+    const wanted = requestedScope.split(' ').filter(Boolean);
+    if (wanted.some((w) => !row.scopes.includes(w))) return bad('invalid_scope', 'A refresh cannot widen the granted scopes');
+    scopes = wanted;
+  }
+  return await issueTokenPair(supabase, oauthCors, { userId: row.user_id, clientId: row.client_id, scopes, rotatedFrom: row.id });
 }

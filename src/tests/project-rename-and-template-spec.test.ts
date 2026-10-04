@@ -146,6 +146,7 @@ function createFullMockPersistence(templateRepo: TemplateRepository) {
     })),
     getById: vi.fn(),
     listByOwner: vi.fn(),
+    listForUser: vi.fn(),
     update: vi.fn().mockImplementation((_id: string, updates: any) =>
       Promise.resolve(ok({
         id: 'new-project-id',

@@ -5,7 +5,6 @@ import {
   AuthService,
   ProjectService,
   SpecificationService,
-  CodeStructureService,
   AIRunService,
   ProposalService,
   PatchService,
@@ -26,7 +25,6 @@ export interface Services {
   auth: AuthService;
   project: ProjectService;
   specification: SpecificationService;
-  codeStructure: CodeStructureService;
   aiRun: AIRunService;
   proposal: ProposalService;
   patch: PatchService;
@@ -75,7 +73,6 @@ export function ServiceProvider({ children }: ServiceProviderProps) {
       auth,
       project,
       specification,
-      codeStructure: new CodeStructureService(persistence),
       aiRun: new AIRunService(persistence),
       proposal: new ProposalService(persistence),
       patch,
@@ -116,11 +113,6 @@ export function useProject() {
 export function useSpecification() {
   const services = useServices();
   return services.specification;
-}
-
-export function useCodeStructure() {
-  const services = useServices();
-  return services.codeStructure;
 }
 
 export function usePersistence() {

@@ -18,13 +18,9 @@ const corsHeaders = {
 // P1-7 R1: ChangedFile/MatchResult + matchFilesToArtifacts moved to ../_shared/git-drift.ts
 // (with the is_main -> name==='main' fix; see the note there). Re-exported for existing callers
 // and the P0-9 test suite.
-import { matchFilesToArtifacts, classifySweepFiles, resolveWebhookBranchName, isNodeSpecMergeArrival, restoreBranchModelFromRef, isSelfPushMessage, computeWebhookCriterionDeltas, computeWebhookTaskDeltas } from "../_shared/git-drift.ts";
-import type { CriterionDeltaResult } from "../_shared/criterion-deltas.ts";
-import type { TaskDeltaResult } from "../_shared/task-deltas.ts";
-import { computeWebhookBindingResolution, computeWebhookBoardDeltas } from "../_shared/git-drift.ts";
-import { BOARD_PATH, mergeCriterionDeltaResults, mergeTaskDeltaResults } from "../_shared/board-generator.ts";
-import { BINDINGS_PATH, type BindingResolution } from "../_shared/binding-manifest.ts";
+import { matchFilesToArtifacts, resolveWebhookBranchName, runDriftSweep } from "../_shared/git-drift.ts";
 import type { ChangedFile, MatchResult } from "../_shared/git-drift.ts";
+import { readWebhookSecret, timingSafeEqual, webhookRepoMatches } from "../_shared/webhook-secret.ts";
 export { matchFilesToArtifacts };
 export type { ChangedFile, MatchResult };
 
@@ -66,10 +62,6 @@ export interface GitLabPushPayload {
   };
 }
 
-// Rebrand 2026-07-30: the prefix (and its legacy-accepting matcher) lives ONCE
-// in _shared/git-drift.ts — this file's private copy was a drift hazard.
-export { SELF_PUSH_PREFIX } from "../_shared/git-drift.ts";
-
 export async function verifyGitHubSignatureHmac(
   payload: string,
   signature: string,
@@ -93,7 +85,7 @@ export async function verifyGitHubSignatureHmac(
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
 
-    return macHex === sigHex;
+    return timingSafeEqual(macHex, sigHex.toLowerCase());
   } catch {
     return false;
   }
@@ -229,9 +221,15 @@ export function parseGitLabPush(body: GitLabPushPayload): {
   };
 }
 
-/** The full request-processing flow, minus env reads and client construction. */
-// deno-lint-ignore no-explicit-any
-export async function processWebhook(supabase: any, req: Request): Promise<Response> {
+/** The full request-processing flow, minus env reads and client construction.
+ *  AD.1: `deps.runDriftSweep` is the sync check a delivery wakes (injectable
+ *  so tests can see what it is asked without reaching a provider). */
+export async function processWebhook(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  req: Request,
+  deps: { runDriftSweep: typeof runDriftSweep } = { runDriftSweep },
+): Promise<Response> {
   if (req.method !== "POST") {
     return new Response(
       JSON.stringify({ error: "Method not allowed" }),
@@ -273,40 +271,33 @@ export async function processWebhook(supabase: any, req: Request): Promise<Respo
     );
   }
 
-  if (integration.webhook_secret) {
+  // AD.0 (S2): every delivery proves it knows the secret. It used to be checked
+  // only when a secret was on file AND a header came with the delivery, and
+  // nothing ever wrote the secret, so every delivery was accepted.
+  const refuse = (error: string) => new Response(
+    JSON.stringify({ error }),
+    { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+  );
+  const secret = await readWebhookSecret(integration.webhook_secret);
+  if (!secret) {
+    return refuse("This integration has no webhook secret. Save the integration in NodeSpec to get one, then add it to this webhook.");
+  }
+  if (integration.provider === "github") {
     const githubSig =
       req.headers.get("X-Hub-Signature-256") ||
       req.headers.get("x-hub-signature-256");
+    if (!githubSig || !(await verifyGitHubSignatureHmac(rawBody, githubSig, secret))) {
+      return refuse("Invalid webhook signature");
+    }
+  } else if (integration.provider === "gitlab") {
     const gitlabToken =
       req.headers.get("X-Gitlab-Token") ||
       req.headers.get("x-gitlab-token");
-
-    if (integration.provider === "github" && githubSig) {
-      const valid = await verifyGitHubSignatureHmac(
-        rawBody,
-        githubSig,
-        integration.webhook_secret
-      );
-      if (!valid) {
-        return new Response(
-          JSON.stringify({ error: "Invalid webhook signature" }),
-          {
-            status: 401,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          }
-        );
-      }
-    } else if (integration.provider === "gitlab" && gitlabToken) {
-      if (gitlabToken !== integration.webhook_secret) {
-        return new Response(
-          JSON.stringify({ error: "Invalid webhook token" }),
-          {
-            status: 401,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          }
-        );
-      }
+    if (!gitlabToken || !timingSafeEqual(gitlabToken, secret)) {
+      return refuse("Invalid webhook token");
     }
+  } else {
+    return refuse("Unsupported provider");
   }
 
   const githubEvent =
@@ -355,217 +346,53 @@ export async function processWebhook(supabase: any, req: Request): Promise<Respo
     );
   }
 
-  const parsed =
-    integration.provider === "github"
-      ? parseGitHubPush(body as GitHubPushPayload)
-      : parseGitLabPush(body as GitLabPushPayload);
-
-  if (parsed.changedFiles.length === 0) {
-    return new Response(
-      JSON.stringify({ ok: true, message: "No file changes detected" }),
-      {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
-    );
+  // AD.0 (S2): a signed delivery for some other repository is not this
+  // integration's business, whoever signed it.
+  if (!webhookRepoMatches(integration.provider, body, integration.repo_owner, integration.repo_name)) {
+    return refuse("This delivery names a different repository from the integration's.");
   }
 
-  if (isSelfPushMessage(parsed.commitMessage)) {
-    return new Response(
-      JSON.stringify({ ok: true, message: "Self-push ignored" }),
-      {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
-    );
-  }
+  // AD.1 (D12, D13, D20): a delivery wakes the sync check and does nothing
+  // else. The webhook used to write its own card per delivery (a duplicate
+  // on redelivery and beside the sync check's card, with no specChanged, so
+  // auto-sync could swallow a spec edit), judge NodeSpec's own push by the
+  // head commit's message (hiding the commits under it), and load models on
+  // a merge arrival. The sync check does each of those once, from the range,
+  // with NodeSpec's own writing told apart by recorded sha and blob.
+  const pushedRef = integration.provider === "github"
+    ? parseGitHubPush(body as GitHubPushPayload).branch
+    : parseGitLabPush(body as GitLabPushPayload).branch;
 
   // R3-4a: map the pushed git ref to a NodeSpec branch (bound git_ref wins;
-  // default branch reads as main; anything else is unmapped and must never
-  // advance a baseline) — and match files against THAT branch's artifacts.
+  // default branch reads as main; anything else is unmapped). R3-3d: a
+  // missing default_branch is unknown, not "main".
   const { data: branchRows } = await supabase
     .from("branches")
     .select("name, git_ref, is_primary")
     .eq("project_id", integration.project_id);
   const mappedBranchName = resolveWebhookBranchName(
-    parsed.branch,
-    // R3-3d: was `?? "main"`. A missing default_branch is unknown, not "main" —
-    // guessing it makes a master-default repo map the wrong ref. Pass the null
-    // through; resolveWebhookBranchName then maps only genuinely BOUND branches.
+    pushedRef,
     integration.default_branch,
     (Array.isArray(branchRows) ? branchRows : []) as Array<{ name: string; git_ref: string | null; is_primary?: boolean | null }>,
   );
-
-  // Owner bench 2026-07-29 ("a PR brings the merge up"): when EVERY commit in the
-  // push is NodeSpec's own work plus git's merge machinery, this is our merged PR
-  // coming home — not an external change. Load the ref's model into the mapped
-  // branch instead of raising a "# changes" card against our own content. Guarded
-  // (canvas must still equal its baseline; anchor must hash-verify) — any guard
-  // failure falls through to the normal pending card below.
-  if (mappedBranchName && isNodeSpecMergeArrival(parsed.commits)) {
-    const restored = await restoreBranchModelFromRef(supabase, integration.project_id, mappedBranchName, {
-      requireCanvasMatchesBaseline: true,
-    });
-    if (restored.ok) {
-      await supabase.from("git_change_events").insert({
-        integration_id: integration.id,
-        project_id: integration.project_id,
-        commit_sha: parsed.commitSha,
-        commit_message: parsed.commitMessage,
-        author: parsed.author,
-        changed_files: parsed.changedFiles,
-        status: "accepted",
-        resolved_at: new Date().toISOString(),
-        metadata: {
-          branch: parsed.branch,
-          provider: integration.provider,
-          eventType: githubEvent || gitlabEvent,
-          fileCount: parsed.changedFiles.length,
-          branchName: mappedBranchName,
-          source: "merge-arrival",
-          resolution: "merge-fast-forward",
-          restoredHeadSha: restored.headSha,
-        },
-      });
-      return new Response(
-        JSON.stringify({ ok: true, commitSha: parsed.commitSha, status: "merge-fast-forward", restoredHeadSha: restored.headSha }),
-        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
-    console.warn(`[git-webhook] merge-arrival restore declined (${restored.code}): ${restored.message} — falling through to a pending card`);
-  }
-
-  // Debt-audit fix (2026-07-29): an UNMAPPED ref gets NO artifact matching and no
-  // residue — matching a random branch's files against main's artifacts offered
-  // Accept buttons that would write foreign content onto main's canvas, and
-  // "everything is residue" was noise. The card still records the push honestly.
-  const matchResult = mappedBranchName
-    ? await matchFilesToArtifacts(supabase, integration.project_id, parsed.changedFiles, mappedBranchName)
-    : { matches: [] as MatchResult["matches"] };
-
-  // R3-4a: webhook parity with the sweep — classify the range so webhook cards
-  // carry the same modelChanged/residuePaths signals sweep cards do.
-  const matchedPaths = new Set(matchResult.matches.map((m) => m.path));
-  const classified = classifySweepFiles(parsed.changedFiles, matchedPaths);
-  const modelChanged = classified.modelChanged;
-  const residuePaths = mappedBranchName ? classified.residuePaths : [];
-
-  // A3 (docs/WORK_LOOP_PLAN.md): webhook parity with the sweep for completion
-  // provenance — a tick pushed out-of-band should ride THIS card, not wait for
-  // a later sweep to recompute it. Only TASK-kind matches are read (a ticked
-  // box in ordinary source is prose, not evidence — the R5b rule), and the
-  // whole block is best-effort: a delta failure never drops the card.
-  let criterionDeltas: CriterionDeltaResult | null = null;
-  let taskDeltas: TaskDeltaResult | null = null;
-  const taskDocMatches = matchResult.matches.filter((m) => m.kind === "task");
-  const taskDocPaths = taskDocMatches.map((m) => m.path);
-  if (mappedBranchName && taskDocPaths.length > 0) {
-    try {
-      criterionDeltas = await computeWebhookCriterionDeltas(
-        supabase, integration, parsed.branch, taskDocPaths,
-      );
-    } catch (deltaErr) {
-      console.warn("[git-webhook] criterion delta computation failed (card still lands):", deltaErr);
-    }
-    // A4: anchored implementation-task ticks ride the same card.
-    try {
-      taskDeltas = await computeWebhookTaskDeltas(
-        supabase, integration, parsed.branch,
-        taskDocMatches.map((m) => ({ path: m.path, nodeId: m.nodeId })),
-      );
-    } catch (deltaErr) {
-      console.warn("[git-webhook] task delta computation failed (card still lands):", deltaErr);
-    }
-  }
-
-  // D2: ticks in BOARD.md ride the SAME card, merged into the same delta
-  // arrays (dedup — a tick may appear in both the board and a task doc).
-  // Best-effort — the card still lands.
-  if (mappedBranchName && parsed.changedFiles.some((f) => f.path === BOARD_PATH)) {
-    try {
-      const boardDeltas = await computeWebhookBoardDeltas(supabase, integration, parsed.branch);
-      if (boardDeltas) {
-        criterionDeltas = criterionDeltas
-          ? mergeCriterionDeltaResults(criterionDeltas, boardDeltas.criterionDeltas)
-          : boardDeltas.criterionDeltas;
-        taskDeltas = taskDeltas
-          ? mergeTaskDeltaResults(taskDeltas, boardDeltas.taskDeltas)
-          : boardDeltas.taskDeltas;
-      }
-    } catch (boardErr) {
-      console.warn("[git-webhook] board delta computation failed (card still lands):", boardErr);
-    }
-  }
-
-  // B3: declared new files ride the card too. Compute when the push touched
-  // the declaration file or produced residue the declarations might cover.
-  // READ-ONLY (the B2 clobber rule: only the client applies) and best-effort.
-  let bindingResolution: BindingResolution | null = null;
-  if (mappedBranchName && (parsed.changedFiles.some((f) => f.path === BINDINGS_PATH) || residuePaths.length > 0)) {
-    try {
-      bindingResolution = await computeWebhookBindingResolution(
-        supabase, integration, parsed.branch, mappedBranchName,
-      );
-    } catch (bindErr) {
-      console.warn("[git-webhook] binding resolution failed (card still lands):", bindErr);
-    }
-  }
-
-  const { error: insertError } = await supabase
-    .from("git_change_events")
-    .insert({
-      integration_id: integration.id,
-      project_id: integration.project_id,
-      commit_sha: parsed.commitSha,
-      commit_message: parsed.commitMessage,
-      author: parsed.author,
-      changed_files: parsed.changedFiles,
-      status: "pending",
-      metadata: {
-        branch: parsed.branch,
-        provider: integration.provider,
-        eventType: githubEvent || gitlabEvent,
-        fileCount: parsed.changedFiles.length,
-        artifactMatches: matchResult.matches,
-        ...(matchResult.error ? { matchError: matchResult.error } : {}),
-        modelChanged,
-        // A3: same conditional shape the sweep uses — the apply lane reads
-        // metadata.criterionDeltas identically from either producer.
-        ...(criterionDeltas && (criterionDeltas.deltas.length > 0 || criterionDeltas.flagged.length > 0)
-          ? { criterionDeltas }
-          : {}),
-        ...(taskDeltas && (taskDeltas.deltas.length > 0 || taskDeltas.flagged.length > 0)
-          ? { taskDeltas }
-          : {}),
-        ...(bindingResolution ? { bindingResolution } : {}),
-        residuePaths,
-        ...(mappedBranchName
-          ? { branchName: mappedBranchName }
-          : { unmappedRef: parsed.branch }),
-      },
-    });
-
-  if (insertError) {
-    console.error("Failed to insert change event:", insertError);
+  if (!mappedBranchName) {
     return new Response(
-      JSON.stringify({ error: "Failed to record change event" }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      JSON.stringify({ ok: true, message: `Ignored: ${pushedRef} is not bound to a NodeSpec branch`, ref: pushedRef }),
+      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
 
+  const sweep = await deps.runDriftSweep(supabase, integration.project_id, { branchName: mappedBranchName, force: true });
   return new Response(
     JSON.stringify({
       ok: true,
-      commitSha: parsed.commitSha,
-      changedFiles: parsed.changedFiles.length,
-      status: "pending",
+      branchName: mappedBranchName,
+      sweep: {
+        status: sweep.status,
+        ...(sweep.eventId ? { eventId: sweep.eventId } : {}),
+        ...(sweep.detail ? { detail: sweep.detail } : {}),
+      },
     }),
-    {
-      status: 200,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    }
+    { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
   );
 }

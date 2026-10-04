@@ -45,13 +45,12 @@ describe('the action pane appears on hover as well as selection', () => {
 
 describe('the right-click menu is fully deprecated — actions migrated, component deleted', () => {
   it('no canvas registers a context menu and the component is gone', () => {
+    // V3 P3 (R4): DecompositionCanvas retired with its view — Canvas is the
+    // one canvas left to hold the no-context-menu line.
     const canvas = ui('components/layout/Canvas.tsx');
-    const decomp = ui('components/layout/DecompositionCanvas.tsx');
-    for (const src of [canvas, decomp]) {
-      expect(src).not.toContain('ContextMenu');
-      expect(src).not.toContain('onNodeContextMenu');
-      expect(src).not.toContain('onEdgeContextMenu');
-    }
+    expect(canvas).not.toContain('ContextMenu');
+    expect(canvas).not.toContain('onNodeContextMenu');
+    expect(canvas).not.toContain('onEdgeContextMenu');
     expect(existsSync(resolve(__dirname, '../ui/components/common/ContextMenu.tsx'))).toBe(false);
     expect(ui('components/common/index.ts')).not.toContain('ContextMenu');
   });
@@ -88,10 +87,12 @@ describe('the right-click menu is fully deprecated — actions migrated, compone
     expect(handler).toContain("gate.check('node_context_export')");
   });
 
-  it('requirement deletion stays reachable through the RequirementInspector', () => {
+  it('requirement deletion survives the view retirement in the RequirementInspector', () => {
+    // V3 P3 (R4): the inspector's old host (DecompositionCanvas) retired
+    // with its view; the component and its delete lane are kept — the P4
+    // ideation board re-mounts it. Until then delete_requirement over MCP
+    // is the deletion lane.
     const inspector = ui('components/panels/RequirementInspector.tsx');
     expect(inspector).toContain('handleDelete');
-    const decomp = ui('components/layout/DecompositionCanvas.tsx');
-    expect(decomp).toContain('RequirementInspector');
   });
 });

@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import { createBranchStore } from '../ui/store/branch-store.js';
 import { buildResidueBindPatches } from '../ui/utils/git-accept.js';
-import { createEmptyGraph, generateUUID } from '@nodespec/core/utils.js';
+import { createEmptyGraph } from '@nodespec/core/utils.js';
 import type { Graph, Node, Artifact } from '@nodespec/core/types.js';
 
 const NODE_ID = '22222222-2222-4222-8222-222222222222';
@@ -51,9 +51,10 @@ describe('residue bind through the REAL store (owner bench repro)', () => {
     const [addPatch, linkPatch] = buildResidueBindPatches(node, 'docs/NOTES.md', 'hello', SHA);
     store.proposePatches([addPatch]);
     store.proposePatches([linkPatch]);
-    // Force a recompute-from-base by switching to the same patches (replay lane).
+    // Force a recompute from the base with the same patches: the autosave commit
+    // does exactly that (the saved base, the patches still in flight).
     const patches = store.getState().activeBranch.patches;
-    store.switchToBranch(generateUUID(), 'replay-check', patches);
+    store.commitSavedSnapshot(seededGraph(), patches);
     const g = store.getState().derivedGraph;
     expect(Object.values(g.artifacts)).toHaveLength(1);
     expect(g.nodes[NODE_ID].artifacts).toHaveLength(1);

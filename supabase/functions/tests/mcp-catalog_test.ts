@@ -18,7 +18,9 @@ function catalogRows(): { roles: any[]; techs: any[] } {
     ],
     techs: [
       { id: 'n8n', name: 'n8n', role_affinities: ['data-prep-pipeline'], ai_context: { summary: 'Workflow automation engine', treatmentOverride: 'boundary', configMode: 'definition-as-code' }, is_user_contributed: false },
-      { id: 'user-thing', name: 'User Thing', role_affinities: ['external-service'], ai_context: { purpose: 'Contributed by a user' }, is_user_contributed: true },
+      { id: 'user-thing', name: 'User Thing', role_affinities: ['external-service'], ai_context: { purpose: 'Contributed by a user' }, is_user_contributed: true, project_id: 'p-own' },
+      // AG.6c: another project's custom row, which this caller must never read
+      { id: 'their-thing', name: 'Their Thing', role_affinities: ['external-service'], ai_context: { purpose: 'Contributed in another project' }, is_user_contributed: true, project_id: 'p-other' },
     ],
   };
 }
@@ -32,6 +34,9 @@ function script(sb: FakeSupabase, rpcResult: any) {
     sb.script(t, 'select', { data: [], error: null });
   }
   sb.script('rpc', 'search_relevant_technologies', rpcResult);
+  // AG.6c: the caller owns p-own and holds no seat anywhere
+  sb.script('projects', 'select', { data: [{ id: 'p-own' }], error: null });
+  sb.script('project_members', 'select', { data: [], error: null });
 }
 
 Deno.test('search_catalog: read scope required; short query rejected', async () => {
@@ -88,6 +93,17 @@ Deno.test('describeNature: mirrors the client wording for the key shapes', () =>
   assertEquals(describeNature(byId['data-prep-pipeline']), 'Service you build');
 });
 
+Deno.test('AG.3: a self-hostable technology reads as one; a provider product and a SaaS read as before', () => {
+  const db = { id: 'database', label: 'Database', nature: 'build', is_container: false, container_style: null } as never;
+  const ext = { id: 'external-service', label: 'External Service', nature: 'build', is_container: false, container_style: null } as never;
+  const row = (id: string, configMode: string) => ({ id, name: id, role_affinities: ['database'], ai_context: { configMode } }) as never;
+  assertEquals(describeNature(db, row('postgresql', 'declarative')), 'Provider-managed, or operated by you if self-hosted');
+  // the unchanged provider wording, matched without restating its punctuation
+  const managed = /^Managed service\W+provider runs it, you configure it$/;
+  assert(managed.test(describeNature(db, row('aws-rds', 'declarative'))), describeNature(db, row('aws-rds', 'declarative')));
+  assert(managed.test(describeNature(ext, row('stripe', 'external'))), describeNature(ext, row('stripe', 'external')));
+});
+
 Deno.test('lookup_catalog: user-contributed technology detail is P0-7 wrapped; curated is not', async () => {
   const sb = new FakeSupabase();
   script(sb, { data: [], error: null });
@@ -103,4 +119,16 @@ Deno.test('lookup_catalog: user-contributed technology detail is P0-7 wrapped; c
   const kd = curated.data as { catalog: string; userContributed: boolean };
   assertEquals(kd.userContributed, false);
   assert(kd.catalog.includes('n8n'));
+});
+
+Deno.test('AG.6c lookup_catalog: a custom row is read only inside the caller\'s own projects', async () => {
+  const sb = new FakeSupabase();
+  script(sb, { data: [], error: null });
+  const theirs = await handleLookupCatalog(sb as never, READ, { technology_id: 'their-thing' });
+  assertEquals(theirs.success, true);
+  const td = theirs.data as { catalog: string; userContributed: boolean };
+  assertEquals(td.userContributed, false, 'another project\'s custom row is not found');
+  assert(!td.catalog.includes('Contributed in another project'), 'its purpose never reaches the caller');
+  // the caller's own projects were asked by owner and by seat
+  assertEquals(sb.callsTo('projects', 'select')[0].filters.some((f) => JSON.stringify(f).includes('user-1')), true);
 });

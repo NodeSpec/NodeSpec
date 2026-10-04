@@ -8,6 +8,7 @@ import {
   handleGetProposalStatus,
 } from '../mcp-server/tools/proposals.ts';
 import type { AuthResult } from '../mcp-server/shared.ts';
+import { OUTCOME_ON_PROJECT_NOTE, WORKFLOWS_STAY } from '../_shared/workflow-gate.ts';
 import { FakeSupabase, assert, assertEquals, completeRole } from './helpers.ts';
 
 const PROPOSE_AUTH: AuthResult = { userId: 'user-1', scopes: ['read', 'propose'], authMethod: 'api_key' };
@@ -159,11 +160,11 @@ Deno.test('propose_patches: unknown branch is rejected before writing a proposal
 // ── catalog normalization (2026-07-15): server-side, IP-safe, end-to-end ──────────────
 
 // Script the 7 catalog tables loadCatalogs reads (arrays so indexById doesn't throw).
-function scriptCatalog(sb: FakeSupabase) {
+function scriptCatalog(sb: FakeSupabase, extraTechs: Array<Record<string, unknown>> = []) {
   const roleRow = (id: string, palette_category: string, extra: Record<string, unknown> = {}) => ({
     id, label: id, description: '', icon_name: '', color: '', rf_visual_type: '', palette_category,
     kind: 'compute', is_container: false, container_layer: null, container_style: null,
-    can_contain: [], metadata_schema: {}, default_ports: [], suggested_contracts: [],
+    can_contain: [], metadata_schema: {}, suggested_contracts: [],
     sort_order: 1, capability_tags: [], default_technology: null, ...extra,
   });
   sb.script('node_roles', 'select', {
@@ -179,7 +180,7 @@ function scriptCatalog(sb: FakeSupabase) {
       display_name: null, node_shape: null, role_affinities: ['frontend-app'], ai_context: {},
       suggested_files: [], default_metadata: {}, metadata_schema: {}, common_connections: [],
       is_user_contributed: false, project_id: null, created_by: null,
-    }],
+    }, ...extraTechs],
     error: null,
   });
   sb.script('deployment_targets', 'select', { data: [], error: null });
@@ -212,16 +213,46 @@ Deno.test('propose_patches: normalizes a catalog-invalid node server-side (the l
   assertEquals(stored.technology, 'react');
   assertEquals(stored.status, 'draft');
 
-  // 2026-07-16: portless proposed nodes get default ports provisioned (edges can't render on a
-  // portless node — React Flow drops them without handles).
-  assert(Array.isArray(stored.ports) && stored.ports.length > 0, 'ports provisioned');
-  assert(stored.ports.some((p) => p.direction === 'in') && stored.ports.some((p) => p.direction === 'out'), 'in+out pair');
+  // AG.13 (owner 2026-09-28): ports came out of the model; nothing is provisioned.
+  assert(!('ports' in stored), 'no ports provisioned');
 
   // And the response reports the normalizations transparently.
   const norm = (r.data as { normalizations: Array<{ field: string; to: string }> }).normalizations;
   assert(norm.some((n) => n.field === 'type' && n.to === 'frontend-app'), 'reports the type conform');
   assert(norm.some((n) => n.field === 'technology' && n.to === 'react'), 'reports the tech conform');
-  assert(norm.some((n) => n.field === 'ports'), 'reports the port provisioning');
+  assert(!norm.some((n) => n.field === 'ports'), 'no port provisioning to report');
+});
+
+// AG.6c (2026-09-28): the server reads the catalog with the service role, so without a
+// scope a proposal could type a node from another project's custom technology.
+Deno.test('propose_patches (AG.6c): a custom technology types a node only inside its own project', async () => {
+  const sb = new FakeSupabase();
+  const custom = (id: string, project_id: string) => ({
+    id, name: id, icon_url: null, brand_color: '', secondary_color: null, display_name: null, node_shape: null,
+    role_affinities: ['frontend-app'], ai_context: {}, suggested_files: [], default_metadata: {}, metadata_schema: {},
+    common_connections: [], is_user_contributed: true, project_id, created_by: null,
+  });
+  scriptCatalog(sb, [custom('our-widget', NAMED_PROJECT.id), custom('their-widget', '99999999-9999-4999-8999-999999999999')]);
+  sb.script('projects', 'select', { data: { id: NAMED_PROJECT.id, name: NAMED_PROJECT.name }, error: null });
+  sb.script('branches', 'select', { data: { id: 'b1' }, error: null });
+  sb.script('ai_runs', 'insert', { data: null, error: null });
+  sb.script('ai_proposals', 'insert', { data: null, error: null });
+
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: 'b1',
+    patches: [
+      { type: 'add_node', payload: { id: '33333333-3333-4333-8333-333333333331', type: 'service', technology: 'our-widget', label: 'Ours' } },
+      { type: 'add_node', payload: { id: '33333333-3333-4333-8333-333333333332', type: 'service', technology: 'their-widget', label: 'Theirs' } },
+    ],
+  });
+  assertEquals(r.success, true);
+  const stored = (sb.callsTo('ai_proposals', 'insert')[0].payload as {
+    patches: Array<{ patch: { payload: { type: string } } }>;
+  }).patches.map((p) => p.patch.payload.type);
+  assertEquals(stored[0], 'frontend-app', "the project's own custom row types its node");
+  assert(stored[1] !== 'frontend-app', `another project's custom row is not read: ${stored[1]}`);
+  const norm = (r.data as { normalizations: Array<{ patchIndex: number; field: string; reason: string }> }).normalizations;
+  assert(norm.some((n) => n.patchIndex === 1 && n.field === 'technology' && n.reason.includes('not in catalog')), JSON.stringify(norm));
 });
 
 // ── get_proposal_status ──────────────────────────────────────────────────────────────
@@ -254,6 +285,49 @@ Deno.test('get_proposal_status: enforces ownership then summarizes patch statuse
   assertEquals(r.success, true);
   const summary = (r.data as { patchSummary: { total: number; pending: number; approved: number } }).patchSummary;
   assertEquals([summary.total, summary.pending, summary.approved], [2, 1, 1]);
+});
+
+Deno.test('get_proposal_status (R.2c, AC): the reviewer\'s note comes back; the ask to file it as a constraint only where the owner\'s plan carries constraints', async () => {
+  const status = async (plan: string | null) => {
+    const sb = new FakeSupabase();
+    sb.script('ai_proposals', 'select', {
+      data: { id: 'p1', source_branch_id: 'b1', branches: { project_id: 'proj-1', projects: { owner_id: 'user-1' } } },
+      error: null,
+    });
+    sb.script('ai_proposals', 'select', {
+      data: { id: 'p1', status: 'rejected', created_at: 't', reviewed_at: 't', merged_at: null, patches: [], metadata: { rejectionReason: 'We never call the database from the web app.' } },
+      error: null,
+    });
+    sb.script('stripe_subscriptions', 'select', { data: plan ? { plan_name: plan, status: 'active' } : null, error: null });
+    const r = await handleGetProposalStatus(sb as never, READ_ONLY, { proposal_id: 'p1' });
+    assertEquals(sb.callsTo('projects').length, 0, 'the owner is already known');
+    return r.data as { reviewNote?: string; reviewNoteAsk?: string };
+  };
+  const indie = await status('indie');
+  assertEquals(indie.reviewNote, 'We never call the database from the web app.');
+  assert(typeof indie.reviewNoteAsk === 'string' && indie.reviewNoteAsk.length > 0, 'the ask rides on Indie');
+  const community = await status(null);
+  assertEquals(community.reviewNote, 'We never call the database from the web app.');
+  assert(!('reviewNoteAsk' in community), 'no constraint ask below Indie');
+});
+
+// AE.12: the app's canvas rejection writes the reason into the proposal's
+// metadata (ProposalService.rejectProposal, pinned to this exact shape in
+// src/tests/ae-batch1-rulings.test.tsx); the agent reads it back here.
+Deno.test('get_proposal_status (AE.12): a rejection recorded by the app, metadata exactly as the app writes it, comes back as the reviewNote', async () => {
+  const sb = new FakeSupabase();
+  sb.script('ai_proposals', 'select', {
+    data: { id: 'p1', source_branch_id: 'b1', branches: { project_id: 'proj-1', projects: { owner_id: 'user-1' } } },
+    error: null,
+  });
+  sb.script('ai_proposals', 'select', {
+    data: { id: 'p1', status: 'rejected', created_at: 't', reviewed_at: 't', merged_at: null, patches: [],
+      metadata: { source: 'mcp-server', credential: 'key:k1', resolveNote: 'Not this way: the API keeps its own cache.', resolvedBy: 'app' } },
+    error: null,
+  });
+  sb.script('stripe_subscriptions', 'select', { data: null, error: null });
+  const r = await handleGetProposalStatus(sb as never, READ_ONLY, { proposal_id: 'p1' });
+  assertEquals((r.data as { reviewNote?: string }).reviewNote, 'Not this way: the API keeps its own cache.');
 });
 
 Deno.test('get_proposal_status: other users cannot read a proposal', async () => {
@@ -758,4 +832,455 @@ Deno.test('get_proposal_status: a PENDING row still reports raw patch statuses (
   const r = await handleGetProposalStatus(sb as never, READ_ONLY, { proposal_id: 'p2' });
   const d = r.data as { patchSummary: Record<string, number> };
   assertEquals([d.patchSummary.pending, d.patchSummary.merged], [1, 0], 'in-flight rows are untouched');
+});
+
+// ── 9.6: proposing IS the ask — the routing note names the lane, the file still lands ──
+const BRANCH_UUID = '22222222-2222-4222-8222-222222222222';
+const CONTEXT_BATCH = [
+  { type: 'update_vision', payload: { vision: 'Drafted from the README; confirm in your words.' } },
+  { type: 'upsert_workflow', payload: { name: 'Onboarding' } },
+  { type: 'upsert_workflow_step', payload: { workflowName: 'Onboarding', name: 'Sign up' } },
+  // AA.1: the outcome cites the sentence it serves, by its words (the vision rides the same batch)
+  { type: 'create_candidate', payload: { branchId: BRANCH_UUID, workflowName: 'Onboarding', name: 'New users reach the dashboard', serves: ['Drafted from the README; confirm in your words.'] } },
+];
+
+// A context proposal follows a repo import (Indie and above), and its lanes
+// are Workflows (P: Indie and above), so the fixture account is Indie. Pass
+// null for a Community account (no subscription row).
+const INDIE_ROW = { plan_name: 'indie', status: 'active' };
+function scriptContextProposal(sb: FakeSupabase, policy: Record<string, string> | null, plan: Record<string, string> | null = INDIE_ROW) {
+  if (plan) sb.script('stripe_subscriptions', 'select', { data: plan, error: null });
+  sb.script('projects', 'select', { data: { id: NAMED_PROJECT.id, name: NAMED_PROJECT.name }, error: null });
+  sb.script('branches', 'select', { data: { id: BRANCH_UUID }, error: null });
+  sb.script('projects', 'select', { data: policy ? { automation_policy: policy } : null, error: null }); // the policy read
+  sb.script('ai_runs', 'insert', { data: null, error: null });
+  sb.script('ai_proposals', 'insert', { data: null, error: null });
+}
+
+Deno.test('propose_patches (9.6): a level-0 candidates lane does NOT refuse the context proposal — it files, and routing names the lane', async () => {
+  const sb = new FakeSupabase();
+  scriptContextProposal(sb, { candidates: '0', requirements: '2' });
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: BRANCH_UUID, patches: CONTEXT_BATCH, external_agent: 'claude',
+  });
+  assertEquals(r.success, true, JSON.stringify(r));
+  const data = r.data as { patchCount: number; status: string; routing: { route: string; lane: string | null; note: string } };
+  assertEquals(data.patchCount, 4);
+  assertEquals(data.status, 'pending');
+  assertEquals(data.routing.route, 'refuse');
+  assertEquals(data.routing.lane, 'candidates');
+  assert(data.routing.note.includes('level 0') && data.routing.note.includes('still files'), data.routing.note);
+  assertEquals(sb.callsTo('ai_proposals', 'insert').length, 1, 'the proposal is written');
+});
+
+Deno.test('propose_patches (9.6, AL.6): the mixed batch reports the strictest lane at review level; at Auto a key that may only propose still waits, and says what Auto applies', async () => {
+  const sb = new FakeSupabase();
+  scriptContextProposal(sb, { candidates: '1', requirements: '2' });
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, { project_id: NAMED_PROJECT.id, branch_id: BRANCH_UUID, patches: CONTEXT_BATCH });
+  assertEquals(r.success, true, JSON.stringify(r));
+  const routing = (r.data as { routing: { route: string; lane: string | null; note: string } }).routing;
+  assertEquals(routing, { route: 'propose', lane: 'candidates', note: 'The candidates lane reviews every change; this proposal is the expected path.' });
+
+  const auto = new FakeSupabase();
+  scriptContextProposal(auto, { candidates: '2', requirements: '2' });
+  const a = await handleProposePatches(auto as never, PROPOSE_AUTH, { project_id: NAMED_PROJECT.id, branch_id: BRANCH_UUID, patches: CONTEXT_BATCH });
+  assertEquals(a.success, true, JSON.stringify(a));
+  const ar = (a.data as { routing: { route: string; note: string } }).routing;
+  assertEquals(ar.route, 'apply');
+  assert(ar.note.startsWith('Every lane this batch touches is at Auto, but this proposal waits for review'), ar.note);
+  assertEquals((a.data as { status: string }).status, 'pending', 'a key with no write scope never applies');
+  assertEquals(auto.callsTo('ai_proposals', 'update').length, 0, 'nothing was claimed or applied');
+});
+
+Deno.test('propose_patches (9.6): with no policy row the shipped defaults route — a graph op reports the architecture lane at propose', async () => {
+  const sb = new FakeSupabase();
+  scriptContextProposal(sb, null);
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, { project_id: NAMED_PROJECT.id, branch_id: BRANCH_UUID, patches: [addNodePatch()] });
+  assertEquals(r.success, true, JSON.stringify(r));
+  const routing = (r.data as { routing: { route: string; lane: string | null } }).routing;
+  assertEquals(routing.route, 'propose');
+  assertEquals(routing.lane, 'architecture');
+});
+
+// ── P (2026-09-22): Workflows are Indie and above, at the propose door ───────
+// The agent hears at propose, not when the user accepts: a lane-shaping op
+// refuses the whole batch by name (never half-filed); an outcome that names
+// a workflow still files, with a warning saying it lands on the project.
+
+Deno.test('propose_patches (P): on Community a lane-shaping op refuses the whole batch by name, says what stays, and creates nothing', async () => {
+  const sb = new FakeSupabase();
+  scriptContextProposal(sb, null, null);
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, { project_id: NAMED_PROJECT.id, branch_id: BRANCH_UUID, patches: CONTEXT_BATCH });
+  assertEquals(r.success, false, JSON.stringify(r));
+  const err = String(r.error);
+  assert(err.startsWith('Shaping a workflow (patch[1] upsert_workflow, patch[2] upsert_workflow_step) is available on Indie and above; this account resolves to the Community tier.'), err);
+  assert(err.includes(WORKFLOWS_STAY), err);
+  assert(err.endsWith('Nothing was created.'), err);
+  assertEquals(sb.callsTo('ai_runs', 'insert').length, 0);
+  assertEquals(sb.callsTo('ai_proposals', 'insert').length, 0, 'no proposal the user would later have to decline');
+});
+
+Deno.test('propose_patches (P): place_on_step is refused on Community, named as the intent the agent sent', async () => {
+  const sb = new FakeSupabase();
+  scriptContextProposal(sb, null, null);
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: BRANCH_UUID,
+    intents: [{ kind: 'place_on_step', candidateId: crypto.randomUUID(), stepIds: [crypto.randomUUID()] }],
+  });
+  assertEquals(r.success, false, JSON.stringify(r));
+  assert(String(r.error).startsWith('Shaping a workflow (intent[0] place_on_step) is available on Indie and above'), String(r.error));
+  assertEquals(sb.callsTo('ai_proposals', 'insert').length, 0);
+});
+
+Deno.test('propose_patches (P): on Community an outcome that names a workflow still files, and the warning says where it lands', async () => {
+  const sb = new FakeSupabase();
+  scriptContextProposal(sb, null, null);
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: BRANCH_UUID,
+    patches: [{ type: 'create_candidate', payload: { branchId: BRANCH_UUID, workflowName: 'Onboarding', name: 'New users reach the dashboard' } }],
+  });
+  assertEquals(r.success, true, JSON.stringify(r));
+  const warnings = (r.data as { warnings?: string[] }).warnings ?? [];
+  assertEquals(warnings, [
+    `patch[0] create_candidate: ${OUTCOME_ON_PROJECT_NOTE('Onboarding')}`,
+    // AA.1: it cites no vision sentence, so it files with that note too
+    `patch[0] create_candidate: ${OFF_VISION_NOTE}`,
+  ]);
+  assertEquals(sb.callsTo('ai_proposals', 'insert').length, 1, 'the outcome files: outcomes are open on every plan');
+});
+
+Deno.test('propose_patches (P): Indie files the same context batch with no warning, and a batch that shapes no workflow reads no tier', async () => {
+  const sb = new FakeSupabase();
+  scriptContextProposal(sb, null);
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, { project_id: NAMED_PROJECT.id, branch_id: BRANCH_UUID, patches: CONTEXT_BATCH });
+  assertEquals(r.success, true, JSON.stringify(r));
+  assertEquals((r.data as { warnings?: string[] }).warnings, undefined);
+
+  const plain = new FakeSupabase();
+  scriptContextProposal(plain, null, null);
+  const g = await handleProposePatches(plain as never, PROPOSE_AUTH, { project_id: NAMED_PROJECT.id, branch_id: BRANCH_UUID, patches: [addNodePatch()] });
+  assertEquals(g.success, true, JSON.stringify(g));
+  assertEquals(plain.callsTo('stripe_subscriptions').length, 0, 'the gate costs nothing when nothing touches a workflow');
+});
+
+// ── Batch referential validation (production incident 2026-09-18) ─────────────
+//
+// 'OpenMed Import': an explode of a container node proposed 7 remove_edge
+// patches retiring the old container's edges and 7 add_edge patches replacing
+// them against the new children. Every add_edge carried a contractId — two
+// distinct ids across all seven — that no add_contract patch ever created.
+// PatchOperationSchema only asks that contractId be a uuid, so the batch was
+// accepted. At approve time the engine raised CONTRACT_NOT_FOUND, the removes
+// applied, the adds were discarded under a drop tolerance, and the user was
+// told the approval succeeded. The canvas lost 7 edges; all 14 patches stayed
+// in graph_patches. These pin the refusal at submission.
+import { findBatchReferenceGaps, describeBatchReferenceGaps } from '../mcp-server/tools/proposals.ts';
+import { OFF_VISION_NOTE } from '../_shared/chain.ts';
+
+const NODE_A = 'a879d17a-9ee5-43d5-a5d3-c498afc96873';
+const NODE_B = '3c64b02e-610d-487a-8894-c372e4bde6cc';
+const GHOST_CONTRACT = '1dd5ee27-c8fe-4e75-8ad8-51ede6daaea5';
+const REAL_CONTRACT = 'ee3657d8-a5d1-4243-8752-ce893480fa49';
+
+function addEdge(contractId: string, source = NODE_A, target = NODE_B) {
+  return {
+    type: 'add_edge',
+    payload: { id: 'aaa10001-0001-4001-a001-000000000001', label: 'imports core types', source, target, contractId },
+  };
+}
+function addContract(id: string) {
+  return { type: 'add_contract', payload: { id, kind: 'dependency', name: 'Internal Python Imports', status: 'draft' } };
+}
+const BRANCH_IDS = { nodes: [NODE_A, NODE_B], contracts: [REAL_CONTRACT] };
+
+Deno.test('batch references: the OpenMed shape — an edge against a contract nothing creates is a gap', () => {
+  const gaps = findBatchReferenceGaps([addEdge(GHOST_CONTRACT)], BRANCH_IDS);
+  assertEquals(gaps.length, 1);
+  assertEquals(gaps[0].entity, 'contract');
+  assertEquals(gaps[0].field, 'contractId');
+  assertEquals(gaps[0].missingId, GHOST_CONTRACT);
+  const msg = describeBatchReferenceGaps(gaps);
+  assert(msg.includes(GHOST_CONTRACT), 'the message names the missing id');
+  assert(msg.includes('add_contract'), 'the message names the fix');
+});
+
+Deno.test('batch references: a contract already on the branch resolves', () => {
+  assertEquals(findBatchReferenceGaps([addEdge(REAL_CONTRACT)], BRANCH_IDS).length, 0);
+});
+
+Deno.test('batch references: a contract created ANYWHERE in the batch resolves — order does not matter', () => {
+  // applyPatches sorts by dependency phase (add_contract at 10, edges later),
+  // so a contract declared after the edge that uses it still lands first.
+  assertEquals(findBatchReferenceGaps([addEdge(GHOST_CONTRACT), addContract(GHOST_CONTRACT)], BRANCH_IDS).length, 0);
+  assertEquals(findBatchReferenceGaps([addContract(GHOST_CONTRACT), addEdge(GHOST_CONTRACT)], BRANCH_IDS).length, 0);
+});
+
+Deno.test('batch references: unknown source and target nodes are named too', () => {
+  const ghostNode = '99999999-9999-4999-8999-999999999999';
+  const gaps = findBatchReferenceGaps([addEdge(REAL_CONTRACT, ghostNode, ghostNode)], BRANCH_IDS);
+  assertEquals(gaps.length, 2);
+  assertEquals(gaps.map((g) => g.field).sort(), ['source', 'target']);
+  assertEquals(gaps.every((g) => g.entity === 'node'), true);
+});
+
+Deno.test('batch references: a contract removed earlier in the batch no longer resolves', () => {
+  const gaps = findBatchReferenceGaps(
+    [{ type: 'remove_contract', payload: { id: REAL_CONTRACT } }, addEdge(REAL_CONTRACT)],
+    BRANCH_IDS,
+  );
+  assertEquals(gaps.length, 1);
+  assertEquals(gaps[0].missingId, REAL_CONTRACT);
+});
+
+Deno.test('batch references: an add_node in the batch satisfies an edge endpoint', () => {
+  const fresh = '44444444-4444-4444-4444-444444444444';
+  const gaps = findBatchReferenceGaps(
+    [{ type: 'add_node', payload: { id: fresh, type: 'backend-service', label: 'API Service' } }, addEdge(REAL_CONTRACT, NODE_A, fresh)],
+    BRANCH_IDS,
+  );
+  assertEquals(gaps.length, 0);
+});
+
+Deno.test('propose_patches: refuses the OpenMed batch and creates nothing', async () => {
+  const sb = new FakeSupabase();
+  sb.script('projects', 'select', { data: { id: NAMED_PROJECT.id, name: NAMED_PROJECT.name }, error: null });
+  sb.script('branches', 'select', { data: { id: 'b1' }, error: null });
+  sb.script('rpc', 'graph_reference_ids', { data: { found: true, nodes: BRANCH_IDS.nodes, contracts: BRANCH_IDS.contracts }, error: null });
+
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: 'b1',
+    patches: [{ type: 'remove_edge', payload: { id: 'b163709f-1786-4512-8020-bc269a65b970' } }, addEdge(GHOST_CONTRACT)],
+    external_agent: 'claude',
+  });
+
+  assertEquals(r.success, false);
+  assert((r.error ?? '').includes(GHOST_CONTRACT), `error names the missing contract: ${r.error}`);
+  assert((r.error ?? '').includes('patch[1]'), 'error names the offending index');
+  assertEquals(sb.callsTo('ai_proposals', 'insert').length, 0, 'no proposal was created');
+  assertEquals(sb.callsTo('ai_runs', 'insert').length, 0, 'no ai_run was created');
+});
+
+Deno.test('propose_patches: the same batch WITH its add_contract is accepted', async () => {
+  const sb = new FakeSupabase();
+  sb.script('projects', 'select', { data: { id: NAMED_PROJECT.id, name: NAMED_PROJECT.name }, error: null });
+  sb.script('branches', 'select', { data: { id: 'b1' }, error: null });
+  sb.script('rpc', 'graph_reference_ids', { data: { found: true, nodes: BRANCH_IDS.nodes, contracts: BRANCH_IDS.contracts }, error: null });
+  sb.script('ai_runs', 'insert', { data: null, error: null });
+  sb.script('ai_proposals', 'insert', { data: null, error: null });
+
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: 'b1',
+    patches: [addContract(GHOST_CONTRACT), addEdge(GHOST_CONTRACT)],
+    external_agent: 'claude',
+  });
+
+  assertEquals(r.success, true, `expected acceptance, got: ${r.error}`);
+  assertEquals(sb.callsTo('ai_proposals', 'insert').length, 1);
+});
+
+Deno.test('propose_patches: a stack without the migration fails loudly, never silently unvalidated', async () => {
+  const sb = new FakeSupabase();
+  sb.script('projects', 'select', { data: { id: NAMED_PROJECT.id, name: NAMED_PROJECT.name }, error: null });
+  sb.script('branches', 'select', { data: { id: 'b1' }, error: null });
+  sb.script('rpc', 'graph_reference_ids', { data: null, error: { message: 'Could not find the function public.graph_reference_ids' } });
+
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: 'b1',
+    patches: [addEdge(GHOST_CONTRACT)],
+    external_agent: 'claude',
+  });
+
+  assertEquals(r.success, false);
+  assert((r.error ?? '').includes('20260919100000'), `error names the migration: ${r.error}`);
+  assertEquals(sb.callsTo('ai_proposals', 'insert').length, 0);
+});
+
+// ── V3 2.1 (2026-09-19): base_sequence, checked at propose ────────────────────
+// The agent says which head it read; a batch whose targets a later patch
+// changed is refused before anything is created, naming the patch and the
+// change. Optional: without it the proposal files as before.
+const NODE_ON_BRANCH = '22222222-2222-4222-8222-222222222222';
+const OTHER_NODE = '99999999-9999-4999-8999-999999999999';
+function updateNodePatch(id: string) {
+  return { type: 'update_node', payload: { id, changes: { label: 'Renamed' } } };
+}
+function laterRow(sequence: number, id: string, actor = 'human', summary = 'renamed to Cache') {
+  return { sequence, patch_type: 'update_node', actor_type: actor, summary, payload: { type: 'update_node', payload: { id, changes: {} } } };
+}
+function scriptHappyPath(sb: FakeSupabase) {
+  sb.script('projects', 'select', { data: { id: NAMED_PROJECT.id, name: NAMED_PROJECT.name }, error: null });
+  sb.script('branches', 'select', { data: { id: 'b1' }, error: null });
+  sb.script('rpc', 'graph_reference_ids', { data: { found: true, nodes: [NODE_ON_BRANCH, OTHER_NODE], contracts: [] }, error: null });
+}
+
+Deno.test('propose_patches: base_sequence is stored on the proposal and the current head is echoed', async () => {
+  const sb = new FakeSupabase();
+  scriptHappyPath(sb);
+  sb.script('graph_patches', 'select', { data: [laterRow(6, OTHER_NODE, 'human', 'added a cache')], error: null });
+  sb.script('ai_runs', 'insert', { data: null, error: null });
+  sb.script('ai_proposals', 'insert', { data: null, error: null });
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: 'b1', patches: [updateNodePatch(NODE_ON_BRANCH)], external_agent: 'claude', base_sequence: 5,
+  });
+  assertEquals(r.success, true, `expected acceptance, got: ${r.error}`);
+  const data = r.data as { baseSequence?: number; headSequence?: number };
+  assertEquals(data.baseSequence, 5);
+  assertEquals(data.headSequence, 6, 'the head is the last later patch');
+  const inserted = sb.callsTo('ai_proposals', 'insert')[0].payload as { metadata: { baseSequence?: number } };
+  assertEquals(inserted.metadata.baseSequence, 5, 'the read rides the row so the accept can check it again');
+});
+
+Deno.test('propose_patches: a stale base_sequence is refused before anything is created, naming the patch and the change', async () => {
+  const sb = new FakeSupabase();
+  scriptHappyPath(sb);
+  sb.script('graph_patches', 'select', { data: [laterRow(7, NODE_ON_BRANCH, 'human', 'renamed to Cache')], error: null });
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: 'b1', patches: [updateNodePatch(NODE_ON_BRANCH)], external_agent: 'claude', base_sequence: 5,
+  });
+  assertEquals(r.success, false);
+  const e = r.error ?? '';
+  assert(e.includes('Stale read'), e);
+  assert(e.includes(NODE_ON_BRANCH), 'names the id both sides touch');
+  assert(e.includes('sequence 7') && e.includes('the user') && e.includes('renamed to Cache'), 'names the later change and who made it');
+  assert(e.includes('since_sequence: 5'), 'tells the agent how to re-read');
+  assertEquals(sb.callsTo('ai_proposals', 'insert').length, 0, 'nothing created');
+  assertEquals(sb.callsTo('ai_runs', 'insert').length, 0, 'no run minted');
+});
+
+Deno.test('propose_patches: base_sequence must be a non-negative integer; without it the head is read once and recorded as the base (AL.8)', async () => {
+  const sb = new FakeSupabase();
+  scriptHappyPath(sb);
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: 'b1', patches: [updateNodePatch(NODE_ON_BRANCH)], external_agent: 'claude', base_sequence: -1,
+  });
+  assertEquals(r.success, false);
+  assert((r.error ?? '').includes('non-negative integer'), r.error);
+  assertEquals(sb.callsTo('graph_patches', 'select').length, 0);
+
+  const sb2 = new FakeSupabase();
+  scriptHappyPath(sb2);
+  sb2.script('graph_patches', 'select', { data: { sequence: 12 }, error: null });
+  sb2.script('ai_runs', 'insert', { data: null, error: null });
+  sb2.script('ai_proposals', 'insert', { data: null, error: null });
+  const r2 = await handleProposePatches(sb2 as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: 'b1', patches: [updateNodePatch(NODE_ON_BRANCH)], external_agent: 'claude',
+  });
+  assertEquals(r2.success, true, r2.error);
+  assertEquals(sb2.callsTo('graph_patches', 'select').length, 1, 'the head, once');
+  // the accept compares against what landed after the head this was built on
+  assertEquals((sb2.callsTo('ai_proposals', 'insert')[0].payload as { metadata: { baseSequence?: unknown } }).metadata.baseSequence, 12);
+  assertEquals('headSequence' in (r2.data as Record<string, unknown>), false);
+});
+
+Deno.test('get_proposal_status: echoes the read the proposal was built on and what the accept found had moved', async () => {
+  const sb = new FakeSupabase();
+  sb.script('ai_proposals', 'select', { data: { id: 'p1', source_branch_id: 'b1', branches: { project_id: NAMED_PROJECT.id, projects: { owner_id: 'user-1' } } }, error: null });
+  sb.script('ai_proposals', 'select', {
+    data: {
+      id: 'p1', status: 'pending',
+      patches: [{ patch: updateNodePatch(NODE_ON_BRANCH), explanation: 'rename', status: 'conflicted', conflictReason: 'patch[0] update_node targets the node, which the user changed at sequence 9 with update_node.' }],
+      metadata: { baseSequence: 5, conflicts: [{ index: 0, targetId: NODE_ON_BRANCH, laterSequence: 9 }], headSequence: 9 },
+      created_at: '2026-09-19T10:00:00Z', reviewed_at: null, merged_at: null,
+    },
+    error: null,
+  });
+  const r = await handleGetProposalStatus(sb as never, READ_ONLY, { proposal_id: 'p1' });
+  assertEquals(r.success, true, r.error);
+  const d = r.data as { baseSequence: number | null; conflicts?: unknown[]; patchSummary: { conflicted: number } };
+  assertEquals(d.baseSequence, 5);
+  assertEquals(d.patchSummary.conflicted, 1, 'the accept path is the first writer of conflicted; this tool counts it');
+  assertEquals((d.conflicts ?? []).length, 1);
+});
+
+// ── V3 2.4 (2026-09-19): a locked node refuses where the proposal is filed ──
+Deno.test('propose_patches: a batch that changes a locked node is refused whole, naming the patch and the node', async () => {
+  const sb = new FakeSupabase();
+  scriptHappyPath(sb);
+  sb.script('project_specifications', 'select', { data: { locked_nodes: [NODE_ON_BRANCH] }, error: null });
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: 'b1',
+    patches: [updateNodePatch(OTHER_NODE), updateNodePatch(NODE_ON_BRANCH)],
+    external_agent: 'claude',
+  });
+  assertEquals(r.success, false);
+  const e = r.error ?? '';
+  assert(e.includes('Locked node'), e);
+  assert(e.includes(`patch[1] update_node targets node ${NODE_ON_BRANCH}`), e);
+  assert(e.includes('No tool unlocks'), e);
+  assertEquals(sb.callsTo('ai_proposals', 'insert').length, 0, 'nothing created, not even the open patch');
+});
+
+Deno.test('propose_patches: an edge TO a locked node is allowed (the lock protects the node, not its neighbourhood)', async () => {
+  const sb = new FakeSupabase();
+  scriptHappyPath(sb);
+  sb.script('project_specifications', 'select', { data: { locked_nodes: [NODE_ON_BRANCH] }, error: null });
+  sb.script('ai_runs', 'insert', { data: null, error: null });
+  sb.script('ai_proposals', 'insert', { data: null, error: null });
+  const contract = '88888888-8888-4888-8888-888888888888';
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: 'b1',
+    patches: [
+      { type: 'add_contract', payload: { id: contract, kind: 'rest', name: 'Cache API' } },
+      { type: 'add_edge', payload: { id: '77777777-7777-4777-8777-777777777777', source: OTHER_NODE, target: NODE_ON_BRANCH, contractId: contract } },
+    ],
+    external_agent: 'claude',
+  });
+  assertEquals(r.success, true, r.error);
+  assertEquals(sb.callsTo('ai_proposals', 'insert').length, 1);
+});
+
+// ── V3 3.1 (2026-09-19): intents inside propose_patches ──────────────────────
+Deno.test('propose_patches: intents compile to patches that join the batch first, pass the same validation, and are recorded on the proposal', async () => {
+  const sb = new FakeSupabase();
+  scriptHappyPath(sb);
+  sb.script('ai_runs', 'insert', { data: null, error: null });
+  sb.script('ai_proposals', 'insert', { data: null, error: null });
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: 'b1', external_agent: 'claude-code',
+    intents: [
+      { kind: 'add_node', label: 'Cache', type: 'cache', technology: 'redis' },
+    ],
+    patches: [updateNodePatch(NODE_ON_BRANCH)],
+    explanations: ['rename the API'],
+  });
+  assertEquals(r.success, true, `expected acceptance, got: ${r.error}`);
+  // deno-lint-ignore no-explicit-any
+  const data = r.data as any;
+  assertEquals(data.patchCount, 2, 'one compiled patch plus the agent\'s own');
+  assertEquals(data.compiled.intents, 1);
+  assertEquals(data.compiled.patches, 1);
+  assert(typeof data.compiled.ids[0].nodeId === 'string', 'the minted node id is named back');
+  // deno-lint-ignore no-explicit-any
+  const inserted = sb.callsTo('ai_proposals', 'insert')[0].payload as any;
+  assertEquals(inserted.patches.length, 2);
+  assertEquals(inserted.patches[0].patch.type, 'add_node');
+  assertEquals(inserted.patches[0].patch.payload.label, 'Cache');
+  assertEquals(inserted.patches[0].explanation, 'Add node "Cache"');
+  assertEquals(inserted.patches[1].explanation, 'rename the API', 'the agent\'s own explanations still line up with its own patches');
+  assertEquals(inserted.metadata.intents, [{ kind: 'add_node', summary: 'add a node "Cache" (cache, redis)', ids: { nodeId: data.compiled.ids[0].nodeId } }]);
+  // the project is resolved once for the compile and reused below; the routing block's policy read and
+  // the constraints' owner read (AC: are they carried?) are the other projects selects
+  assertEquals(sb.callsTo('projects', 'select').length, 3);
+});
+
+Deno.test('propose_patches: an intent that fails to compile, or compiles to an invalid patch, refuses naming the intent; nothing is created', async () => {
+  const sb = new FakeSupabase();
+  scriptHappyPath(sb);
+  const r = await handleProposePatches(sb as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: 'b1', external_agent: 'claude',
+    intents: [{ kind: 'connect_nodes', source: NODE_ON_BRANCH, target: NODE_ON_BRANCH, contract: { kind: 'rest', name: 'x' } }],
+  });
+  assertEquals(r.success, false);
+  assert((r.error ?? '').startsWith('intent[0] (connect_nodes): source and target must differ'), r.error);
+  assertEquals(sb.callsTo('ai_proposals', 'insert').length, 0);
+
+  const sb2 = new FakeSupabase();
+  scriptHappyPath(sb2);
+  const r2 = await handleProposePatches(sb2 as never, PROPOSE_AUTH, {
+    project_id: NAMED_PROJECT.id, branch_id: 'b1', external_agent: 'claude',
+    intents: [{ kind: 'connect_nodes', source: OTHER_NODE, target: NODE_ON_BRANCH, contract: { kind: 'telepathy', name: 'x' } }],
+  });
+  assertEquals(r2.success, false);
+  assert((r2.error ?? '').includes('intent[0] (connect_nodes) compiled patch[0]'), r2.error);
+  assertEquals(sb2.callsTo('ai_proposals', 'insert').length, 0);
 });

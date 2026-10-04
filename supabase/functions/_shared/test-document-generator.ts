@@ -13,7 +13,6 @@ interface GraphNode {
   type: string;
   technology?: string;
   parentId?: string;
-  ports?: Array<{ name?: string; direction: "in" | "out"; contractId?: string }>;
   metadata?: {
     rationale?: string;
     domainMetadata?: unknown;

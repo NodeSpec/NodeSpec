@@ -3,7 +3,7 @@ import type { Graph, PatchOperation, ArtifactKind } from '@nodespec/core/types';
 import type { GraphValidationResult, GraphValidationIssue, QuickFixAction } from '@nodespec/core/validation/types';
 import { validationEngine } from '@nodespec/core/validation/engine';
 import { useTheme } from '../../theme/ThemeContext';
-import { createPatchMetadata, createAddArtifactPatch, createAddPortPatch, createUpdateArtifactPatch } from '@nodespec/core/patch-factory';
+import { createPatchMetadata, createAddArtifactPatch, createUpdateArtifactPatch } from '@nodespec/core/patch-factory';
 import { buildUpdateNodePatch } from '../../builders/patchBuilders';
 import { generateUUID, computeContentHash, now } from '@nodespec/core/utils';
 import { computeConfigFingerprint } from '@nodespec/core/configuration-fingerprint';
@@ -121,28 +121,6 @@ export function ValidationPanel({
           break;
         }
 
-        case 'add_port': {
-          const directionLabel = action.direction === 'in' ? 'Input' : 'Output';
-          const newPort = {
-            id: generateUUID(),
-            name: `${action.contractKind.toUpperCase()} ${directionLabel}`,
-            direction: action.direction,
-            required: false,
-          };
-
-          const patch = createAddPortPatch(
-            action.nodeId,
-            newPort,
-            {
-              actorType: 'human',
-              summary: `Add ${action.direction}put port for ${action.contractKind}`,
-            }
-          );
-
-          onPatchGenerated(patch);
-          break;
-        }
-
         case 'update_contract': {
           const patch: PatchOperation = {
             type: 'update_contract',
@@ -161,29 +139,6 @@ export function ValidationPanel({
 
         case 'run_ai_validation': {
           console.log('AI validation requested for node:', action.nodeId);
-          break;
-        }
-
-        case 'reconcile_ports': {
-          for (const sp of action.suggestedPorts) {
-            const newPort = {
-              id: generateUUID(),
-              name: sp.name,
-              direction: sp.direction,
-              required: sp.required ?? false,
-            };
-
-            const patch = createAddPortPatch(
-              action.nodeId,
-              newPort,
-              {
-                actorType: 'human',
-                summary: `Add missing ${sp.direction}put port "${sp.name}"`,
-              }
-            );
-
-            onPatchGenerated(patch);
-          }
           break;
         }
 
@@ -353,7 +308,7 @@ export function ValidationPanel({
         <div style={{ fontWeight: 500, color: c.text, marginBottom: '3px' }}>
           🔍 What is Validation?
         </div>
-        Validation checks ensure your components work together correctly. Issues indicate missing schemas, disconnected connection points, or architectural mismatches. Use quick-fix actions to resolve them.
+        Validation checks ensure your components work together correctly. Issues indicate missing schemas or architectural mismatches. Use quick-fix actions to resolve them.
       </div>
 
       <div style={{ overflowY: 'auto', flex: 1 }}>

@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import { Handle, Position } from '@xyflow/react';
+import { LeafHandles } from './LeafHandles.js';
 import type { RFNodeData } from '../../adapters/graph-to-reactflow.js';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { Code2 } from 'lucide-react';
@@ -113,23 +113,9 @@ function ArchitectureExplanationNodeComponent({ data, selected, highlighted }: A
     border: `2px solid ${accentColor}`,
   };
 
-  const inputPorts = data.ports?.filter(p => p.direction === 'in') || [];
-  const outputPorts = data.ports?.filter(p => p.direction === 'out') || [];
-
   return (
     <div style={containerStyles} onClick={onClick}>
-      {inputPorts.map((_, index) => (
-        <Handle
-          key={`in-${index}`}
-          type="target"
-          position={Position.Left}
-          id={`in-${index}`}
-          style={{
-            ...handleStyles,
-            top: `${((index + 1) * 100) / (inputPorts.length + 1)}%`,
-          }}
-        />
-      ))}
+      <LeafHandles style={handleStyles} source={false} />
 
       <div style={headerStyles}>
         <div style={iconStyles}>
@@ -215,18 +201,7 @@ function ArchitectureExplanationNodeComponent({ data, selected, highlighted }: A
         )}
       </div>
 
-      {outputPorts.map((_, index) => (
-        <Handle
-          key={`out-${index}`}
-          type="source"
-          position={Position.Right}
-          id={`out-${index}`}
-          style={{
-            ...handleStyles,
-            top: `${((index + 1) * 100) / (outputPorts.length + 1)}%`,
-          }}
-        />
-      ))}
+      <LeafHandles style={handleStyles} target={false} />
     </div>
   );
 }

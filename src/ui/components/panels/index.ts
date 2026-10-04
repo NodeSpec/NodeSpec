@@ -5,7 +5,7 @@ export { ValidationPanel } from './ValidationPanel.js';
 export { AccountPanel } from './AccountPanel.js';
 export { SimplifiedInspector } from './SimplifiedInspector.js';
 export { ProjectExplorer } from './ProjectExplorer.js';
-export { BranchManager } from './BranchManager.js';
+export { BranchChip } from './BranchChip.js';
 export { GitIntegrationModal } from './GitIntegrationModal.js';
 export { RepoExplorer } from './RepoExplorer.js';
 export { FigmaIntegration } from './FigmaIntegration.js';
@@ -15,6 +15,6 @@ export { ManualRequirementForm } from './ManualRequirementForm.js';
 // and cut the same day and never removed (~3,900 lines). Do not re-add.
 export { RequirementInspector } from './RequirementInspector.js';
 export { TestInspector } from './TestInspector.js';
-export { ProjectOnboardingWizard } from './ProjectOnboardingWizard.js';
-export type { OnboardingResult, WorkflowOrigin } from './ProjectOnboardingWizard.js';
+export { ProjectCreatePopup, validateProjectName } from './ProjectCreatePopup.js';
+export type { ProjectCreateResult, WorkflowOrigin } from './ProjectCreatePopup.js';
 export { NodeSidepane } from './NodeSidepane.js';

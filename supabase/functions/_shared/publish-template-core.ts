@@ -125,7 +125,9 @@ export function validatePublishFields(input: Record<string, unknown>): {
  * (id, nodeId, kind, path, language, type, timestamps, status, description,
  * generatedBy) and lose content, contentHash, contentUrl, uri,
  * sourceProvenance, and free-form metadata. graph.sourceContext (repo-import
- * context: file lists, repo URLs) is dropped entirely.
+ * context: file lists, repo URLs) is dropped entirely. AG.13 (owner
+ * 2026-09-28): nodes lose their ports and edges their port ids; ports are not
+ * part of the model, so a published template carries none.
  *
  * Returns a new object; the input is not mutated.
  */
@@ -134,6 +136,23 @@ export function sanitizeGraphForPublish(
 ): Record<string, unknown> {
   const sanitized: Record<string, unknown> = { ...graph };
   delete sanitized.sourceContext;
+
+  const nodes = graph.nodes as Record<string, Record<string, unknown>> | undefined;
+  if (nodes && typeof nodes === "object") {
+    sanitized.nodes = Object.fromEntries(Object.entries(nodes).map(([key, node]) => {
+      if (!node || typeof node !== "object") return [key, node];
+      const { ports: _ports, ...kept } = node;
+      return [key, kept];
+    }));
+  }
+  const edges = graph.edges as Record<string, Record<string, unknown>> | undefined;
+  if (edges && typeof edges === "object") {
+    sanitized.edges = Object.fromEntries(Object.entries(edges).map(([key, edge]) => {
+      if (!edge || typeof edge !== "object") return [key, edge];
+      const { sourcePortId: _s, targetPortId: _t, ...kept } = edge;
+      return [key, kept];
+    }));
+  }
 
   const artifacts = graph.artifacts as Record<string, Record<string, unknown>> | undefined;
   if (artifacts && typeof artifacts === "object") {

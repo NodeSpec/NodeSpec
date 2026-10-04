@@ -142,6 +142,7 @@ function createMockPersistence(templateRepo: TemplateRepository): PersistenceSer
     })),
     getById: vi.fn(),
     listByOwner: vi.fn(),
+    listForUser: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
   };
@@ -411,17 +412,14 @@ describe('TemplateService', () => {
       expect(g.nodes[edge.target]).toBeDefined();
       expect(g.contracts[edge.contractId]).toBeDefined();
 
-      if (edge.sourcePortId) {
-        const sourceNode = g.nodes[edge.source];
-        const port = sourceNode.ports?.find(p => p.id === edge.sourcePortId);
-        expect(port).toBeDefined();
-      }
-
-      if (edge.targetPortId) {
-        const targetNode = g.nodes[edge.target];
-        const port = targetNode.ports?.find(p => p.id === edge.targetPortId);
-        expect(port).toBeDefined();
-      }
+      // AG.13: a new project carries no ports. The template's stored ports
+      // and edge port ids stay behind; the edge still joins the same nodes.
+      expect(edge).not.toHaveProperty('sourcePortId');
+      expect(edge).not.toHaveProperty('targetPortId');
+      for (const node of Object.values(g.nodes)) expect(node).not.toHaveProperty('ports');
+      expect(g.nodes[edge.source].label).toBe('API Service');
+      expect(g.nodes[edge.target].label).toBe('PostgreSQL');
+      expect(g.contracts[edge.contractId].name).toBe('DB Connection');
 
       const artifact = Object.values(g.artifacts)[0];
       expect(g.nodes[artifact.nodeId]).toBeDefined();
@@ -432,6 +430,25 @@ describe('TemplateService', () => {
           expect(g.artifacts[artId]).toBeDefined();
         }
       }
+    });
+
+    it('leaves behind a contract no edge uses (the stub a port held)', async () => {
+      const graphData = createTestGraph();
+      const stubId = generateUUID();
+      graphData.contracts[stubId] = { id: stubId, kind: 'rest', name: 'Stub on a port', metadata: {} } as Contract;
+      const template = createTestTemplate({ graphData });
+      vi.mocked(templateRepo.getById).mockResolvedValue(ok(template));
+      vi.mocked(templateRepo.recordUsage).mockResolvedValue(ok({
+        id: 'usage-1',
+        templateId: template.id,
+        userId: 'user-1',
+        projectId: 'new-project-id',
+        createdAt: new Date().toISOString(),
+      }));
+
+      const g = (await service.useTemplate(template.id, 'Stubs', 'user-1')).project.graph;
+
+      expect(Object.values(g.contracts).map(c => c.name)).toEqual(['DB Connection']);
     });
 
     it('preserves node groups with remapped node IDs', async () => {

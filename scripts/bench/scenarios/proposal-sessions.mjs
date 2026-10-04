@@ -4,13 +4,9 @@
 //   which lists 'pending' only) → proposal_id appends across calls →
 //   finalize:true promotes everything to ONE pending proposal → a second
 //   finalize is refused. No repo needed — proposals are DB-only.
-import { rest, mcpCall, uid, Scenario } from '../lib.mjs';
+import { rest, mcpCall, uid, Scenario, parseMcp } from '../lib.mjs';
 import { createProject } from '../fixtures.mjs';
 
-const parseMcp = (r) => {
-  const text = r.data?.result?.content?.[0]?.text;
-  try { return JSON.parse(text); } catch { return { raw: text, isError: r.data?.result?.isError }; }
-};
 
 export const proposalSessions = {
   name: 'proposal-sessions',

@@ -1,5 +1,8 @@
 import type { Graph, PatchOperation, ActorType } from '@nodespec/core/types.js';
 
+/** V3 7.0: the caller's seat on a project — owner is projects.owner_id, the rest the roster. */
+export type ProjectRole = 'owner' | 'maintainer' | 'contributor' | 'viewer';
+
 export interface Project {
   id: string;
   name: string;
@@ -7,6 +10,8 @@ export interface Project {
   createdAt: string;
   updatedAt: string;
   metadata?: Record<string, unknown>;
+  /** Set by listForUser: what the signed-in user is to this project. */
+  role?: ProjectRole;
 }
 
 export interface PersistedBranch {
@@ -19,7 +24,9 @@ export interface PersistedBranch {
   isPrimary: boolean;
   baseSnapshotId: string | null;
   createdAt: string;
-  createdBy: string;
+  /** Null once the account that made it is deleted: a Team project's
+   *  branches outlive the people who made them (owner 2026-09-27). */
+  createdBy: string | null;
   metadata?: Record<string, unknown>;
 }
 
@@ -145,6 +152,38 @@ export interface TemplateSpecificationMapping {
   notes?: string;
 }
 
+/** AL.15: an outcome a template files on a workflow's steps. Its criteria
+ *  are identified so the requirements it derives can claim them, as a
+ *  promotion does; a template outcome stays pending with its derivations. */
+export interface TemplateSpecificationOutcome {
+  /** Unique within the template; the stored key is minted fresh. */
+  key: string;
+  name: string;
+  description: string;
+  criteria: Array<{ id: string; text: string; verification?: 'automated' | 'manual' }>;
+  /** Indexes into the workflow's steps. */
+  steps: number[];
+  /** The template requirements this outcome derives, each with the criteria it claims. */
+  derives: Array<{ requirementId: string; criteria: string[] }>;
+}
+
+export interface TemplateSpecificationWorkflow {
+  name: string;
+  ownerLabel?: string;
+  color?: string;
+  steps: string[];
+  outcomes: TemplateSpecificationOutcome[];
+}
+
+export interface TemplateSpecificationConstraint {
+  ctype: string;
+  title?: string;
+  description: string;
+  rationale?: string;
+  /** The workflow (by name) the constraint belongs to; none is project-wide. */
+  workflow?: string;
+}
+
 export interface TemplateSpecification {
   vision: string;
   preferences: {
@@ -156,6 +195,9 @@ export interface TemplateSpecification {
   };
   requirements: TemplateSpecificationRequirement[];
   mappings: TemplateSpecificationMapping[];
+  /** AL.15: what the template puts on the Workflows canvas, on plans that carry it. */
+  workflows?: TemplateSpecificationWorkflow[];
+  constraints?: TemplateSpecificationConstraint[];
 }
 
 export interface ProjectTemplate {

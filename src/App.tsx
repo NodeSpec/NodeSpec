@@ -20,11 +20,13 @@ import type { ProjectSwitchActions } from './ui/context/ProjectSwitchContext.js'
 import { ErrorBoundary } from './ui/components/common/index.js';
 import { StagingBanner } from './ui/components/common/StagingBanner.js';
 import { DegradedCatalogBanner } from './ui/components/common/DegradedCatalogBanner.js';
-import { ProjectOnboardingWizard } from './ui/components/panels/ProjectOnboardingWizard.js';
+import { ProjectCreatePopup } from './ui/components/panels/ProjectCreatePopup.js';
 import { ThemeProvider } from './ui/theme/ThemeContext.js';
 import { SubscriptionService } from './ui/services/SubscriptionService.js';
-import { useAIAvailabilityProvider, AIAvailabilityContext } from './ui/hooks/useAIAvailability.js';
-import { BYOKRequiredModal } from './ui/components/common/BYOKRequiredModal.js';
+import { useTimeInApp } from './ui/hooks/useTimeInApp.js';
+import { createProjectWithPrimaryBranch, pickProjectBranch } from './ui/services/project-branch.js';
+import { ensureExampleProject, isExampleProject, projectToOpen } from './ui/utils/example-project.js';
+import { noteProjectExample } from './ui/hooks/useProjectFeatureGate.js';
 import type { User, Session } from '@supabase/supabase-js';
 import type { AuthChangeEvent } from '@supabase/supabase-js';
 
@@ -46,6 +48,8 @@ function AppContent() {
   const [mfaPending, setMfaPending] = useState(false);
   const provisioningSessionRef = useRef<string | null>(null);
   const navigate = useNavigate();
+  // Time in app: heartbeats while this signed-in tab is on /app (managed build only).
+  useTimeInApp(user?.id ?? null);
 
   const provisionStripeCustomer = async (accessToken: string): Promise<boolean> => {
     setStripeProvisioning(true);
@@ -121,13 +125,11 @@ function AppContent() {
         const currentUserId = localStorage.getItem('specgraph_current_user');
         if (currentUserId && currentUserId !== session.user.id) {
               localStorage.removeItem('specgraph_current_project');
-          localStorage.removeItem('specgraph_current_branch');
         }
         localStorage.setItem('specgraph_current_user', session.user.id);
 
         const savedProjectId = localStorage.getItem('specgraph_current_project');
-        const savedBranchName = localStorage.getItem('specgraph_current_branch');
-        loadUserData(session.user.id, savedProjectId || undefined, savedBranchName || undefined);
+        loadUserData(session.user.id, savedProjectId || undefined);
         if (currentPath === '/admin' || currentPath === '/pricing' || currentPath.startsWith('/templates') || currentPath.startsWith('/u/')) {
           // Leave these routes alone
         } else if (currentPath === '/app') {
@@ -218,7 +220,6 @@ function AppContent() {
         setNeedsPlanSelection(false);
         provisioningSessionRef.current = null;
         localStorage.removeItem('specgraph_current_project');
-        localStorage.removeItem('specgraph_current_branch');
         localStorage.removeItem('specgraph_current_user');
 
         const currentPath = window.location.pathname;
@@ -254,13 +255,11 @@ function AppContent() {
         const currentUserId = localStorage.getItem('specgraph_current_user');
         if (currentUserId && currentUserId !== session.user.id) {
           localStorage.removeItem('specgraph_current_project');
-          localStorage.removeItem('specgraph_current_branch');
         }
         localStorage.setItem('specgraph_current_user', session.user.id);
 
         const savedProjectId = localStorage.getItem('specgraph_current_project');
-        const savedBranchName = localStorage.getItem('specgraph_current_branch');
-        loadUserData(session.user.id, savedProjectId || undefined, savedBranchName || undefined);
+        loadUserData(session.user.id, savedProjectId || undefined);
 
         // Self-hosted builds skip the entire billing lane (see the mirror
         // gate in the getSession handler above).
@@ -313,7 +312,7 @@ function AppContent() {
     return () => subscription.unsubscribe();
   }, [navigate]);
 
-  const loadUserData = async (userId: string, projectId?: string, branchName?: string) => {
+  const loadUserData = async (userId: string, projectId?: string) => {
     if (loadingDataRef.current) {
       return;
     }
@@ -330,6 +329,9 @@ function AppContent() {
       const branchRepo = createSupabaseBranchRepository(supabase);
       const graphRepo = createSupabaseGraphRepository(supabase);
 
+      // AJ.6: the account's example project, made once, before the list is read.
+      await ensureExampleProject(supabase);
+
       let project;
 
       if (projectId) {
@@ -341,18 +343,18 @@ function AppContent() {
 
         if (!project) {
           localStorage.removeItem('specgraph_current_project');
-          const listResult = await projectRepo.listByOwner(userId);
+          const listResult = await projectRepo.listForUser(userId);
           if (!listResult.success) {
             throw new Error(listResult.error.message);
           }
-          project = listResult.data[0] || null;
+          project = projectToOpen(listResult.data);
         }
       } else {
-        const listResult = await projectRepo.listByOwner(userId);
+        const listResult = await projectRepo.listForUser(userId);
         if (!listResult.success) {
           throw new Error(listResult.error.message);
         }
-        project = listResult.data[0] || null;
+        project = projectToOpen(listResult.data);
       }
 
       if (!project) {
@@ -362,43 +364,38 @@ function AppContent() {
         setCurrentBranchId(null);
         setCurrentBranchName(null);
         localStorage.removeItem('specgraph_current_project');
-        localStorage.removeItem('specgraph_current_branch');
         return;
       }
 
+      // AJ.6: every gate on the page knows the example before it draws.
+      noteProjectExample(project.id, isExampleProject(project));
       setCurrentProjectId(project.id);
       setCurrentProjectName(project.name);
       localStorage.setItem('specgraph_current_project', project.id);
 
-      const targetBranchName = branchName || 'main';
-
-      const branchResult = await branchRepo.getByName(project.id, targetBranchName);
-      if (!branchResult.success) {
-        throw new Error(branchResult.error.message);
+      // Item 16: a project opens on its primary, never a remembered name.
+      const allBranches = await branchRepo.listByProject(project.id);
+      if (!allBranches.success) {
+        throw new Error(allBranches.error.message);
       }
-
-      let branch = branchResult.data;
+      const branch = pickProjectBranch(allBranches.data);
 
       if (!branch) {
-        const allBranches = await branchRepo.listByProject(project.id);
-        if (allBranches.success && allBranches.data.length > 0) {
-          branch = allBranches.data[0];
-        } else {
-          await projectRepo.delete(project.id);
-          localStorage.removeItem('specgraph_current_project');
+        await projectRepo.delete(project.id);
+        localStorage.removeItem('specgraph_current_project');
 
-          const listResult = await projectRepo.listByOwner(userId);
-          if (listResult.success && listResult.data.length > 0) {
-            return loadUserData(userId, listResult.data[0].id);
-          }
-
-          setStore(null);
-          setCurrentProjectId(null);
-          setCurrentProjectName(null);
-          setCurrentBranchId(null);
-          setCurrentBranchName(null);
-          return;
+        const listResult = await projectRepo.listForUser(userId);
+        const next = listResult.success ? projectToOpen(listResult.data) : null;
+        if (next) {
+          return loadUserData(userId, next.id);
         }
+
+        setStore(null);
+        setCurrentProjectId(null);
+        setCurrentProjectName(null);
+        setCurrentBranchId(null);
+        setCurrentBranchName(null);
+        return;
       }
 
       const snapshotResult = await graphRepo.loadSnapshot(branch.id);
@@ -414,7 +411,6 @@ function AppContent() {
       setStore(createBranchStore(graph));
       setCurrentBranchId(branch.id);
       setCurrentBranchName(branch.name);
-      localStorage.setItem('specgraph_current_branch', branch.name);
     } catch (error) {
       console.error('Failed to load user data:', error);
     } finally {
@@ -573,15 +569,8 @@ function AppContent() {
     setCurrentBranchId(null);
     setCurrentBranchName(null);
     localStorage.setItem('specgraph_current_project', projectId);
-    localStorage.setItem('specgraph_current_branch', 'main');
-    await loadUserData(user.id, projectId, 'main');
+    await loadUserData(user.id, projectId);
     setIsSwitchingProject(false);
-  };
-
-  const handleSwitchBranch = async (branchName: string) => {
-    if (!user || !currentProjectId) return;
-    setStore(null);
-    await loadUserData(user.id, currentProjectId, branchName);
   };
 
   const handleDeleteCurrentProject = async () => {
@@ -591,7 +580,6 @@ function AppContent() {
     setCurrentBranchId(null);
     setCurrentBranchName(null);
     localStorage.removeItem('specgraph_current_project');
-    localStorage.removeItem('specgraph_current_branch');
 
     if (user) {
       await loadUserData(user.id);
@@ -623,46 +611,13 @@ function AppContent() {
       const { createSupabaseProjectRepository } = await import('./persistence/supabase/project-repository.js');
       const { createSupabaseBranchRepository } = await import('./persistence/supabase/branch-repository.js');
       const { createSupabaseGraphRepository } = await import('./persistence/supabase/graph-repository.js');
-      const { createEmptyGraph } = await import('@nodespec/core/utils.js');
 
-      const projectRepo = createSupabaseProjectRepository(supabase);
-      const branchRepo = createSupabaseBranchRepository(supabase);
-      const graphRepo = createSupabaseGraphRepository(supabase);
-
-      const projectResult = await projectRepo.create(name, user.id, metadata);
-      if (!projectResult.success) {
-        throw new Error(projectResult.error.message);
-      }
-
-      const project = projectResult.data;
-
-      const branchResult = await branchRepo.create(
-        project.id,
-        'main',
-        user.id,
-        undefined
-      );
-
-      if (!branchResult.success) {
-        throw new Error(branchResult.error.message);
-      }
-
-      const branch = branchResult.data;
-      const emptyGraph = createEmptyGraph();
-
-      const snapshotResult = await graphRepo.saveSnapshot(project.id, branch.id, emptyGraph, 0);
-      if (!snapshotResult.success) {
-        throw new Error(snapshotResult.error.message);
-      }
-
-      const { error: linkError } = await supabase
-        .from('branches')
-        .update({ base_snapshot_id: snapshotResult.data.id })
-        .eq('id', branch.id);
-
-      if (linkError) {
-        throw new Error(`Failed to link snapshot to branch: ${linkError.message}`);
-      }
+      // Item 16: the project's one branch is created as its primary.
+      const { project } = await createProjectWithPrimaryBranch({
+        projects: createSupabaseProjectRepository(supabase),
+        branches: createSupabaseBranchRepository(supabase),
+        graphs: createSupabaseGraphRepository(supabase),
+      }, { name, userId: user.id, metadata });
 
       await handleSwitchProject(project.id);
     } catch (error) {
@@ -812,21 +767,13 @@ function AppContent() {
             </div>
           ) : !store && dataReady ? (
             <ThemeProvider>
-              <div style={{
-                width: '100vw',
-                height: '100vh',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                backgroundColor: '#1a1a1a',
-              }}>
-                <ProjectOnboardingWizard
-                  onConfirm={({ name, workflowOrigin }) => {
-                    handleCreateProject(name, { workflowOrigin });
-                  }}
-                  onClose={() => {}}
-                />
-              </div>
+              {/* Owner spike 2026-09-04: creation is name-only; the start path
+                  is chosen on the canvas afterwards (ProjectStartPopup). */}
+              <ProjectCreatePopup
+                variant="standalone"
+                onConfirm={({ name }) => { handleCreateProject(name, {}); }}
+                onClose={() => {}}
+              />
             </ThemeProvider>
           ) : (
             <GraphEditor
@@ -840,7 +787,6 @@ function AppContent() {
               branchName={currentBranchName}
               onSwitchProject={handleSwitchProject}
               onCreateProject={handleCreateProject}
-              onSwitchBranch={handleSwitchBranch}
               onRenameProject={handleRenameProject}
               onDeleteCurrentProject={handleDeleteCurrentProject}
             />
@@ -915,16 +861,6 @@ function AppContent() {
   );
 }
 
-function AIAvailabilityProvider({ children }: { children: React.ReactNode }) {
-  const value = useAIAvailabilityProvider();
-  return (
-    <AIAvailabilityContext.Provider value={value}>
-      {children}
-      {value.byokModalOpen && <BYOKRequiredModal onClose={value.closeBYOKModal} onKeyConfigured={value.refresh} />}
-    </AIAvailabilityContext.Provider>
-  );
-}
-
 export default function App() {
   return (
     <>
@@ -933,9 +869,7 @@ export default function App() {
       <ErrorBoundary>
         <BrowserRouter>
           <ServiceProvider>
-            <AIAvailabilityProvider>
-              <AppContent />
-            </AIAvailabilityProvider>
+            <AppContent />
           </ServiceProvider>
         </BrowserRouter>
       </ErrorBoundary>

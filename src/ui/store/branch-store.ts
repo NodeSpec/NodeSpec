@@ -37,7 +37,6 @@ export interface BranchStoreState {
   selectedArtifactId: string | null;
   editorDirty: Map<string, boolean>;
   editorBuffer: Map<string, string>;
-  availableBranches: Array<{ id: string; name: string; patchCount: number }>;
   undoStack: UndoSnapshot[];
   redoStack: UndoSnapshot[];
   /** Bumps on every undo/redo so the editor can persist a snapshot-only revert
@@ -76,9 +75,6 @@ export interface BranchStore {
   setEditorContent(artifactId: string, content: string): void;
   getEditorContent(artifactId: string): string | undefined;
   isEditorDirty(artifactId: string): boolean;
-  createBranchFromMain(branchName: string): void;
-  switchToBranch(branchId: string, branchName: string, patches: PatchOperation[]): void;
-  setAvailableBranches(branches: Array<{ id: string; name: string; patchCount: number }>): void;
 }
 
 function recomputeDerivedGraph(baseGraph: Graph, patches: PatchOperation[]): Graph {
@@ -132,7 +128,6 @@ export function createBranchStore(initialGraph?: Graph): BranchStore {
     selectedArtifactId: null,
     editorDirty: new Map(),
     editorBuffer: new Map(),
-    availableBranches: [],
     undoStack: [],
     redoStack: [],
     graphRevision: 0,
@@ -223,7 +218,8 @@ export function createBranchStore(initialGraph?: Graph): BranchStore {
     const newLogEntries: PatchLogEntry[] = [];
 
     for (const patch of patches) {
-      const validation = validatePatch(currentGraph, patch);
+      // AA.3: a new write is held to the depth rule; the replay above is not.
+      const validation = validatePatch(currentGraph, patch, { placement: true });
 
       if (!validation.valid) {
         const error = validation.errors[0];
@@ -444,22 +440,6 @@ export function createBranchStore(initialGraph?: Graph): BranchStore {
     return state.editorDirty.get(artifactId) ?? false;
   }
 
-  function createBranchFromMain(branchName: string): void {
-    if (state.activeBranch.name !== 'main') {
-      return;
-    }
-
-    state = {
-      ...state,
-      activeBranch: {
-        id: generateUUID(),
-        name: branchName,
-        patches: [],
-      },
-      };
-    notify();
-  }
-
   /** N6.1 fix (owner-caught): the autosave commit is persistence bookkeeping on the
    *  SAME canvas — it must NOT erase undo history. It previously reused
    *  setBaseSnapshot + switchToBranch, both of which clear the stacks, so undo went
@@ -478,36 +458,9 @@ export function createBranchStore(initialGraph?: Graph): BranchStore {
     notify();
   }
 
-  function switchToBranch(branchId: string, branchName: string, patches: PatchOperation[]): void {
-    const derivedGraph = recomputeDerivedGraph(state.baseSnapshotGraph, patches);
-
-    state = {
-      ...state,
-      activeBranch: {
-        id: branchId,
-        name: branchName,
-        patches,
-      },
-      derivedGraph,
-      lastError: null,
-      undoStack: [],
-      redoStack: [],
-    };
-    notify();
-  }
-
-  // R3-3b: mergeToMain() DELETED (the stray-path kill list). The in-memory merge
-  // algebra bypassed git entirely; a design merge is now a git merge (PR by
-  // default). Branch state changes arrive through switchToBranch after the
-  // provider merge + R3-1 loader have moved the real model.
-
-  function setAvailableBranches(branches: Array<{ id: string; name: string; patchCount: number }>): void {
-    state = {
-      ...state,
-      availableBranches: branches,
-    };
-    notify();
-  }
+  // R3-3b: mergeToMain() DELETED (the stray-path kill list). Item 16
+  // (2026-09-26): createBranchFromMain, switchToBranch and the branch list
+  // went with multi-branch; the store holds the one canvas of the one branch.
 
   return {
     getState,
@@ -528,8 +481,5 @@ export function createBranchStore(initialGraph?: Graph): BranchStore {
     setEditorContent,
     getEditorContent,
     isEditorDirty,
-    createBranchFromMain,
-    switchToBranch,
-    setAvailableBranches,
   };
 }

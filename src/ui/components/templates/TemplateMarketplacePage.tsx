@@ -144,10 +144,8 @@ export function TemplateMarketplacePage() {
 
     if (wasUpvoted) {
       await supabase.from('template_upvotes').delete().eq('template_id', templateId).eq('user_id', user.id);
-      await supabase.rpc('decrement_template_upvote_count', { tid: templateId });
     } else {
       await supabase.from('template_upvotes').insert({ template_id: templateId, user_id: user.id });
-      await supabase.rpc('increment_template_upvote_count', { tid: templateId });
     }
   };
 

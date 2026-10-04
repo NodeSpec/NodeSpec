@@ -1,9 +1,8 @@
 /*
-  P0-1: BYOK crypto envelope v2.
+  P0-1: crypto envelope v2.
 
-  Encrypts ALL stored customer secrets: AI provider keys
-  (user_api_keys.api_key_encrypted) and git provider tokens
-  (git_integrations.access_token_encrypted).
+  Encrypts the stored customer secrets: git provider tokens
+  (git_integrations.access_token_encrypted). AH.2 removed the AI provider keys.
 
   Formats:
     v2 (current): "v2:<b64 salt>:<b64 iv>:<b64 ciphertext>"

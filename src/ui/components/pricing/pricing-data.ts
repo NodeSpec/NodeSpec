@@ -6,9 +6,10 @@
                  engine, Architecture Canvas, open node technology catalog.
     Free       — free: HOSTED at nodespec.io, up to 2 projects.
     Indie      — $15/mo or $144/yr hosted: all features + repo import reverse
-                 visualization and deduction (no teamwork features).
+                 visualization and deduction + the Plan tab + Workflows
+                 (P, 2026-09-22; no teamwork).
     Team       — $60/user/mo hosted: all features + the teamwork lane
-                 (Notion/Atlassian/Slack, Workflow Designer).
+                 (Notion/Atlassian/Slack, owners on workflows).
     Enterprise — self-hosted, custom: everything except Government-specific.
     Government — self-hosted in compliant enclaves: everything.
 
@@ -16,6 +17,12 @@
   stays the 5-value vocabulary from src/ui/config/tiers.ts, and the 'free'
   card resolves to the community plan (canonicalizeTier already aliases
   free → community), so nothing billed or persisted changes shape.
+
+  R9 (2026-09-15): each card is an (edition, tier) pair, and what it may
+  claim is the feature table in src/ui/config/feature-rules.ts — the whole
+  matrix, with the config flags that produce the community build, is
+  docs/EDITIONS_AND_TIERS.md. The comparison table's gated rows carry their
+  feature key and are cross-pinned in src/tests/editions-matrix.test.ts.
 */
 import { tierDisplayName } from '../../config/tiers.js';
 
@@ -75,6 +82,7 @@ export const deploymentTiers: DeploymentTier[] = [
     features: [
       'Everything in Community, hosted',
       'Up to 2 projects',
+      'One connected agent',
       'Full hosted technology catalog',
       'No card, no trial clock',
     ],
@@ -89,11 +97,14 @@ export const deploymentTiers: DeploymentTier[] = [
     audience: 'Hosted · unlimited projects',
     badge: 'Most popular',
     description:
-      'The hosted app for individual builders. Everything in Free, unlimited projects, and repo import reverse visualization and deduction.',
+      'The hosted app for individual builders. Everything in Free, unlimited projects, Workflows, and repo import reverse visualization and deduction.',
     features: [
       'Everything in Free',
       'Unlimited hosted projects',
+      'Up to five connected agents',
       'Repo import reverse visualization and deduction',
+      'Plan: the deterministic work plan and order of operations',
+      'Workflows: journeys and their steps, with outcomes placed on them',
       'Richer catalog, updated continuously',
       'Feature improvements land here first',
     ],
@@ -111,8 +122,10 @@ export const deploymentTiers: DeploymentTier[] = [
       'Everything in Indie, plus the integrations that put your whole team and their agents on one model.',
     features: [
       'Everything in Indie',
+      'Project seats for your team — maintainer, contributor, viewer',
+      'Five connected agents per seat',
       'Notion, Atlassian & Slack integration — tag nodes for human teams and agents to execute',
-      'Workflow Designer from UX to Requirements',
+      'Workflows with owners, and approvals shared across the team',
     ],
     cta: 'Join the Waitlist',
     ctaKind: 'contact',
@@ -143,6 +156,7 @@ export const deploymentTiers: DeploymentTier[] = [
       'Everything NodeSpec offers, purpose-built for DoW and federal agencies operating in controlled enclaves with strict compliance requirements.',
     features: [
       'Everything in Enterprise',
+      'Classification marks on items, with clearance per seat',
       'Deployed as a container to compliant Government cloud enclaves',
       'Custom, gov-only node additions and context',
       'Compliance package builder aligned to tasks.md',
@@ -159,11 +173,4 @@ export const deploymentTiers: DeploymentTier[] = [
  *  alias map (pro/architect/starter → Team, free → Community). */
 export function getPlanDisplayName(planName: string | null | undefined): string {
   return tierDisplayName(planName);
-}
-
-export function getTokenLimitDisplay(tokens: number): string {
-  if (tokens === 0) return 'None';
-  if (tokens >= 1_000_000) return `${tokens / 1_000_000}M`;
-  if (tokens >= 1_000) return `${tokens / 1_000}K`;
-  return String(tokens);
 }

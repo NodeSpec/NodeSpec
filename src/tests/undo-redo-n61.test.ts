@@ -93,13 +93,6 @@ describe('N6.1 canvas undo/redo', () => {
     expect(store.canRedo()).toBe(false);
   });
 
-  it('switching branches clears both stacks (history is per canvas)', () => {
-    const store = storeWithTwoNodes();
-    store.switchToBranch('branch-2', 'feature', []);
-    expect(store.canUndo()).toBe(false);
-    expect(store.canRedo()).toBe(false);
-  });
-
   it('the undo stack is bounded — deep edit runs do not grow memory without limit', () => {
     const store = createBranchStore(createEmptyGraph());
     for (let i = 0; i < 40; i++) {
@@ -157,9 +150,9 @@ describe('N6.1 undo survives autosave', () => {
   });
 
   it('documents the bug: the OLD save sequence wiped history', () => {
-    // setBaseSnapshot (graph replaced from outside) and switchToBranch (different
-    // canvas) both clear the stacks BY DESIGN. The autosave commit used both, which is
-    // why undo died seconds after every edit. Keeping this pin means a future refactor
+    // setBaseSnapshot (graph replaced from outside) clears the stacks BY DESIGN, as
+    // switchToBranch did before it left with multi-branch (item 16). The autosave
+    // commit used them, which is why undo died seconds after every edit. Keeping this pin means a future refactor
     // that routes saving back through them fails here instead of on the bench.
     const store = storeWithTwoNodes();
     expect(store.canUndo()).toBe(true);
@@ -167,29 +160,20 @@ describe('N6.1 undo survives autosave', () => {
     expect(store.canUndo()).toBe(false);
   });
 
-  it('a genuine branch switch still clears history (different canvas)', () => {
-    const store = storeWithTwoNodes();
-    simulateAutosave(store);
-    expect(store.canUndo()).toBe(true);
-
-    store.switchToBranch('other-branch', 'feature', []);
-    expect(store.canUndo()).toBe(false);
-  });
-
-  it('keeps the branch identity and carries in-flight patches like switchToBranch did', () => {
+  it('keeps the branch identity and carries in-flight patches across an autosave commit', () => {
     // Debt audit 2026-07-29: pendingMergeToMain was write-only production state
     // (no reader outside this test) and was removed with the R3-3b merge rework;
     // the invariant this test guards is branch identity + in-flight patch carry.
     const store = createBranchStore(createEmptyGraph());
-    store.switchToBranch('b1', 'feature', []);
+    const { id, name } = store.getState().activeBranch;
     store.proposePatches([createAddNodePatch(node(N1), opts)]);
     const pending = store.getState().activeBranch.patches;
 
     // Mid-save: patches proposed while the save was in flight carry forward.
     store.commitSavedSnapshot(createEmptyGraph(), pending);
     expect(store.getState().activeBranch.patches.length).toBeGreaterThan(0);
-    expect(store.getState().activeBranch.id).toBe('b1');
-    expect(store.getState().activeBranch.name).toBe('feature');
+    expect(store.getState().activeBranch.id).toBe(id);
+    expect(store.getState().activeBranch.name).toBe(name);
 
     // Fully saved: nothing pending carries forward.
     store.commitSavedSnapshot(store.getState().derivedGraph, []);

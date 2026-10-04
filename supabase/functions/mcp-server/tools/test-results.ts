@@ -34,13 +34,15 @@
 //   preserve-every-other-key discipline as R5's applyTickDeltas (criterion-deltas.ts).
 import type { SupabaseClient } from "jsr:@supabase/supabase-js@2";
 import type { AuthResult, MCPResponse } from "../shared.ts";
-import { checkScope, resolveProjectByName } from "../shared.ts";
+import { checkScope, resolveProjectByName, holderIdentity } from "../shared.ts";
+import { isMine } from "./checkouts.ts";
 import { resolveSpecForProject, resolveRequirementRow } from "./requirements.ts";
 import { findExistingTestArtifact } from "../../_shared/test-document-generator.ts";
 // D4: the shared test-budget gauge — the same function get_project_status and
 // the Work Board flag sprawl with.
 import { assessTestBudget, formatTestBudgetNudge } from "../../_shared/derive-status.ts";
 import { getPrimaryBranch } from "../../_shared/primary-branch.ts";
+import { checkEvidenceCommit, type HeldEvidence } from "../../_shared/evidence-commit.ts";
 
 // Mirrors the test_cases CHECK constraints (20260119154603 + 20260326174948) so a bad
 // value fails HERE with a usable message instead of as an opaque constraint violation.
@@ -77,15 +79,28 @@ interface ResultOutcome {
   status: string;
   criterionText?: string;
   criterionBinding?: CriterionBinding;
+  /** On a conflict: the test_id of the case the criterion is bound to, when it could be read. */
+  boundTestId?: string | null;
+  /** AD.3a: recorded on the case, counting once its commit reaches the tracked branch. */
+  held?: true;
 }
 
 // deno-lint-ignore no-explicit-any
 type AnyRecord = Record<string, any>;
 
+/** AL.10: apply_criteria_ops refuses (40001) a write whose caller decided on a
+ *  read the requirement has since moved past. */
+const movedMeanwhile = (e: { code?: string; message?: string } | null): boolean =>
+  !!e && (e.code === '40001' || /moved since you read it/.test(e.message ?? ''));
+
 export async function handleReportTestResults(
   supabase: SupabaseClient,
   auth: AuthResult,
-  args: { project_id: string; requirement_id: string; results: ReportedTestResult[]; external_agent?: string },
+  args: {
+    project_id: string; requirement_id: string; results: ReportedTestResult[]; external_agent?: string;
+    /** 4b.5 (R8): the commit the evidence was produced at — commit and push FIRST, then report. */
+    git?: { commit_sha?: string; branch?: string };
+  },
 ): Promise<MCPResponse> {
   if (!checkScope(auth, 'write')) {
     return { success: false, error: 'Insufficient permissions: write scope required' };
@@ -93,6 +108,15 @@ export async function handleReportTestResults(
   if (!args.project_id || !args.requirement_id) {
     return { success: false, error: 'project_id and requirement_id are required' };
   }
+  // R8: the sha is the key that stitches criterion → lease → commit; junk
+  // would stitch nothing, so it refuses loudly rather than stamping noise.
+  const gitRef = args.git && typeof args.git === 'object' ? args.git : null;
+  let commitSha = typeof gitRef?.commit_sha === 'string' ? gitRef.commit_sha.trim().toLowerCase() : null;
+  if (commitSha !== null && !/^[0-9a-f]{7,64}$/.test(commitSha)) {
+    return { success: false, error: `git.commit_sha must be a hex commit sha (7–64 chars); got "${gitRef?.commit_sha}". Commit and push first, then report with the sha of that commit.` };
+  }
+  const gitBranch = typeof gitRef?.branch === 'string' && gitRef.branch.trim() ? gitRef.branch.trim() : null;
+  let gitStamp = commitSha ? { commitSha, ...(gitBranch ? { branch: gitBranch } : {}) } : null;
   if (!Array.isArray(args.results) || args.results.length === 0) {
     return { success: false, error: 'results (a non-empty array of {test_id, status, ...}) is required' };
   }
@@ -135,6 +159,32 @@ export async function handleReportTestResults(
     return { success: false, error: `Requirement not found in this project: ${args.requirement_id}` };
   }
 
+  // AD.3a (D18): a named commit must be one the repository has, checked before
+  // anything is recorded. One not yet on the tracked branch holds its passed
+  // and failed results on their cases until the sync check sees it arrive
+  // (_shared/evidence-commit.ts); the rest of the report lands as usual.
+  let holdFor: { sha: string; ref: string } | null = null;
+  if (commitSha) {
+    const commit = await checkEvidenceCommit(supabase, projectId, commitSha);
+    if (commit.state === 'unknown') {
+      return { success: false, error: `Commit ${commitSha} is not in ${commit.repo}. Push it first, then report with its sha. Nothing was recorded.` };
+    }
+    if (commit.state === 'failed') {
+      return { success: false, error: `Could not check commit ${commitSha} in ${commit.repo} (${commit.error}). Nothing was recorded; report again.` };
+    }
+    if (commit.state === 'counts' || commit.state === 'held') {
+      commitSha = commit.sha;
+      gitStamp = { commitSha, ...(gitBranch ? { branch: gitBranch } : {}) };
+    }
+    if (commit.state === 'held') holdFor = { sha: commit.sha, ref: commit.ref };
+  }
+  const holds = (status: string) => holdFor !== null && (status === 'passed' || status === 'failed');
+  const heldFor = (r: ReportedTestResult): HeldEvidence => ({
+    status: r.status as 'passed' | 'failed', commitSha: holdFor!.sha, ref: holdFor!.ref,
+    ...(gitBranch ? { branch: gitBranch } : {}), ...(r.framework ? { framework: r.framework } : {}),
+    at: new Date().toISOString(),
+  });
+
   // Pre-write criteria snapshot: the binding target AND the baseline for "did met
   // change" (provenance is stamped only on actual flips).
   const preCriteria: AnyRecord[] = (Array.isArray(requirement.acceptance_criteria)
@@ -144,12 +194,28 @@ export async function handleReportTestResults(
   // One read for the whole batch: which reported test_ids already have rows.
   const { data: existingRows } = await supabase
     .from('test_cases')
-    .select('id, test_id, status')
+    .select('id, test_id, status, metadata')
     .eq('requirement_id', requirement.id)
     .in('test_id', [...seen]);
   const existingByTestId = new Map(
-    ((existingRows ?? []) as Array<{ id: string; test_id: string; status: string }>).map((row) => [row.test_id, row]),
+    ((existingRows ?? []) as Array<{ id: string; test_id: string; status: string; metadata?: AnyRecord | null }>).map((row) => [row.test_id, row]),
   );
+
+  // A case the person added in Work (metadata.source 'manual') is bound to
+  // the criterion it proves. A report under its id for ANOTHER criterion
+  // would land evidence on the person's test for the wrong thing: refused
+  // before anything is written, naming the criterion the id belongs to.
+  for (const r of args.results) {
+    const existing = existingByTestId.get(r.test_id.trim());
+    if (!existing || existing.metadata?.source !== 'manual' || r.criterion_text === undefined) continue;
+    const bound = preCriteria.find((c) => c.testId === existing.id);
+    if (bound && String(bound.text ?? '') !== r.criterion_text) {
+      return {
+        success: false,
+        error: `${r.test_id.trim()} is the test the person added in Work for "${String(bound.text)}". Report the run for that criterion under ${r.test_id.trim()}, and use another test_id for "${r.criterion_text}". Nothing was recorded.`,
+      };
+    }
+  }
 
   const now = new Date().toISOString();
   const outcomes: ResultOutcome[] = [];
@@ -194,61 +260,103 @@ export async function handleReportTestResults(
   // connects evidence to the criterion it proves. Exact text match only (R5a rule):
   // no match → unbound, reported; a foreign testId → conflict, never stolen. All
   // bindings land in ONE update, BEFORE the status writes fire the trigger.
-  const workingCriteria = preCriteria.map((c) => ({ ...c }));
+  // AL.10 (owner 2026-10-01): "never stolen" holds under agents reporting
+  // at once. The bindings are decided on the criteria as read and written
+  // only if the requirement has not moved since; when another report bound
+  // or flipped something meanwhile, the criteria are read again and decided
+  // again (three tries), so a criterion bound by another agent a moment ago
+  // reads as a conflict here instead of being overwritten.
+  let bindOps: AnyRecord[] = [];
   let bindingsApplied = 0;
-  for (const r of args.results) {
-    if (r.criterion_text === undefined) continue;
-    const testId = r.test_id.trim();
-    const outcome = outcomes.find((o) => o.testId === testId)!;
-    outcome.criterionText = r.criterion_text;
-    const caseId = caseIdByTestId.get(testId)!;
-    const criterion = workingCriteria.find((c) => c.text === r.criterion_text);
-    if (!criterion) {
-      outcome.criterionBinding = 'unbound';
-      continue;
+  let readAt = requirement.updated_at ?? null;
+  for (let attempt = 1; ; attempt++) {
+    const workingCriteria = preCriteria.map((c) => ({ ...c }));
+    bindOps = [];
+    bindingsApplied = 0;
+    // R2: the bindings travel as OPERATIONS to the one locked writer, never as a
+    // whole-array replacement. workingCriteria stays only so a batch that binds
+    // two results to the same text sees the first binding when it checks.
+    for (const r of args.results) {
+      if (r.criterion_text === undefined) continue;
+      const testId = r.test_id.trim();
+      const outcome = outcomes.find((o) => o.testId === testId)!;
+      outcome.criterionText = r.criterion_text;
+      delete outcome.boundTestId;
+      const caseId = caseIdByTestId.get(testId)!;
+      const criterion = workingCriteria.find((c) => c.text === r.criterion_text);
+      if (!criterion) {
+        outcome.criterionBinding = 'unbound';
+        continue;
+      }
+      // WS3 manual lane: refused before any bound-state reasoning: a manual criterion
+      // never carries a testId, so the trigger can never flip it from this tool.
+      if (criterion.verification === 'manual') {
+        outcome.criterionBinding = 'manual-lane';
+        continue;
+      }
+      const boundTo = typeof criterion.testId === 'string' && criterion.testId.length > 0 ? criterion.testId : null;
+      if (boundTo && boundTo !== caseId) {
+        outcome.criterionBinding = 'conflict';
+        outcome.boundTestId = boundTo; // the row uuid for now; named below
+        continue;
+      }
+      if (boundTo === caseId) {
+        outcome.criterionBinding = 'already-bound';
+        continue;
+      }
+      criterion.testId = caseId;
+      bindOps.push({ op: 'bind', criterion_text: r.criterion_text, value: caseId });
+      outcome.criterionBinding = 'bound';
+      bindingsApplied++;
     }
-    // WS3 manual lane: refused before any bound-state reasoning — a manual criterion
-    // never carries a testId, so the trigger can never flip it from this tool.
-    if (criterion.verification === 'manual') {
-      outcome.criterionBinding = 'manual-lane';
-      continue;
+    if (bindOps.length === 0) break;
+    const { error: bindError } = await supabase.rpc('apply_criteria_ops', {
+      p_requirement_id: requirement.id,
+      p_ops: bindOps,
+      ...(readAt ? { p_expected_updated_at: readAt } : {}),
+    });
+    if (!bindError) break;
+    if (!movedMeanwhile(bindError) || attempt === 3) {
+      return { success: false, error: `Failed to bind criteria to test cases: ${bindError.message}${movedMeanwhile(bindError) ? ' No result was recorded; report again.' : ''}` };
     }
-    const boundTo = typeof criterion.testId === 'string' && criterion.testId.length > 0 ? criterion.testId : null;
-    if (boundTo && boundTo !== caseId) {
-      outcome.criterionBinding = 'conflict';
-      continue;
-    }
-    if (boundTo === caseId) {
-      outcome.criterionBinding = 'already-bound';
-      continue;
-    }
-    criterion.testId = caseId;
-    outcome.criterionBinding = 'bound';
-    bindingsApplied++;
+    const again = await resolveRequirementRow(supabase, spec.id, requirement.id);
+    if (!again) return { success: false, error: `Requirement not found in this project: ${args.requirement_id}` };
+    preCriteria.splice(0, preCriteria.length, ...asCriteria(again.acceptance_criteria));
+    readAt = again.updated_at ?? null;
   }
-  if (bindingsApplied > 0) {
-    const { error: bindError } = await supabase
-      .from('specification_requirements')
-      .update({ acceptance_criteria: workingCriteria, updated_at: now })
-      .eq('id', requirement.id);
-    if (bindError) {
-      return { success: false, error: `Failed to bind criteria to test cases: ${bindError.message}` };
-    }
+  // Name the case each conflict is bound to, so the caller reports under it
+  // (a case the person added in Work, or another report's) instead of
+  // minting a second case for the same criterion. Best effort.
+  const conflictCaseIds = [...new Set(outcomes.filter((o) => o.criterionBinding === 'conflict' && o.boundTestId).map((o) => o.boundTestId as string))];
+  if (conflictCaseIds.length > 0) {
+    const { data: boundRows } = await supabase.from('test_cases').select('id, test_id').in('id', conflictCaseIds);
+    const nameOf = new Map(((boundRows ?? []) as Array<{ id: string; test_id: string }>).map((row) => [row.id, row.test_id]));
+    for (const o of outcomes) if (o.criterionBinding === 'conflict') o.boundTestId = nameOf.get(o.boundTestId as string) ?? null;
   }
 
   // ── Phase C: the status writes — the step that fires the met-flip trigger.
   // Existing rows also refresh their detail fields; every reported row clears
   // staleness (a fresh result IS the re-verification).
+  // AD.3a: a held result writes no status (so nothing flips) and clears no
+  // staleness; it waits on the case as metadata.held. A result that counts
+  // replaces any held one: the newer run is the truth.
   for (const r of args.results) {
     const testId = r.test_id.trim();
     const outcome = outcomes.find((o) => o.testId === testId)!;
+    const held = holds(r.status);
+    if (held) outcome.held = true;
+    const priorMetadata = (existingByTestId.get(testId)?.metadata ?? {}) as AnyRecord;
     if (outcome.action === 'updated') {
       // Revival: a retired case that RAN again is live again by definition —
       // a fresh report clears retirement the same way it clears staleness.
-      const updatePayload: AnyRecord = {
-        status: r.status, stale: false, staleness_reason: null,
-        retired_at: null, retired_reason: null, updated_at: now,
-      };
+      const { held: _replaced, ...unheld } = priorMetadata;
+      const updatePayload: AnyRecord = held
+        ? { retired_at: null, retired_reason: null, updated_at: now, metadata: { ...priorMetadata, held: heldFor(r) } }
+        : {
+          status: r.status, stale: false, staleness_reason: null,
+          retired_at: null, retired_reason: null, updated_at: now,
+          ...('held' in priorMetadata ? { metadata: unheld } : {}),
+        };
       if (r.name !== undefined) updatePayload.name = r.name;
       if (r.description !== undefined) updatePayload.description = r.description;
       if (r.test_type !== undefined) updatePayload.test_type = r.test_type;
@@ -269,7 +377,9 @@ export async function handleReportTestResults(
       // carries the real status so the AFTER UPDATE OF status trigger fires.
       const { error: statusError } = await supabase
         .from('test_cases')
-        .update({ status: r.status, stale: false, staleness_reason: null, updated_at: now })
+        .update(held
+          ? { metadata: { held: heldFor(r) }, updated_at: now }
+          : { status: r.status, stale: false, staleness_reason: null, updated_at: now })
         .eq('id', outcome.caseId);
       if (statusError) {
         return { success: false, error: `Failed to set status for test case ${testId}: ${statusError.message}` };
@@ -277,16 +387,28 @@ export async function handleReportTestResults(
     }
   }
 
-  // ── Phase D: the triage receipt. REREAD the criteria after the writes — the
-  // trigger has run by now, so `met` is post-flip truth, not a client simulation.
-  const { data: reread } = await supabase
-    .from('specification_requirements')
-    .select('acceptance_criteria')
-    .eq('id', requirement.id)
-    .maybeSingle();
-  const postCriteria: AnyRecord[] = (Array.isArray(reread?.acceptance_criteria)
-    ? (reread!.acceptance_criteria as unknown[])
-    : []).map((c) => (typeof c === 'string' ? { text: c } : { ...(c as AnyRecord) }));
+  // ── Phase D: the flip, the stamp and the receipt — ONE locked call.
+  //
+  // R2: this used to be a re-read followed by a whole-array write, and both
+  // halves were wrong under concurrency. The re-read is a snapshot taken
+  // outside any transaction, so the `met` it reports can be reverted by another
+  // writer a moment later; the write clobbers whatever moved underneath it.
+  //
+  // Now the flip is EXPLICIT rather than an invisible trigger side effect: the
+  // tool states the met it means, the stamp it means and the staleness it
+  // clears as one batch of operations, the writer applies them under the row
+  // lock, and the criteria it returns ARE the receipt. The met-flip trigger
+  // still fires on the status write in phase C and still reaches the same
+  // answer — set_met is idempotent, so the trigger stays as the backstop for
+  // status writes that never came through this tool.
+  const boundTextByCase = new Map<string, string>();
+  for (const c of preCriteria) {
+    if (typeof c.testId === 'string' && typeof c.text === 'string') boundTextByCase.set(c.testId, c.text);
+  }
+  for (const o of outcomes) {
+    if (o.criterionBinding === 'bound' && o.criterionText) boundTextByCase.set(o.caseId, o.criterionText);
+  }
+  const preByText = new Map(preCriteria.filter((c) => typeof c.text === 'string').map((c) => [c.text as string, c]));
 
   const affected = new Set(outcomes.map((o) => o.caseId));
   const frameworkByCaseId = new Map<string, string>();
@@ -294,59 +416,138 @@ export async function handleReportTestResults(
     if (r.framework !== undefined) frameworkByCaseId.set(caseIdByTestId.get(r.test_id.trim())!, r.framework);
   }
 
-  // Provenance parity with R5's git ticks (criterion-deltas.ts applyTickDeltas): the
-  // trigger flips met but stamps NOTHING, so without this a test-flipped criterion is
-  // unauditable. Stamp { source: 'test', testCaseId, framework?, at } on every
-  // criterion whose met CHANGED due to this call, preserving every other key, in one
-  // follow-up update.
-  const preMetByText = new Map(preCriteria.filter((c) => typeof c.text === 'string').map((c) => [c.text as string, c.met]));
-  // E1: a criterion carrying an evidenceStale mark (git-lane source change, or an
-  // update_test_case release) whose bound case was RUN this call is re-verified by
-  // that run — passed or failed, the fresh outcome IS the current truth, so the
-  // mark clears alongside the flip. Statuses that are not runs (skipped, running,
-  // not_started) clear nothing.
-  const ranCaseIds = new Set(
-    outcomes.filter((o) => o.status === 'passed' || o.status === 'failed').map((o) => o.caseId),
-  );
+  const ops: AnyRecord[] = [];
   let stamped = 0;
   let staleCleared = 0;
-  const stampedCriteria = postCriteria.map((c) => {
-    if (typeof c.testId !== 'string' || !affected.has(c.testId)) return c;
-    let next = c;
-    if (next.evidenceStale && ranCaseIds.has(c.testId)) {
-      const { evidenceStale: _cleared, ...rest } = next;
-      next = rest;
+  for (const o of outcomes) {
+    // Only a RUN is evidence. skipped / running / not_started record a state
+    // and prove nothing, so they touch no criterion — same rule the trigger has.
+    if (o.status !== 'passed' && o.status !== 'failed') continue;
+    if (o.held) continue; // AD.3a: counts when its commit reaches the tracked branch
+    const text = boundTextByCase.get(o.caseId);
+    if (!text) continue; // unbound: reported back, never guessed at
+    const pre = preByText.get(text) ?? {};
+    const intended = o.status === 'passed';
+
+    ops.push({ op: 'set_met', test_id: o.caseId, value: intended });
+
+    // E1: a criterion carrying an evidenceStale mark whose bound case was RUN
+    // is re-verified by that run — passed or failed, the fresh outcome is the
+    // current truth, so the mark clears alongside the flip.
+    if (pre.evidenceStale) {
+      ops.push({ op: 'clear_stale', test_id: o.caseId });
       staleCleared++;
     }
-    const metChanged = preMetByText.get(c.text as string) !== c.met;
-    if (!metChanged) return next;
-    stamped++;
-    const framework = frameworkByCaseId.get(c.testId);
-    return {
-      ...next,
-      provenance: { source: 'test', testCaseId: c.testId, ...(framework ? { framework } : {}), at: now },
-    };
-  });
-  if (stamped + staleCleared > 0) {
-    const { error: stampError } = await supabase
-      .from('specification_requirements')
-      .update({ acceptance_criteria: stampedCriteria, updated_at: now })
-      .eq('id', requirement.id);
-    if (stampError) {
-      return { success: false, error: `Failed to stamp criterion provenance: ${stampError.message}` };
+    // Provenance parity with R5's git ticks: stamped only on an actual flip, so
+    // a re-run that confirms what was already true does not rewrite history.
+    if (pre.met !== intended) {
+      const framework = frameworkByCaseId.get(o.caseId);
+      stamped++;
+      ops.push({
+        op: 'stamp',
+        test_id: o.caseId,
+        value: { source: 'test', testCaseId: o.caseId, ...(framework ? { framework } : {}), at: now, ...(gitStamp ?? {}) },
+      });
     }
   }
 
-  const flippedCriteria = stampedCriteria
+  let postCriteria: AnyRecord[] = [];
+  if (ops.length > 0) {
+    const { data: applied, error: applyError } = await supabase.rpc('apply_criteria_ops', {
+      p_requirement_id: requirement.id,
+      p_ops: ops,
+    });
+    if (applyError) {
+      return { success: false, error: `Results recorded, but applying them to the criteria failed: ${applyError.message}` };
+    }
+    postCriteria = (Array.isArray((applied as AnyRecord | null)?.criteria)
+      ? ((applied as AnyRecord).criteria as unknown[])
+      : []).map((c) => ({ ...(c as AnyRecord) }));
+  } else {
+    // Nothing ran (all skipped / running): no write, so a plain read is the
+    // honest receipt — there is nothing for a concurrent writer to have moved
+    // out from under a claim this call is not making.
+    const { data: reread } = await supabase
+      .from('specification_requirements')
+      .select('acceptance_criteria')
+      .eq('id', requirement.id)
+      .maybeSingle();
+    postCriteria = (Array.isArray(reread?.acceptance_criteria) ? (reread!.acceptance_criteria as unknown[]) : [])
+      .map((c) => (typeof c === 'string' ? { text: c } : { ...(c as AnyRecord) }));
+  }
+
+  const flippedCriteria = postCriteria
     .filter((c) => typeof c.testId === 'string' && affected.has(c.testId))
     .map((c) => ({ text: String(c.text ?? ''), met: c.met === true, testId: c.testId as string }));
 
   const created = outcomes.filter((o) => o.action === 'created').length;
-  const passed = outcomes.filter((o) => o.status === 'passed').length;
-  const failed = outcomes.filter((o) => o.status === 'failed').length;
+  // Held results are recorded but prove nothing yet: they release no lease.
+  const passed = outcomes.filter((o) => o.status === 'passed' && !o.held).length;
+  const failed = outcomes.filter((o) => o.status === 'failed' && !o.held).length;
+  const heldOutcomes = outcomes.filter((o) => o.held);
   const unbound = outcomes.filter((o) => o.criterionBinding === 'unbound');
   const conflicts = outcomes.filter((o) => o.criterionBinding === 'conflict');
   const manualLane = outcomes.filter((o) => o.criterionBinding === 'manual-lane');
+
+  // ── V3 (task 2.6): the verification exit. A lease ends three ways —
+  // explicit release, heartbeat expiry, or THIS: evidence. A report carrying
+  // at least one PASSING result releases the CALLER's own active task-level
+  // checkouts on tasks whose node is mapped to this requirement, reason
+  // 'verified' — the released row is the audit trail that tests, not a bare
+  // "done", closed the loop (mark_entity_complete never touches leases).
+  // Failing-only reports release nothing: red evidence holds the checkout.
+  // Best-effort by design — a release hiccup must never fail an
+  // already-recorded report — and scoped to holder_key_id = the reporting
+  // key, so a teammate's lease on the same task line is never swept.
+  let checkoutsReleased: Array<{ checkoutId: string; taskItemId: string; commitSha?: string }> = [];
+  const me = holderIdentity(auth);
+  if (passed > 0 && (auth.keyId || me)) {
+    try {
+      // R7: "the caller's own" is by credential — an OAuth connector has no
+      // key id, so the board is read for the project and filtered here.
+      const { data: activeLeases } = await supabase
+        .from('agent_checkouts')
+        .select('id, task_item_id, holder_key_id, holder_delegate, meta')
+        .eq('project_id', projectId)
+        .eq('level', 'task')
+        .is('released_at', null);
+      const leases = ((activeLeases ?? []) as Array<{ id: string; task_item_id: string; holder_key_id: string | null; holder_delegate: string | null; meta: Record<string, unknown> | null }>)
+        .filter((l) => isMine(auth, me, l));
+      if (leases.length > 0) {
+        const { data: mappedNodes } = await supabase
+          .from('specification_mappings')
+          .select('node_id')
+          .eq('requirement_id', requirement.id);
+        const nodeIds = new Set(((mappedNodes ?? []) as Array<{ node_id: string }>).map((m) => m.node_id));
+        if (nodeIds.size > 0) {
+          const { data: heldTasks } = await supabase
+            .from('task_items')
+            .select('id, node_id')
+            .in('id', leases.map((l) => l.task_item_id));
+          const nodeByTask = new Map(
+            ((heldTasks ?? []) as Array<{ id: string; node_id: string }>).map((t) => [t.id, t.node_id]),
+          );
+          const toRelease = leases.filter((l) => nodeIds.has(nodeByTask.get(l.task_item_id) ?? ''));
+          // R8: the verified row carries the evidence that closed it — the
+          // requirement and, when the agent said so, the commit. Per row, so
+          // each lease keeps its own progress meta.
+          const released: typeof checkoutsReleased = [];
+          for (const l of toRelease) {
+            const verified = { at: now, requirementId: requirement.requirement_id, ...(gitStamp ?? {}) };
+            const { error: releaseError } = await supabase
+              .from('agent_checkouts')
+              .update({ released_at: now, released_reason: 'verified', meta: { ...(l.meta ?? {}), verified } })
+              .eq('id', l.id)
+              .is('released_at', null);
+            if (!releaseError) released.push({ checkoutId: l.id, taskItemId: l.task_item_id, ...(commitSha ? { commitSha } : {}) });
+          }
+          checkoutsReleased = released;
+        }
+      }
+    } catch (_err) {
+      // The report is already recorded; the lease exits on heartbeat expiry.
+    }
+  }
 
   // ── Plan-lane alignment: evidence rows without a stored test-plan artifact are
   // ORPHANS the repo cannot explain — the canvas shows test cards while
@@ -388,7 +589,7 @@ export async function handleReportTestResults(
     warnings.push(`${unbound.length} criterion_text value(s) matched NO criterion exactly (${unbound.map((o) => `"${o.criterionText}"`).join(', ')}) — nothing was bound for them; check list_requirements for the exact text.`);
   }
   if (conflicts.length > 0) {
-    warnings.push(`${conflicts.length} criterion(s) already bound to a DIFFERENT test case were left untouched (${conflicts.map((o) => `"${o.criterionText}"`).join(', ')}) — rebind via the app if the old case is obsolete.`);
+    warnings.push(`${conflicts.length} criterion(s) are already bound to another test case and were left untouched (${conflicts.map((o) => `"${o.criterionText}" is ${o.boundTestId ? `${o.boundTestId}'s` : "another case's"}`).join(', ')}): report the run under that test_id instead of a new one, or retire that case via update_test_case if it is obsolete.`);
   }
   // Appended LAST: binding warnings stay first (their wording is pinned by tests
   // and is what triage acts on before anything else).
@@ -407,7 +608,7 @@ export async function handleReportTestResults(
     .eq('requirement_id', requirement.id)
     .is('retired_at', null);
   const budget = typeof totalCasesForRequirement === 'number'
-    ? assessTestBudget({ criteriaTotal: workingCriteria.length, testsTotal: totalCasesForRequirement })
+    ? assessTestBudget({ criteriaTotal: preCriteria.length, testsTotal: totalCasesForRequirement })
     : null;
 
   return {
@@ -420,6 +621,10 @@ export async function handleReportTestResults(
       results: outcomes,
       flippedCriteria,
       criteriaStamped: stamped,
+      ...(checkoutsReleased.length > 0 ? { checkoutsReleased } : {}),
+      ...(heldOutcomes.length > 0 && holdFor
+        ? { held: { commitSha: holdFor.sha, ref: holdFor.ref, testIds: heldOutcomes.map((o) => o.testId) } }
+        : {}),
       ...(testPlan ? { testPlan } : {}),
       ...(budget?.overBudget
         ? {
@@ -433,9 +638,17 @@ export async function handleReportTestResults(
         : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
       message: `Recorded ${outcomes.length} test result(s) for ${requirement.requirement_id} (${passed} passed, ${failed} failed). ` +
+        (heldOutcomes.length > 0 && holdFor
+          ? `${heldOutcomes.length} held: commit ${holdFor.sha.slice(0, 7)} is not on ${holdFor.ref} yet, so ${heldOutcomes.length === 1 ? 'it counts' : 'they count'} when the sync check sees it there. `
+          : '') +
         (flippedCriteria.length > 0
           ? `${flippedCriteria.length} linked acceptance criterion(s) now carry the post-result met state (see flippedCriteria).`
-          : 'No acceptance criterion is linked to these cases — pass criterion_text (the exact criterion wording) with each result to bind it, or set testId via the app.'),
+          : heldOutcomes.length === outcomes.length
+          ? ''
+          : 'No acceptance criterion is linked to these cases — pass criterion_text (the exact criterion wording) with each result to bind it, or set testId via the app.') +
+        (checkoutsReleased.length > 0
+          ? ` ${checkoutsReleased.length} task checkout(s) released as 'verified' — passing evidence is the verification exit.`
+          : ''),
       nextAction: failed > 0
         ? 'Failing results leave their criteria unmet. Fix the implementation, re-run exactly the failing tests, and report again — a fresh passing result flips the criterion met.'
         : 'Call get_build_readiness to confirm no tests advisories remain, or get_project_status for the project-wide coverage picture.',
@@ -652,10 +865,22 @@ export async function handleUpdateTestCase(
       target ? 'case-reassigned' : 'case-retired',
     );
     if (release.changed) {
-      const { error: releaseError } = await supabase
-        .from('specification_requirements')
-        .update({ acceptance_criteria: release.criteria, updated_at: now })
-        .eq('id', releaseOwner.id);
+      // R2: released through the ONE locked writer. releaseCriteriaBoundTo still
+      // runs, but only to work out WHICH criteria are affected for the receipt —
+      // the array it builds is no longer what gets written.
+      //
+      // Order matters and is not interchangeable: mark_stale selects by the
+      // testId the criterion still carries, so it has to land BEFORE unbind
+      // strips it. Reversed, the mark would match nothing and a released
+      // criterion would read proven-by-a-case-that-is-gone.
+      const reason = target ? 'case-reassigned' : 'case-retired';
+      const { error: releaseError } = await supabase.rpc('apply_criteria_ops', {
+        p_requirement_id: releaseOwner.id,
+        p_ops: [
+          { op: 'mark_stale', test_id: caseId, value: { at: now, reason } },
+          { op: 'unbind', test_id: caseId },
+        ],
+      });
       if (releaseError) {
         return { success: false, error: `Test case updated, but releasing its criterion bindings on ${releaseOwner.requirement_id} failed: ${releaseError.message}` };
       }
@@ -670,35 +895,53 @@ export async function handleUpdateTestCase(
   if (args.criterion_text !== undefined) {
     // retire+bind was refused up front, so the bind owner's criteria row is
     // untouched by the release above (which only wrote the OLD owner on reassign).
-    const bindOwner = finalOwner;
-    const criteria = asCriteria(bindOwner.acceptance_criteria);
-    const criterion = criteria.find((c) => c.text === args.criterion_text);
-    if (!criterion) {
-      binding = 'unbound';
-      notes.push(`criterion_text matched NO criterion on ${bindOwner.requirement_id} exactly — nothing was bound; check list_requirements for the exact text.`);
-    } else if (criterion.verification === 'manual') {
-      binding = 'manual-lane';
-      notes.push(`"${args.criterion_text}" is verification: 'manual' — binding REFUSED. Manual criteria are proven through the task-doc tick + user approval, never test cases.`);
-    } else {
+    // AL.10: decided on the owner as read and bound only if it has not moved
+    // since; a binding another agent made meanwhile is read again and reads
+    // as a conflict, never overwritten (three tries).
+    let bindOwner = finalOwner;
+    for (let attempt = 1; ; attempt++) {
+      const criteria = asCriteria(bindOwner.acceptance_criteria);
+      const criterion = criteria.find((c) => c.text === args.criterion_text);
+      if (!criterion) {
+        binding = 'unbound';
+        notes.push(`criterion_text matched NO criterion on ${bindOwner.requirement_id} exactly, so nothing was bound; check list_requirements for the exact text.`);
+        break;
+      }
+      if (criterion.verification === 'manual') {
+        binding = 'manual-lane';
+        notes.push(`"${args.criterion_text}" is verification: 'manual', so binding is REFUSED. Manual criteria are proven through the task-doc tick + user approval, never test cases.`);
+        break;
+      }
       const boundTo = typeof criterion.testId === 'string' && criterion.testId.length > 0 ? criterion.testId : null;
       if (boundTo && boundTo !== caseId) {
         binding = 'conflict';
-        notes.push(`"${args.criterion_text}" is already bound to a DIFFERENT test case — never stolen. Retire or reassign the other case first if it is obsolete.`);
-      } else if (boundTo === caseId) {
-        binding = 'already-bound';
-      } else {
-        criterion.testId = caseId;
-        const { error: bindError } = await supabase
-          .from('specification_requirements')
-          .update({ acceptance_criteria: criteria, updated_at: now })
-          .eq('id', bindOwner.id);
-        if (bindError) {
-          return { success: false, error: `Test case updated, but binding the criterion failed: ${bindError.message}` };
-        }
-        binding = 'bound';
-        changes.push(`bound criterion "${args.criterion_text}" on ${bindOwner.requirement_id}`);
-        notes.push('Binding alone never flips met — run the test and report the outcome via report_test_results to prove the criterion.');
+        const { data: boundRow } = await supabase.from('test_cases').select('test_id').eq('id', boundTo).maybeSingle();
+        const boundLabel = (boundRow as { test_id?: string } | null)?.test_id ?? 'a different test case';
+        notes.push(`"${args.criterion_text}" is already bound to ${boundLabel} — never stolen. Report under that test_id, or retire or reassign that case first if it is obsolete.`);
+        break;
       }
+      if (boundTo === caseId) {
+        binding = 'already-bound';
+        break;
+      }
+      const { error: bindError } = await supabase.rpc('apply_criteria_ops', {
+        p_requirement_id: bindOwner.id,
+        p_ops: [{ op: 'bind', criterion_text: args.criterion_text, value: caseId }],
+        ...(bindOwner.updated_at ? { p_expected_updated_at: bindOwner.updated_at } : {}),
+      });
+      if (bindError && movedMeanwhile(bindError) && attempt < 3) {
+        const again = await resolveRequirementRow(supabase, spec.id, bindOwner.id);
+        if (!again) return { success: false, error: `Test case updated, but ${bindOwner.requirement_id} is gone, so nothing was bound.` };
+        bindOwner = again;
+        continue;
+      }
+      if (bindError) {
+        return { success: false, error: `Test case updated, but binding the criterion failed: ${bindError.message}` };
+      }
+      binding = 'bound';
+      changes.push(`bound criterion "${args.criterion_text}" on ${bindOwner.requirement_id}`);
+      notes.push('Binding alone never flips met: run the test and report the outcome via report_test_results to prove the criterion.');
+      break;
     }
   }
 

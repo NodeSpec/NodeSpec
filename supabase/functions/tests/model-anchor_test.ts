@@ -128,7 +128,7 @@ Deno.test('tampered anchors fail hash verification', async () => {
 
 // ── the is_main fix: pin the matcher's branch filter via recorded filter args ─────────
 
-Deno.test('matchFilesToArtifacts looks up the main branch by NAME (is_main never existed)', async () => {
+Deno.test('matchFilesToArtifacts looks up the primary branch by its flag (is_main never existed)', async () => {
   const sb = new FakeSupabase();
   sb.script('branches', 'select', { data: { id: 'b1' }, error: null });
   sb.script('graph_snapshots', 'select', { data: { graph_data: sampleGraph() }, error: null });
@@ -138,9 +138,10 @@ Deno.test('matchFilesToArtifacts looks up the main branch by NAME (is_main never
   ]);
 
   const branchCall = sb.callsTo('branches', 'select')[0];
+  // AD.4 (D15): the primary by its flag, not by the name 'main'.
   assert(
-    branchCall.filters.some((f) => f.method === 'eq' && f.args[0] === 'name' && f.args[1] === 'main'),
-    'filters by name === main',
+    branchCall.filters.some((f) => f.method === 'eq' && f.args[0] === 'is_primary' && f.args[1] === true),
+    'filters by is_primary',
   );
   assert(
     !branchCall.filters.some((f) => f.args[0] === 'is_main'),

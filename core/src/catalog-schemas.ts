@@ -128,6 +128,10 @@ export const AiContextSchema = z.object({
   /** 'boundary' is the only value effectiveTreatment honors; anything else was a
    *  silent no-op, which is exactly the drift class this gate exists to stop. */
   treatmentOverride: z.literal('boundary').optional(),
+  /** AA.3b: a data store's data model. It names how an exploded database groups what it
+   *  holds (schemas of tables, collections, key patterns, keyspaces) and the shape strip
+   *  the canvas draws on it. Only data-store technologies carry it. */
+  dataModel: z.enum(['relational', 'document', 'key-value', 'wide-column', 'graph']).optional(),
   provenance: AiContextProvenanceSchema.optional(),
 }).strict();
 export type AiContext = z.infer<typeof AiContextSchema>;
@@ -165,7 +169,6 @@ export const NodeRoleRowSchema = z.object({
   container_style: ContainerStyleSchema.nullable().optional(),
   can_contain: CanContainSchema.nullable().optional(),
   metadata_schema: z.record(z.string(), z.unknown()).nullable().optional(),
-  default_ports: z.array(z.unknown()).default([]),
   suggested_contracts: z.array(z.unknown()).default([]),
   sort_order: z.number(),
   capability_tags: z.array(z.string()).default([]),
@@ -257,6 +260,11 @@ export function validateCatalogFiling(
   }
   if (!r.is_container && r.container_style) {
     errors.push(`${where}: container_style is set on a non-container`);
+  }
+  // AB.5: only a container is drawn as one; a leaf drawn as a box read as a
+  // container on the canvas (desktop-app, 2026-09-24).
+  if (!r.is_container && r.rf_visual_type === 'container') {
+    errors.push(`${where}: rf_visual_type 'container' is set on a non-container`);
   }
   // `container_layer` is a render hint (M1c kept it), but it double-encodes the
   // hosting-vs-logical split — a contradictory pair renders one truth in one component

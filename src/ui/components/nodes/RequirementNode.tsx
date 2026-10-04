@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import { Handle, Position } from '@xyflow/react';
+import { LeafHandles } from './LeafHandles.js';
 import type { RFNodeData } from '../../adapters/graph-to-reactflow.js';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { Lock, LockOpen as Unlock, ShieldCheck, TestTube as TestTube2 } from 'lucide-react';
@@ -166,23 +166,9 @@ function RequirementNodeComponent({ data, selected, highlighted }: RequirementNo
     border: `2px solid ${categoryColor}`,
   };
 
-  const inputPorts = data.ports?.filter(p => p.direction === 'in') || [];
-  const outputPorts = data.ports?.filter(p => p.direction === 'out') || [];
-
   return (
     <div style={containerStyles} onClick={onClick}>
-      {inputPorts.map((_, index) => (
-        <Handle
-          key={`in-${index}`}
-          type="target"
-          position={Position.Left}
-          id={`in-${index}`}
-          style={{
-            ...handleStyles,
-            top: `${((index + 1) * 100) / (inputPorts.length + 1)}%`,
-          }}
-        />
-      ))}
+      <LeafHandles style={handleStyles} source={false} />
 
       <div style={headerStyles}>
         <span style={reqIdStyles}>{requirementId}</span>
@@ -344,18 +330,7 @@ function RequirementNodeComponent({ data, selected, highlighted }: RequirementNo
         </div>
       </div>
 
-      {outputPorts.map((_, index) => (
-        <Handle
-          key={`out-${index}`}
-          type="source"
-          position={Position.Right}
-          id={`out-${index}`}
-          style={{
-            ...handleStyles,
-            top: `${((index + 1) * 100) / (outputPorts.length + 1)}%`,
-          }}
-        />
-      ))}
+      <LeafHandles style={handleStyles} target={false} />
     </div>
   );
 }

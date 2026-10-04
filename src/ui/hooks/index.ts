@@ -1,4 +1,3 @@
-export { useCodeExplosion } from './useCodeExplosion.js';
 export { useRealtimeSpecification } from './useRealtimeSpecification.js';
 export { useRealtimeMappings } from './useRealtimeMappings.js';
 export { useRequirementStatus } from './useRequirementStatus.js';
@@ -6,10 +5,7 @@ export { useSmoothRefresh } from './useSmoothRefresh.js';
 export { useAgentStream } from './useAgentStream.js';
 export { useCatalog } from './useCatalog.js';
 export { useDragReparent } from './useDragReparent.js';
-export { useLibraryExports } from './useLibraryExports.js';
 export { useFeatureGate } from './useFeatureGate.js';
 export type { Feature, PlanTier, FeatureGate } from './useFeatureGate.js';
 export { usePageSeo } from './usePageSeo.js';
 export { SITE_NAME, BASE_URL, DEFAULT_IMAGE } from './usePageSeo.js';
-export { useAIAvailability, useAIAvailabilityProvider, AIAvailabilityContext } from './useAIAvailability.js';
-export type { AIAvailability } from './useAIAvailability.js';

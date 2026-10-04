@@ -6,7 +6,7 @@ import {
   mapDeleteSelectionToPatches,
 } from '../ui/adapters/interaction-to-patch.js';
 import { createEmptyGraph } from '@nodespec/core/utils.js';
-import type { Graph, Node, Contract, AddContractPatch, AddEdgePatch, ConnectPortsPatch } from '@nodespec/core/types.js';
+import type { Graph, Node, Contract, AddContractPatch, AddEdgePatch } from '@nodespec/core/types.js';
 import type { NodeChange, EdgeChange, Connection } from '@xyflow/react';
 
 const NODE_1_ID = '11111111-1111-4111-8111-111111111111';
@@ -206,26 +206,31 @@ describe('Interaction to Patch Adapter', () => {
       expect(edgePatch.payload.target).toBe(NODE_2_ID);
     });
 
-    it('should emit connect_ports patch when nodes have ports', () => {
+    // AG.13 (owner 2026-09-28): a node that still carries legacy ports is
+    // connected like any other: a contract and an edge, no port ids, even when
+    // the connection names a stored port as its handle.
+    it('connects nodes that carry legacy ports with add_contract and add_edge, no port ids', () => {
       const graph = createGraphWithNodes(true);
       delete graph.edges[EDGE_1_ID];
       delete graph.contracts[CONTRACT_1_ID];
+      const legacyOut = graph.nodes[NODE_1_ID].ports?.find(p => p.direction === 'out');
+      expect(legacyOut).toBeDefined();
 
       const connection: Connection = {
         source: NODE_1_ID,
         target: NODE_2_ID,
-        sourceHandle: null,
+        sourceHandle: legacyOut!.id,
         targetHandle: null,
       };
 
       const result = mapConnectionToPatches(connection, graph, patchOptions);
 
-      expect(result.patches).toHaveLength(1);
-      expect(result.patches[0].type).toBe('connect_ports');
-
-      const patch = result.patches[0] as ConnectPortsPatch;
-      expect(patch.payload.sourceNodeId).toBe(NODE_1_ID);
-      expect(patch.payload.targetNodeId).toBe(NODE_2_ID);
+      expect(result.patches.map(p => p.type)).toEqual(['add_contract', 'add_edge']);
+      const edgePatch = result.patches[1] as AddEdgePatch;
+      expect(edgePatch.payload.source).toBe(NODE_1_ID);
+      expect(edgePatch.payload.target).toBe(NODE_2_ID);
+      expect(edgePatch.payload).not.toHaveProperty('sourcePortId');
+      expect(edgePatch.payload).not.toHaveProperty('targetPortId');
     });
 
     it('should block connection when source node missing', () => {

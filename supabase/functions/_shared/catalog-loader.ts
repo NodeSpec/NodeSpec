@@ -35,7 +35,6 @@ export interface NodeRoleRow {
   container_style: 'hosting' | 'logical-boundary' | null;
   can_contain: string[] | CanContainRule;
   metadata_schema: Record<string, unknown>;
-  default_ports: Array<{ name: string; direction: 'in' | 'out' }>;
   suggested_contracts: Array<{ kind: string; name: string }>;
   sort_order: number;
   capability_tags: string[];
@@ -153,11 +152,25 @@ export function registerTechnologyAliases(map: Record<string, TechnologyRow>): R
   return map;
 }
 
-export async function loadCatalogs(supabase: SupabaseClient): Promise<CatalogData> {
+/** AG.6c (2026-09-28): the projects whose custom technology rows a read may see. The
+ * server reads with the service role, which RLS does not narrow, so without this an
+ * import or an MCP call could read, and stamp on a node, another project's custom row.
+ * A custom row whose project is not listed (or that has none) is dropped. */
+export interface CatalogScope {
+  projectIds: ReadonlyArray<string>;
+}
+
+/** True when a technology row is readable in this scope: every catalog row, and a
+ * custom row only inside a project the scope lists. */
+export function technologyInScope(row: { is_user_contributed?: boolean | null; project_id?: string | null }, scope: CatalogScope): boolean {
+  return !row.is_user_contributed || (!!row.project_id && scope.projectIds.includes(row.project_id));
+}
+
+export async function loadCatalogs(supabase: SupabaseClient, scope?: CatalogScope): Promise<CatalogData> {
   const [rolesResult, techResult, targetsResult, patternsResult, archetypesResult] = await Promise.all([
     supabase
       .from('node_roles')
-      .select('id, label, description, icon_name, color, rf_visual_type, palette_category, nature, interface_kind, provider, is_container, container_layer, container_style, can_contain, metadata_schema, default_ports, suggested_contracts, sort_order, capability_tags, default_technology, when_to_use, deprecated')
+      .select('id, label, description, icon_name, color, rf_visual_type, palette_category, nature, interface_kind, provider, is_container, container_layer, container_style, can_contain, metadata_schema, suggested_contracts, sort_order, capability_tags, default_technology, when_to_use, deprecated')
       .order('sort_order'),
     supabase
       .from('technology_catalog')
@@ -199,6 +212,7 @@ export async function loadCatalogs(supabase: SupabaseClient): Promise<CatalogDat
   for (const raw of (techResult.data ?? []) as Record<string, unknown>[]) {
     const parsed = parseTechnology(raw);
     if (!parsed.ok) { catalogIssues.push(...parsed.issues); continue; }
+    if (scope && !technologyInScope(raw as { is_user_contributed?: boolean; project_id?: string | null }, scope)) continue;
     techRows.push(raw as unknown as TechnologyRow);
   }
   if (catalogIssues.length > 0) {

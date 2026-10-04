@@ -20,13 +20,9 @@
 //                         (Test Strategy edits preserved, response says
 //                         testPlanRefreshed + note); a matching fingerprint
 //                         serves the stored plan verbatim, untouched.
-import { callFn, rest, github, mcpCall, Scenario } from '../lib.mjs';
+import { callFn, rest, github, mcpCall, Scenario, parseMcp } from '../lib.mjs';
 import { createProject, connectRepo, bumpArtifactContent } from '../fixtures.mjs';
 
-const parseMcp = (r) => {
-  const text = r.data?.result?.content?.[0]?.text;
-  try { return JSON.parse(text); } catch { return { raw: text, isError: r.data?.result?.isError }; }
-};
 
 export const unchangedPush = {
   name: 'unchanged-push',

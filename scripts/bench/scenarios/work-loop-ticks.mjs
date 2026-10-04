@@ -4,15 +4,16 @@
 //   anchored task doc pushed → an OOB commit ticks a T-task AND a MANUAL
 //   criterion → the WEBHOOK card carries BOTH delta kinds (A3+A4 producers)
 //   → get_pending_changes projects them (A5) → resolve_change apply_ticks
-//   flips the manual criterion met (the A2 "(manual)" fix, live) AND marks
-//   the task done in task_items (A1) with git provenance → a re-resolve is
-//   refused (the card is resolved; stamp guards are Deno-pinned).
+//   marks the task done in task_items (A1) with git provenance and leaves
+//   the manual criterion for the person (AD.3, ruling 3) → the person
+//   applies it in the Git panel (git-pull apply-criteria), recorded as
+//   theirs → the card resolves → a re-resolve is refused.
 //
 // This scenario specializes ITS OWN project instance (createProject rows are
 // per-scenario): it adds a manual criterion to REQ-001 and replaces the
 // fixture's hand-authored task doc with an anchored one — the shared fixture
 // stays untouched for every other scenario.
-import { callFn, rest, github, postSignedWebhook, mcpCall, uid, until, Scenario } from '../lib.mjs';
+import { callFn, rest, github, postSignedWebhook, mcpCall, uid, until, Scenario, parseMcp } from '../lib.mjs';
 import { createProject, connectRepo } from '../fixtures.mjs';
 
 // Mirror of _shared/task-deltas.ts taskAnchorKey (FNV-1a 32-bit, hex8) — the
@@ -44,14 +45,10 @@ const anchoredDoc = () => [
   `- [ ] **T2 — ${T2_TITLE}** <!-- t:${anchorKey(T2_TITLE)} -->`, '',
 ].join('\n');
 
-const parseMcp = (r) => {
-  const text = r.data?.result?.content?.[0]?.text;
-  try { return JSON.parse(text); } catch { return { raw: text, isError: r.data?.result?.isError }; }
-};
 
 export const workLoopTicks = {
   name: 'work-loop-ticks',
-  boxes: ['A1 task_items', 'A2 (manual) round-trip', 'A3 webhook deltas', 'A4 task tick lane', 'A5 apply_ticks'],
+  boxes: ['A1 task_items', 'A2 (manual) round-trip', 'A3 webhook deltas', 'A4 task tick lane', 'A5 apply_ticks', 'AD.3 ticks split'],
   async run(env, session) {
     const s = new Scenario(this.name, this.boxes);
     const fx = await createProject(env, session, 'workloop');
@@ -110,7 +107,7 @@ export const workLoopTicks = {
 
     const cards = await until(async () => {
       const rows = await db.select('git_change_events',
-        `project_id=eq.${fx.ids.project}&status=eq.pending&select=id,metadata`);
+        `project_id=eq.${fx.ids.project}&status=eq.pending&select=id,commit_sha,metadata`);
       return rows.length > 0 ? rows : null;
     });
     const card = cards?.[0];
@@ -129,17 +126,29 @@ export const workLoopTicks = {
     s.check('get_pending_changes projects both delta kinds (A5)',
       !!projected?.criterionDeltas && !!projected?.taskDeltas, JSON.stringify(projected ?? {}).slice(0, 300));
 
-    // A5: one resolve applies both families with git provenance.
+    // AD.3 (ruling 3): the agent's accept applies the task tick (Tasks at
+    // Auto-apply, the default) and never the criterion tick; the card stays
+    // pending for the person.
     const resolve = parseMcp(await mcpCall(env, 'resolve_change', {
-      change_event_id: card?.id, resolution: 'accepted', apply_ticks: true,
+      change_event_id: card?.id, commit_sha: card?.commit_sha, resolution: 'accepted', apply_ticks: true,
     }));
-    s.check('resolve_change apply_ticks applies 1 criterion + 1 task',
-      resolve?.criteriaApplied === 1 && resolve?.tasksApplied === 1, JSON.stringify(resolve ?? {}).slice(0, 300));
+    s.check('resolve_change applies the task tick and leaves the criterion tick for a person (AD.3)',
+      resolve?.tasksApplied === 1 && (resolve?.criteriaApplied ?? 0) === 0 &&
+      resolve?.resolution === 'pending' && resolve?.waitingForPerson?.criteria === 1,
+      JSON.stringify(resolve ?? {}).slice(0, 300));
+    let [req] = await db.select('specification_requirements', `id=eq.${fx.ids.req1}&select=acceptance_criteria`);
+    s.check('the agent\'s accept flipped no criterion',
+      req.acceptance_criteria.every((c) => c.met !== true), JSON.stringify(req.acceptance_criteria).slice(0, 300));
 
-    const [req] = await db.select('specification_requirements', `id=eq.${fx.ids.req1}&select=acceptance_criteria`);
+    // The person applies it in the Git panel: recorded as theirs.
+    const apply = await callFn(env, session, 'git-pull', { integrationId, mode: 'apply-criteria', changeEventId: card?.id });
+    s.check('the person applies the criterion tick', apply.data.success && apply.data.applied === 1,
+      JSON.stringify(apply.data).slice(0, 200));
+    [req] = await db.select('specification_requirements', `id=eq.${fx.ids.req1}&select=acceptance_criteria`);
     const manual = req.acceptance_criteria.find((c) => c.text === MANUAL_TEXT);
-    s.check('manual criterion met with git provenance (the lane the docs promise)',
-      manual?.met === true && manual?.provenance?.source === 'git' && !!manual?.provenance?.commitSha,
+    s.check('manual criterion met with git provenance, applied by the person',
+      manual?.met === true && manual?.provenance?.source === 'git' && !!manual?.provenance?.commitSha &&
+      manual?.provenance?.appliedBy === session.userId,
       JSON.stringify(req.acceptance_criteria).slice(0, 300));
     const others = req.acceptance_criteria.filter((c) => c.text !== MANUAL_TEXT);
     s.check('unticked criteria stay unmet (no fabrication)', others.every((c) => c.met !== true));
@@ -153,12 +162,20 @@ export const workLoopTicks = {
     s.check('the unticked T2 has no state row (state is earned, not pre-registered)',
       !taskRows.some((r) => r.task_key === anchorKey(T2_TITLE)));
 
-    // Guard: the card is resolved — a second apply attempt is refused.
-    const again = parseMcp(await mcpCall(env, 'resolve_change', {
-      change_event_id: card?.id, resolution: 'accepted', apply_ticks: true,
+    // Nothing waits any more: the accept resolves the card.
+    const settled = parseMcp(await mcpCall(env, 'resolve_change', {
+      change_event_id: card?.id, commit_sha: card?.commit_sha, resolution: 'accepted',
     }));
+    s.check('with every tick applied, the accept resolves the card', settled?.resolution === 'accepted',
+      JSON.stringify(settled ?? {}).slice(0, 200));
+
+    // Guard: the card is resolved; a second apply attempt is refused.
+    const again = parseMcp(await mcpCall(env, 'resolve_change', {
+      change_event_id: card?.id, commit_sha: card?.commit_sha, resolution: 'accepted', apply_ticks: true,
+    }));
+    // UAT hardening 2026-09-27: any error used to count; the refusal names itself.
     s.check('re-resolve is refused (already resolved)',
-      again?.isError === true || /already resolved/i.test(String(again?.raw ?? again?.error ?? '')),
+      again?.isError === true && again?.transport !== true && /already resolved/i.test(String(again?.raw ?? again?.error ?? '')),
       JSON.stringify(again ?? {}).slice(0, 200));
 
     return { s, fx, integrationId };

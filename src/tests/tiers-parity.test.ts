@@ -6,8 +6,11 @@ import {
   LEGACY_TIER_ALIASES,
   TIER_RANK,
   HOSTED_COMMUNITY_PROJECT_LIMIT,
+  HOSTED_TIER_CEILING,
   canonicalizeTier,
+  hostedTier,
 } from '../ui/config/tiers.js';
+import { planFromSubscription } from '../ui/hooks/useFeatureGate.js';
 
 // The canonical tier vocabulary exists twice on purpose — the client bundle
 // cannot import Deno-path modules — and these pins are what keep the copies
@@ -61,5 +64,19 @@ describe('canonical tier vocabulary — client/server parity', () => {
     expect(canonicalizeTier(null)).toBe(null);
     // the Deno source carries the identical resolution ladder
     expect(denoSrc).toContain("if (s.includes('pro') || s.includes('architect') || s.includes('starter')) return 'team';");
+  });
+
+  // Audit (owner 2026-09-27): the managed site sells Free, Indie and Team;
+  // Enterprise and Government are licensed installs, so a hosted plan never
+  // resolves above Team, on either side.
+  it('a hosted plan stops at Team, in the app as on the server', () => {
+    expect(HOSTED_TIER_CEILING).toBe('team');
+    expect(CANONICAL_TIERS.map(hostedTier)).toEqual(['community', 'indie', 'team', 'team', 'team']);
+    expect(denoSrc).toContain("export const HOSTED_TIER_CEILING: PlanTier = 'team';");
+    expect(denoSrc).toContain('return TIER_RANK[tier] > TIER_RANK[HOSTED_TIER_CEILING] ? HOSTED_TIER_CEILING : tier;');
+    const sub = (planName: string) => ({ id: 's', planName, status: 'active', billingInterval: 'month', amountCents: 0, currency: 'usd', currentPeriodStart: null }) as never;
+    expect(planFromSubscription(sub('Government Annual'))).toBe('team');
+    expect(planFromSubscription(sub('enterprise'))).toBe('team');
+    expect(planFromSubscription(sub('indie'))).toBe('indie');
   });
 });

@@ -16,7 +16,6 @@ import {
   CONTRACT_KIND_EDGE_COLORS,
   INTERACTION_KIND_DASH,
   getContractKindColor,
-  getPortContractKind,
 } from '../ui/components/panels/inspector/kind-maps.js';
 import * as interactionAdapter from '../ui/adapters/interaction-to-patch.js';
 
@@ -72,23 +71,6 @@ describe('one visual vocabulary — full enum coverage (N8.6B)', () => {
     for (const ik of INTERACTION_KIND_VALUES) {
       expect(ik in INTERACTION_KIND_DASH, `missing dash row for ${ik}`).toBe(true);
     }
-  });
-});
-
-describe('port kind comes only from the connected contract (N8.6B)', () => {
-  it('connected port resolves the contract kind', () => {
-    const g = graphWithEdge();
-    const edges = Object.values(g.edges);
-    expect(getPortContractKind(P1, edges, g)).toBe('grpc');
-  });
-
-  it('unconnected port with a kind-prefixed NAME resolves nothing — the name hack is dead', () => {
-    const g = graphWithEdge();
-    const orphan = '66666666-6666-4666-8666-666666666666';
-    (g.nodes[N1].ports as Array<{ id: string; name: string; direction: string }>).push(
-      { id: orphan, name: 'REST Input', direction: 'in' },
-    );
-    expect(getPortContractKind(orphan, Object.values(g.edges), g)).toBeNull();
   });
 });
 

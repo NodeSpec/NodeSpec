@@ -67,7 +67,7 @@ function scriptContext(sb: FakeSupabase, g: any) {
   sb.script('project_specifications', 'select', { data: { id: 'spec-1', vision: 'Vision text', constraints: [], preferences: {} }, error: null });
   sb.script('specification_requirements', 'select', { data: [REQ_LIST_ROW], error: null });
   sb.script('specification_mappings', 'select', { data: [{ requirement_id: REQ_ROW, node_id: N_API }], error: null });
-  sb.script('project_specifications', 'select', { data: { phase_status: 'architecture_confirmed' }, error: null });
+  sb.script('project_specifications', 'select', { data: { id: 'spec-1', phase_status: 'architecture_confirmed' }, error: null });
 }
 
 const count = (haystack: string, needle: string) => haystack.split(needle).length - 1;
@@ -195,6 +195,35 @@ Deno.test('requirement target with a stored plan: state summary (path/stale/fing
   assertEquals(sb.callsTo('ai_proposals').length, 0);
 });
 
+Deno.test('requirement target by display id: REQ-001 is found, and only inside this project\'s specification', async () => {
+  const sb = new FakeSupabase();
+  scriptRequirementRead(sb, viewGraph(), [{ id: 'c1', status: 'passed', stale: false }]);
+
+  const r = await handleGetProjectContext(sb as never, READ_AUTH, { project_id: PROJECT.id, branch_id: BRANCH, target_type: 'requirement', target_id: 'REQ-001' });
+  assertEquals(r.success, true);
+  // deno-lint-ignore no-explicit-any
+  const data = r.data as any;
+  assertEquals(data.testPlan.exists, true, 'the plan state of REQ-001 is reported');
+  assertEquals(data.testPlan.testCaseSummary.passed, 1);
+  // The handler's own lookup (the last requirement read) names the column the
+  // display id lives in and the project's specification.
+  const lookup = sb.callsTo('specification_requirements', 'select').at(-1)!;
+  const eqs = lookup.filters.filter((f) => f.method === 'eq').map((f) => f.args);
+  assertEquals(eqs, [['specification_id', 'spec-1'], ['requirement_id', 'REQ-001']]);
+});
+
+Deno.test('requirement target by uuid is scoped too: the row must belong to this project\'s specification', async () => {
+  const sb = new FakeSupabase();
+  scriptRequirementRead(sb, viewGraph(), []);
+
+  const r = await handleGetProjectContext(sb as never, READ_AUTH, { project_id: PROJECT.id, branch_id: BRANCH, target_type: 'requirement', target_id: REQ_ROW });
+  assertEquals(r.success, true);
+  const lookup = sb.callsTo('specification_requirements', 'select').at(-1)!;
+  const eqs = lookup.filters.filter((f) => f.method === 'eq').map((f) => f.args);
+  assertEquals(eqs, [['specification_id', 'spec-1'], ['id', REQ_ROW]],
+    'a uuid from another project must not be read by id alone');
+});
+
 Deno.test('stale-phase fix (owner 2026-08-23): a resolved NODE target floors the hint phase at architecture_confirmed', async () => {
   // Same chain scriptContext builds, but the final phase read returns the
   // STALE wizard column value.
@@ -220,4 +249,47 @@ Deno.test('stale-phase fix (owner 2026-08-23): a resolved NODE target floors the
   // drafting; the hint must not claim requirements are still being drafted.
   assertEquals(hints.currentPhase, 'architecture_confirmed');
   assert(String(hints.nextStep).includes('implementation brief'), hints.nextStep);
+});
+
+// ── V3 2.2 (2026-09-19): headSequence and since_sequence on the overview ──────
+import { handleGetArchitectureOverview } from '../mcp-server/tools/context.ts';
+
+Deno.test('get_architecture_overview: headSequence rides every answer; since_sequence lists what came after, the user\'s edits included', async () => {
+  const sb = new FakeSupabase();
+  sb.script('projects', 'select', { data: { id: PROJECT.id, name: PROJECT.name }, error: null });
+  sb.script('branches', 'select', { data: { id: BRANCH, name: 'main', is_primary: true }, error: null });
+  sb.script('graph_patches', 'select', { data: { sequence: 9 }, error: null });
+  sb.script('graph_patches', 'select', { data: [
+    { sequence: 8, patch_type: 'update_node', actor_type: 'human', summary: 'renamed' },
+    { sequence: 9, patch_type: 'add_edge', actor_type: 'ai', summary: 'wired' },
+  ], error: null });
+  const r = await handleGetArchitectureOverview(sb as never, READ_AUTH, { project_id: PROJECT.id, since_sequence: 7 });
+  assertEquals(r.success, true, r.error);
+  const d = r.data as { headSequence: number; since?: { sinceSequence: number; patches: unknown[]; truncated: boolean } };
+  assertEquals(d.headSequence, 9);
+  assertEquals(d.since?.sinceSequence, 7);
+  assertEquals(d.since?.patches, [
+    { sequence: 8, actorType: 'human', type: 'update_node', summary: 'renamed' },
+    { sequence: 9, actorType: 'ai', type: 'add_edge', summary: 'wired' },
+  ]);
+  assertEquals(d.since?.truncated, false);
+});
+
+Deno.test('get_architecture_overview: no since block without since_sequence; a negative value is refused before any read', async () => {
+  const sb = new FakeSupabase();
+  sb.script('projects', 'select', { data: { id: PROJECT.id, name: PROJECT.name }, error: null });
+  sb.script('branches', 'select', { data: { id: BRANCH, name: 'main', is_primary: true }, error: null });
+  sb.script('graph_patches', 'select', { data: { sequence: 3 }, error: null });
+  const r = await handleGetArchitectureOverview(sb as never, READ_AUTH, { project_id: PROJECT.id });
+  assertEquals(r.success, true, r.error);
+  const d = r.data as Record<string, unknown>;
+  assertEquals(d.headSequence, 3);
+  assertEquals('since' in d, false);
+  assertEquals(sb.callsTo('graph_patches', 'select').length, 1, 'one read for the head, none for a since list');
+
+  const sb2 = new FakeSupabase();
+  const r2 = await handleGetArchitectureOverview(sb2 as never, READ_AUTH, { project_id: PROJECT.id, since_sequence: -4 });
+  assertEquals(r2.success, false);
+  assert((r2.error ?? '').includes('non-negative integer'), r2.error);
+  assertEquals(sb2.calls.length, 0);
 });

@@ -283,12 +283,28 @@ Deno.test("B3: computeRemainingBindings — only paths the pushed graph binds le
     "an unconsumed declaration must NEVER leave the file — bind-then-clear");
 });
 
-Deno.test("B3: git-push skips the rewrite when the parse flagged rows (never silently delete)", () => {
-  const src = Deno.readTextFileSync(new URL("../git-push/index.ts", import.meta.url));
-  assert(src.includes("parsedBindings.flagged.length === 0"),
-    "a rewrite with flagged rows would delete a malformed row before its author saw the flag");
-  assert(src.includes("consumed.length > 0"), "no-op pushes must not churn the file");
-  assert(/bindings cleanup skipped \(push continues\)/.test(src), "the clearing block must never fail a push");
+Deno.test("B3: the rewrite drops only bound declarations, and never over a flagged row or a no-op", async () => {
+  const { manifestAfterBinds } = await import("../_shared/binding-manifest.ts");
+  const bound = { path: "src/api/index.ts", node: "API Service", kind: "source" };
+  const waiting = { path: "src/new.ts", node: "API Service", kind: "source" };
+  const boundPaths = new Set(["src/api/index.ts"]);
+
+  const cleared = JSON.parse(manifestAfterBinds(JSON.stringify({ version: 1, bindings: [bound, waiting] }), boundPaths)!);
+  assertEquals(cleared.version, BINDINGS_VERSION);
+  assertEquals(cleared.bindings.map((b: { path: string }) => b.path), ["src/new.ts"], "the waiting declaration stays");
+  assert(typeof cleared.note === "string", "the guidance travels with the file");
+
+  const envelope = JSON.parse(manifestAfterBinds(JSON.stringify({ version: 1, bindings: [bound] }), boundPaths)!);
+  assertEquals(envelope.bindings, [], "the last consumed entry leaves the empty envelope");
+
+  assertEquals(
+    manifestAfterBinds(JSON.stringify({ version: 1, bindings: [bound, { ...waiting, kind: "task" }] }), boundPaths),
+    null,
+    "a flagged row: the file is left for its author, never rewritten from the parsed rows",
+  );
+  assertEquals(manifestAfterBinds(JSON.stringify({ version: 1, bindings: [waiting] }), boundPaths), null, "nothing consumed: no churn");
+  assertEquals(manifestAfterBinds(null, boundPaths), null, "no file");
+  assertEquals(manifestAfterBinds("not json", boundPaths), null, "unparseable is a flag");
 });
 
 Deno.test("B3: computeSweepBindingResolution resolves against the branch snapshot, read-only", async () => {
@@ -346,10 +362,13 @@ Deno.test("B3: absent declaration file or missing snapshot resolves to null (not
   assertEquals(waiting, null, "no snapshot -> declarations simply wait; no report");
 });
 
-Deno.test("B3: both card producers attach bindingResolution best-effort in the same shape", () => {
+Deno.test("B3: the one card producer attaches bindingResolution best-effort", () => {
+  // AD.1: the webhook no longer writes cards; it wakes the sync check, which
+  // is now the only producer.
   const webhook = Deno.readTextFileSync(new URL("../git-webhook/handlers.ts", import.meta.url));
+  assert(!webhook.includes('from("git_change_events")'), "the webhook writes no card");
   const drift = Deno.readTextFileSync(new URL("../_shared/git-drift.ts", import.meta.url));
-  for (const [name, src] of [["webhook", webhook], ["sweep", drift]] as const) {
+  for (const [name, src] of [["sweep", drift]] as const) {
     assert(src.includes("...(bindingResolution ? { bindingResolution } : {})"),
       `${name} must attach the resolution conditionally`);
     assert(/try\s*\{[\s\S]{0,400}BindingResolution[\s\S]{0,600}catch/.test(src) ||

@@ -60,6 +60,8 @@ describe('pricing — six display cards', () => {
     const indie = deploymentTiers.find((t) => t.id === 'indie')!;
     expect(indie.features.join(' ')).toContain('Repo import reverse visualization and deduction');
     expect(indie.features.join(' ')).not.toMatch(/Slack|Notion|Workflow Designer/);
+    // P (2026-09-22): Workflows are an Indie feature; Team adds the people on them
+    expect(indie.features.join(' ')).toContain('Workflows: journeys and their steps');
     const team = deploymentTiers.find((t) => t.id === 'team')!;
     expect(team.features.join(' ')).toMatch(/Slack/);
     expect(team.features[0]).toBe('Everything in Indie');

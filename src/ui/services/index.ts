@@ -2,7 +2,6 @@ export { PersistenceService } from './PersistenceService.js';
 export { AuthService } from './AuthService.js';
 export { ProjectService } from './ProjectService.js';
 export { SpecificationService } from './SpecificationService.js';
-export { CodeStructureService } from './CodeStructureService.js';
 export { AIRunService } from './AIRunService.js';
 export { ProposalService } from './ProposalService.js';
 export { PatchService } from './PatchService.js';

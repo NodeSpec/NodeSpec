@@ -34,6 +34,9 @@ Deno.test("connect decision: empty adopts, matching auto-baselines, genuine unba
   assertEquals(decideConnectAnchorAction({ ...base, nodeCount: 7 }), "mismatch-card");
   // Baselined divergence belongs to the drift sweep, not a connect card.
   assertEquals(decideConnectAnchorAction({ ...base, nodeCount: 7, baselined: true }), "none");
+  // AD.1 (D10): so does a baselined branch whose architecture matches. Re-saving
+  // used to set its baseline to HEAD, skipping every code commit since the last sync.
+  assertEquals(decideConnectAnchorAction({ ...base, nodeCount: 7, projectMatchesAnchor: true, baselined: true }), "none");
   assertEquals(decideConnectAnchorAction({ ...base, parsedOk: false, hashOk: false, nodeCount: 0 }), "invalid-skip");
   assertEquals(decideConnectAnchorAction({ ...base, hashOk: false, nodeCount: 0 }), "invalid-skip");
 });

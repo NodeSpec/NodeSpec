@@ -129,7 +129,7 @@ Deno.test("an UNticked box is reported as a delta but is NOT applicable", () => 
     parseTaskDocCriteria("## Requirements\n### REQ-001: X\n- [ ] password login succeeds\n"),
     { "REQ-001": [{ text: "password login succeeds", met: true }] },
   );
-  assertEquals(result.deltas, [{ requirementId: "REQ-001", text: "password login succeeds", direction: "untick" }]);
+  assertEquals(result.deltas, [{ requirementId: "REQ-001", text: "password login succeeds", direction: "untick", verification: "automated" }]);
   assertEquals(applicableDeltas(result), [], "a stale doc must never retract evidence a test proved");
 });
 
@@ -258,7 +258,7 @@ Deno.test("A2: a ticked (manual)-suffixed box round-trips onto its stored criter
   });
   assertEquals(result.flagged, [], "the manual tick must not be flagged");
   assertEquals(result.deltas, [
-    { requirementId: "REQ-010", text: "operator can rotate keys", direction: "tick" },
+    { requirementId: "REQ-010", text: "operator can rotate keys", direction: "tick", verification: "automated" },
   ]);
 
   // The full round-trip: the delta's stored text applies cleanly.
@@ -284,7 +284,7 @@ Deno.test("A2: a criterion whose GENUINE text ends in (manual) exact-matches fir
   });
   assertEquals(result.flagged, []);
   assertEquals(result.deltas, [
-    { requirementId: "REQ-011", text: "runbook documents the failover steps (manual)", direction: "tick" },
+    { requirementId: "REQ-011", text: "runbook documents the failover steps (manual)", direction: "tick", verification: "automated" },
   ]);
 });
 
@@ -315,7 +315,7 @@ Deno.test("A2: an UNTICKED (manual) box on a met criterion reports untick with s
     "REQ-013": [{ text: "operator can rotate keys", met: true }],
   });
   assertEquals(result.deltas, [
-    { requirementId: "REQ-013", text: "operator can rotate keys", direction: "untick" },
+    { requirementId: "REQ-013", text: "operator can rotate keys", direction: "untick", verification: "automated" },
   ]);
   assertEquals(applicableDeltas(result), [], "unticks stay non-applicable");
 });

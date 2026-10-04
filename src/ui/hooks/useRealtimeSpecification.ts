@@ -9,9 +9,9 @@ import type { RealtimeEvent } from '../services/SpecificationRealtimeService.js'
 
 // R6 (Discovered #7): exported for a direct pin. This mapper used to DROP
 // architectureTrace and confirmed — any realtime UPDATE stripped them from
-// in-memory state until the next full refresh (the Decomposition trace lane
-// and the confirmation badge silently emptied). Aligned with the correct
-// sibling mapper in DecompositionCanvas.
+// in-memory state until the next full refresh (the trace lane and the
+// confirmation badge silently emptied). Aligned with the correct sibling
+// mapper the since-retired DecompositionCanvas carried.
 export function mapRealtimeToRequirement(row: any): Requirement {
   return {
     id: row.id,
@@ -24,6 +24,7 @@ export function mapRealtimeToRequirement(row: any): Requirement {
     sectionId: row.section_id ?? row.sectionId ?? null,
     source: row.source || 'manual',
     locked: row.locked ?? false,
+    archivedAt: row.archived_at ?? row.archivedAt ?? null,
     confirmed: row.confirmed ?? false,
     architectureTrace: row.architecture_trace ?? row.architectureTrace ?? [],
     acceptanceCriteria: row.acceptance_criteria ?? row.acceptanceCriteria ?? [],

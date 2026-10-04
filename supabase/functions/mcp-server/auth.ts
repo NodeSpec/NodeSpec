@@ -30,6 +30,9 @@ export async function authenticateWithApiKey(
     keyId: result.key_id,
     scopes: result.scopes || ['read'],
     authMethod: 'api_key',
+    // O.2: the key's name rides the validation answer (migration
+    // 20260922100000) so every write can be labelled without a second read.
+    ...(typeof result.key_name === 'string' && result.key_name ? { keyName: result.key_name } : {}),
   };
 }
 
@@ -47,6 +50,7 @@ async function authenticateWithJWT(
     userId: user.id,
     scopes: ['read', 'write', 'propose'],
     authMethod: 'jwt',
+    ...(user.email ? { email: user.email } : {}),
   };
 }
 
@@ -76,6 +80,7 @@ export async function authenticateWithOAuthToken(
 
   return {
     userId: data.user_id,
+    clientId: data.client_id ?? undefined,
     scopes: data.scopes || ['read'],
     authMethod: 'oauth_token',
   };
@@ -98,15 +103,12 @@ export async function authenticate(req: Request, supabase: SupabaseClient): Prom
 
   const token = authHeader.replace('Bearer ', '');
 
-  // PARKED LANE (owner ruling 2026-08-30): API-key auth stays FUNCTIONAL —
-  // already-issued ns_live_ keys, the Worker's advertised X-MCP-API-Key
-  // header, and headless clients keep working — but the frontend no longer
-  // surfaces key management (the Account "Agents" tab read as a V1 BYOK
-  // hangover and confused users; OAuth via the consent page is the one
-  // connection story now). Keys are still managed through the MCP tools
-  // themselves (create_api_key / list_api_keys / revoke_api_key,
-  // tools/keys.ts) by an already-connected assistant. Placeholder for a
-  // future dedicated headless/CI surface — do not delete.
+  // API-key lane. Parked from 2026-08-30 (the Account "Agents" tab read as
+  // a V1 BYOK hangover) and back by owner ruling 2026-09-21 (V3 I): a key
+  // is one connected agent of one person, minted under Agents, Connected,
+  // or by an OAuth-connected assistant through the key tools
+  // (tools/keys.ts). The plan caps how many a person keeps live; this lane
+  // only judges the presented key.
   if (token.startsWith('ns_live_')) {
     return authenticateWithApiKey(supabase, token);
   }

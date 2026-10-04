@@ -38,22 +38,23 @@ Deno.test('report_test_results: new row is a TWO-STEP write (insert not_started,
   ]);
   sb.script('test_cases', 'select', { data: [{ id: CASE1, test_id: 'TC-1', status: 'passed' }], error: null });
   sb.script('test_cases', 'insert', { data: { id: CASE2 }, error: null });
-  sb.script('specification_requirements', 'update', { data: null, error: null }); // binding
+  // R2: binding and the flip/stamp travel to the ONE locked writer as ops.
+  sb.script('rpc', 'apply_criteria_ops', { data: { found: true, applied: 1, changed: true }, error: null }); // binding
   sb.script('test_cases', 'update', { data: null, error: null }); // existing row
   sb.script('test_cases', 'update', { data: null, error: null }); // new row status
-  // Post-write reread simulates the trigger having flipped A (TC-2 passed). B stays
-  // unmet (TC-1 failed and was already false).
-  sb.script('specification_requirements', 'select', {
+  // The writer returns the post-lock criteria — that IS the receipt now, so
+  // there is no re-read to be falsified by a concurrent writer.
+  sb.script('rpc', 'apply_criteria_ops', {
     data: {
-      acceptance_criteria: [
-        { text: 'A holds', met: true, testId: CASE2 },
+      found: true, applied: 3, changed: true,
+      criteria: [
+        { text: 'A holds', met: true, testId: CASE2, provenance: { source: 'test', testCaseId: CASE2, framework: 'vitest', at: '2026-09-15T00:00:00.000Z' } },
         { text: 'B holds', met: false, testId: CASE1 },
         { text: 'C holds', met: false },
       ],
     },
     error: null,
   });
-  sb.script('specification_requirements', 'update', { data: null, error: null }); // provenance
 
   const r = await handleReportTestResults(sb as never, AUTH, {
     project_id: PROJECT_UUID,
@@ -83,17 +84,20 @@ Deno.test('report_test_results: new row is a TWO-STEP write (insert not_started,
   const statusIdx = sb.calls.indexOf(newRowUpdate!);
   assert(insertIdx < statusIdx, 'insert happens before the status update');
 
-  // (coordinator pin a) criterion binding: testId written onto the exact-text match,
-  // in an update that lands BETWEEN insert and the status update — so the trigger
-  // flip sees the binding in the same call.
-  const specUpdates = sb.callsTo('specification_requirements', 'update');
-  assertEquals(specUpdates.length, 2, 'one binding update + one provenance update');
-  const bindPayload = specUpdates[0].payload as Any;
-  const boundA = bindPayload.acceptance_criteria.find((c: Any) => c.text === 'A holds');
-  assertEquals(boundA.testId, CASE2, 'criterion bound to the new case row uuid');
-  assertEquals(bindPayload.acceptance_criteria.find((c: Any) => c.text === 'B holds').testId, CASE1, 'existing binding preserved');
-  assertEquals(bindPayload.acceptance_criteria.find((c: Any) => c.text === 'C holds').testId, undefined, 'unrelated criterion untouched');
-  const bindIdx = sb.calls.indexOf(specUpdates[0]);
+  // (coordinator pin a) criterion binding: an OP naming the exact-text match,
+  // sent to the locked writer BETWEEN the insert and the status update — so the
+  // flip sees the binding in the same call. R2: nothing writes the whole array
+  // any more, so no concurrent writer can be clobbered by this step.
+  const opsCalls = sb.callsTo('rpc', 'apply_criteria_ops');
+  assertEquals(opsCalls.length, 2, 'one binding batch + one flip/stamp batch — the only criteria writes');
+  assertEquals(sb.callsTo('specification_requirements', 'update').length, 0, 'the tool no longer writes the array directly');
+  const bindOps = (opsCalls[0].payload as Any).p_ops as Any[];
+  assertEquals(bindOps.length, 1, 'only the criterion actually bound this call');
+  assertEquals(bindOps[0].op, 'bind');
+  assertEquals(bindOps[0].criterion_text, 'A holds', 'selected by its exact text — the R5a rule');
+  assertEquals(bindOps[0].value, CASE2, 'bound to the new case row uuid');
+  assertEquals((opsCalls[0].payload as Any).p_requirement_id, REQ_ROW);
+  const bindIdx = sb.calls.indexOf(opsCalls[0]);
   assert(insertIdx < bindIdx && bindIdx < statusIdx, 'binding lands after the insert and before the status update');
 
   // Existing row: plain update carrying status + staleness clear (a fresh result IS
@@ -113,18 +117,24 @@ Deno.test('report_test_results: new row is a TWO-STEP write (insert not_started,
     { text: 'B holds', met: false, testId: CASE1 },
   ]);
 
-  // (coordinator pin a, provenance half) only the criterion whose met CHANGED gets
-  // the test stamp, other keys preserved, single follow-up update.
-  const provPayload = specUpdates[1].payload as Any;
-  const provA = provPayload.acceptance_criteria.find((c: Any) => c.text === 'A holds');
-  assertEquals(provA.provenance.source, 'test');
-  assertEquals(provA.provenance.testCaseId, CASE2);
-  assertEquals(provA.provenance.framework, 'vitest');
-  assert(typeof provA.provenance.at === 'string' && provA.provenance.at.length > 0);
-  assertEquals(provA.met, true, 'other keys preserved through the stamp');
-  assertEquals(provA.testId, CASE2);
-  const provB = provPayload.acceptance_criteria.find((c: Any) => c.text === 'B holds');
-  assertEquals(provB.provenance, undefined, 'met did not change (false -> false) — no stamp');
+  // (coordinator pin a, provenance half) the flip is EXPLICIT now, not an
+  // invisible trigger side effect: the tool states the met it means for every
+  // case that RAN, and stamps only the criterion whose met actually changed.
+  const flipOps = (opsCalls[1].payload as Any).p_ops as Any[];
+  const setMet = flipOps.filter((o) => o.op === 'set_met');
+  assertEquals(setMet.length, 2, 'both ran cases state their met');
+  assertEquals(setMet.find((o) => o.test_id === CASE2).value, true, 'TC-2 passed → met true');
+  assertEquals(setMet.find((o) => o.test_id === CASE1).value, false, 'TC-1 failed → met false');
+  const stamps = flipOps.filter((o) => o.op === 'stamp');
+  assertEquals(stamps.length, 1, 'only the criterion whose met CHANGED is stamped');
+  assertEquals(stamps[0].test_id, CASE2);
+  assertEquals(stamps[0].value.source, 'test');
+  assertEquals(stamps[0].value.testCaseId, CASE2);
+  assertEquals(stamps[0].value.framework, 'vitest');
+  assert(typeof stamps[0].value.at === 'string' && stamps[0].value.at.length > 0);
+  assert(!flipOps.some((o) => o.op === 'stamp' && o.test_id === CASE1), 'B met did not change (false -> false) — no stamp');
+  // every op selects one criterion; none replaces the array
+  assert(flipOps.every((o) => 'test_id' in o), 'ops select by the case the criterion is bound to');
   assertEquals(data.criteriaStamped, 1);
 
   const outcomes = data.results as Any[];
@@ -193,7 +203,7 @@ Deno.test('report_test_results: a foreign testId binding is never stolen — con
   assertEquals(sb.callsTo('specification_requirements', 'update').length, 0,
     'the foreign binding (and its evidence chain) stays intact');
   assertEquals(data.flippedCriteria, [], 'the criterion belongs to the OTHER case — not this call\'s receipt');
-  assert((data.warnings as string[])[0].includes('DIFFERENT test case'));
+  assert((data.warnings as string[])[0].includes('already bound to another test case'), (data.warnings as string[])[0]);
 });
 
 // (WS3 pin) manual-lane refusal: a verification:'manual' criterion is the R5
@@ -273,7 +283,7 @@ Deno.test('report_test_results: registered with write scope and dispatched by tr
   assert(tool, 'registered in MCP_TOOLS');
   assertEquals(tool!.requiredScope, 'write');
   assert(tool!.description.includes('criterion_text'), 'description teaches the binding lane');
-  assert(tool!.description.includes('Never report a result you did not actually run'),
+  assert(tool!.description.includes('Never report a result you did not run'),
     'the honesty rule must be stated to the calling AI');
   const schema = tool!.inputSchema as Any;
   assertEquals(schema.required, ['project_id', 'requirement_id', 'results']);
@@ -413,4 +423,56 @@ Deno.test('D4 report_test_results: within budget -> NO testBudget field (the rec
   });
   assert(r.success, JSON.stringify(r));
   assertEquals((r.data as Any).testBudget, undefined);
+});
+
+// ── owner's ruling 2026-09-21: a test the person added in Work is bound to its criterion ──
+Deno.test('report_test_results: a conflict names the case the criterion is bound to, so the caller reports under that test_id', async () => {
+  const sb = new FakeSupabase();
+  scriptBase(sb, [{ text: 'A holds', met: false, testId: OTHER_CASE }]);
+  sb.script('test_cases', 'select', { data: [{ id: CASE1, test_id: 'TC-1', status: 'not_started' }], error: null });
+  // the bound case, read by id after the binding phase
+  sb.script('test_cases', 'select', { data: [{ id: OTHER_CASE, test_id: 'TC-9' }], error: null });
+  sb.script('test_cases', 'update', { data: null, error: null });
+  sb.script('specification_requirements', 'select', { data: { acceptance_criteria: [{ text: 'A holds', met: false, testId: OTHER_CASE }] }, error: null });
+
+  const r = await handleReportTestResults(sb as never, AUTH, {
+    project_id: PROJECT_UUID, requirement_id: REQ_ROW,
+    results: [{ test_id: 'TC-1', status: 'passed', criterion_text: 'A holds' }],
+  });
+  assert(r.success, JSON.stringify(r));
+  const data = r.data as Any;
+  assertEquals((data.results as Any[])[0].criterionBinding, 'conflict');
+  assertEquals((data.results as Any[])[0].boundTestId, 'TC-9');
+  assert(String((data.warnings as string[])[0]).includes('"A holds" is TC-9\'s'), (data.warnings as string[])[0]);
+  assert(String((data.warnings as string[])[0]).includes('report the run under that test_id'), (data.warnings as string[])[0]);
+});
+
+Deno.test('report_test_results: the person\'s test id reported for ANOTHER criterion is refused before anything lands', async () => {
+  const sb = new FakeSupabase();
+  scriptBase(sb, [{ text: 'A holds', met: false, testId: CASE1 }, { text: 'B holds', met: false }]);
+  sb.script('test_cases', 'select', { data: [{ id: CASE1, test_id: 'TC-1', status: 'not_started', metadata: { source: 'manual', authoredBy: 'owner' } }], error: null });
+
+  const r = await handleReportTestResults(sb as never, AUTH, {
+    project_id: PROJECT_UUID, requirement_id: REQ_ROW,
+    results: [{ test_id: 'TC-1', status: 'passed', criterion_text: 'B holds' }],
+  });
+  assertEquals(r.success, false);
+  assert(String(r.error).includes('TC-1 is the test the person added in Work for "A holds"'), r.error);
+  assert(String(r.error).includes('Nothing was recorded'), r.error);
+  assertEquals(sb.callsTo('test_cases', 'update').length, 0);
+  assertEquals(sb.callsTo('test_cases', 'insert').length, 0);
+  assertEquals(sb.callsTo('rpc', 'apply_criteria_ops').length, 0);
+
+  // the same id reported for ITS criterion lands as usual
+  const ok = new FakeSupabase();
+  scriptBase(ok, [{ text: 'A holds', met: false, testId: CASE1 }]);
+  ok.script('test_cases', 'select', { data: [{ id: CASE1, test_id: 'TC-1', status: 'not_started', metadata: { source: 'manual' } }], error: null });
+  ok.script('test_cases', 'update', { data: null, error: null });
+  ok.script('specification_requirements', 'select', { data: { acceptance_criteria: [{ text: 'A holds', met: true, testId: CASE1 }] }, error: null });
+  const r2 = await handleReportTestResults(ok as never, AUTH, {
+    project_id: PROJECT_UUID, requirement_id: REQ_ROW,
+    results: [{ test_id: 'TC-1', status: 'passed', criterion_text: 'A holds' }],
+  });
+  assert(r2.success, JSON.stringify(r2));
+  assertEquals(((r2.data as Any).results as Any[])[0].criterionBinding, 'already-bound');
 });

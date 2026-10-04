@@ -2,11 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { resolveSupabaseConfig } from '../persistence/supabase/client';
 
 // Task SB-0: dev builds must fail loudly instead of silently falling back to the
-// production Supabase backend when env vars are missing. Production builds keep
-// the fallback (Netlify sets env explicitly; revisit at Stage 4).
+// production Supabase backend when env vars are missing. Audit (owner
+// 2026-09-27): production builds too. The fallback shipped in the open source
+// and Enterprise trees, so a container built without its .env talked to the
+// managed backend; every Netlify context now sets its backend in netlify.toml.
 
 const STAGING_ENV = { url: 'http://127.0.0.1:54321', anonKey: 'local-anon-key' };
-const PROD_URL = 'https://komnpkjlvgfworfbdrya.supabase.co';
 
 describe('resolveSupabaseConfig (SB-0 env guard)', () => {
   it('uses explicit env values when both are set (dev)', () => {
@@ -33,13 +34,20 @@ describe('resolveSupabaseConfig (SB-0 env guard)', () => {
     } catch (e) {
       const msg = (e as Error).message;
       expect(msg).toContain('STAGING_RUNBOOK');
-      expect(msg).not.toContain(PROD_URL);
+      expect(msg).not.toContain('supabase.co');
     }
   });
 
-  it('production builds keep the fallback (Netlify behavior unchanged)', () => {
-    const cfg = resolveSupabaseConfig({}, false);
-    expect(cfg.url).toBe(PROD_URL);
-    expect(cfg.anonKey.length).toBeGreaterThan(0);
+  it('a production build with no backend refuses too, naming the two variables and no backend', () => {
+    for (const env of [{}, { url: 'https://example.test' }, { anonKey: 'k' }]) {
+      let msg = '';
+      try {
+        resolveSupabaseConfig(env, false);
+      } catch (e) {
+        msg = (e as Error).message;
+      }
+      expect(msg).toContain('VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY were not set');
+      expect(msg).not.toContain('supabase.co');
+    }
   });
 });

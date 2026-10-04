@@ -36,7 +36,7 @@ Deno.test("matchFilesToArtifacts queries the branch it was given and matches its
   assertEquals(result.matches[0].nodeName, "Api");
 });
 
-Deno.test("matchFilesToArtifacts defaults to main when no branch is given (legacy callers)", async () => {
+Deno.test("matchFilesToArtifacts defaults to the primary branch, by its flag, when no branch is given (AD.4)", async () => {
   const sb = new FakeSupabase();
   sb.script("branches", "select", { data: { id: "branch-main" }, error: null });
   sb.script("graph_snapshots", "select", { data: { graph_data: { nodes: {}, artifacts: {} } }, error: null });
@@ -44,8 +44,9 @@ Deno.test("matchFilesToArtifacts defaults to main when no branch is given (legac
   await matchFilesToArtifacts(sb, PROJECT, [{ path: "x.ts", action: "modified" }]);
 
   const branchCall = sb.callsTo("branches", "select")[0];
-  const nameFilter = branchCall.filters.find((f) => f.method === "eq" && f.args[0] === "name");
-  assertEquals(nameFilter?.args[1], "main");
+  const flag = branchCall.filters.find((f) => f.method === "eq" && f.args[0] === "is_primary");
+  assertEquals(flag?.args[1], true);
+  assert(!branchCall.filters.some((f) => f.method === "eq" && f.args[0] === "name"), "never by name");
 });
 
 Deno.test("resolveWebhookBranchName: bound ref wins, default branch reads as main, else unmapped", () => {

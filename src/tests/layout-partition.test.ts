@@ -20,7 +20,6 @@ function makeRole(overrides: Partial<NodeRole>): NodeRole {
     containerStyle: null,
     canContain: [],
     metadataSchema: null,
-    defaultPorts: [],
     suggestedContracts: [],
     sortOrder: 0,
     deprecated: false,

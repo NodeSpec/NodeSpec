@@ -96,28 +96,21 @@ describe('cross-container edge rendering (owner bench topology)', () => {
     }
   });
 
-  it('sanitizes dead or direction-mismatched port handles instead of passing them to React Flow', () => {
+  // AG.13 (owner 2026-09-28): ports came out of the model. Every node draws one
+  // unnamed handle each side, so an edge never names a handle: a stored port
+  // id, valid, mismatched or dead, is ignored and the edge draws without error.
+  it('ignores stored port ids: no handle binding, no missing-port error', () => {
     const g = ownerTopology();
-    // Valid binding: SPA out-port → CF in-port — ids pass through.
-    const valid = mapEdgeToRFEdge(edge('dddddddd-0000-4000-8000-000000000005', SPA, CF, {
-      sourcePortId: OUT_PORT.id, targetPortId: IN_PORT.id,
-    }), g);
-    expect(valid.sourceHandle).toBe(OUT_PORT.id);
-    expect(valid.targetHandle).toBe(IN_PORT.id);
-
-    // Direction mismatch: CF's IN port used as the SOURCE — React Flow would drop
-    // the edge silently; the binding must fall back to undefined instead.
-    const mismatched = mapEdgeToRFEdge(edge('dddddddd-0000-4000-8000-000000000006', CF, WAF, {
-      sourcePortId: IN_PORT.id,
-    }), g);
-    expect(mismatched.sourceHandle).toBeUndefined();
-
-    // Dead id: port doesn't exist on the node — same fallback (hasError still flags it).
-    const dead = mapEdgeToRFEdge(edge('dddddddd-0000-4000-8000-000000000007', CF, WAF, {
-      sourcePortId: 'eeeeeeee-0000-4000-8000-000000000009', targetPortId: 'eeeeeeee-0000-4000-8000-00000000000a',
-    }), g);
-    expect(dead.sourceHandle).toBeUndefined();
-    expect(dead.targetHandle).toBeUndefined();
-    expect(dead.data?.hasError).toBe(true);
+    const cases = [
+      { id: 'dddddddd-0000-4000-8000-000000000005', from: SPA, to: CF, ports: { sourcePortId: OUT_PORT.id, targetPortId: IN_PORT.id } },
+      { id: 'dddddddd-0000-4000-8000-000000000006', from: CF, to: WAF, ports: { sourcePortId: IN_PORT.id } },
+      { id: 'dddddddd-0000-4000-8000-000000000007', from: CF, to: WAF, ports: { sourcePortId: 'eeeeeeee-0000-4000-8000-000000000009', targetPortId: 'eeeeeeee-0000-4000-8000-00000000000a' } },
+    ];
+    for (const c of cases) {
+      const rf = mapEdgeToRFEdge(edge(c.id, c.from, c.to, c.ports), g);
+      expect(rf.sourceHandle).toBeUndefined();
+      expect(rf.targetHandle).toBeUndefined();
+      expect(rf.data?.hasError).toBe(false);
+    }
   });
 });

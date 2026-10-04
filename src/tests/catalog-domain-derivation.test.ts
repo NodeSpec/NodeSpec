@@ -24,7 +24,6 @@ function role(id: string, paletteCategory: string, overrides: Partial<NodeRole> 
     containerStyle: null,
     canContain: null,
     metadataSchema: null,
-    defaultPorts: [],
     suggestedContracts: [],
     sortOrder: 1,
     capabilityTags: [],

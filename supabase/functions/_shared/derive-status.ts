@@ -116,7 +116,7 @@ export function deriveWorkStatus(input: WorkStatusInput): WorkStatusResult {
  * set. Structural inputs so both runtimes can call it.
  */
 export function computeArchivedRowIds(
-  requirements: Array<{ id: string; status: string; acceptanceCriteria?: Array<{ met?: boolean }> | null }>,
+  requirements: Array<{ id: string; status: string; acceptanceCriteria?: Array<{ met?: boolean }> | null; archivedAt?: string | null }>,
   relations: Array<{ fromRequirementId: string; toRequirementId: string; relationType: string }>,
 ): Set<string> {
   const byId = new Map(requirements.map((r) => [r.id, r]));
@@ -128,9 +128,32 @@ export function computeArchivedRowIds(
     return criteria.length > 0 && criteria.every((ac) => ac.met);
   };
   const archived = new Set<string>();
+  // 9.8 (v3y): the explicit archive — a human act — regardless of lineage.
+  for (const r of requirements) if (r.archivedAt) archived.add(r.id);
+  // 9.8: an `expands` CYCLE (A expands B, B expands A) archives nothing and
+  // never loops — a row that can reach its own expander is lineage, not
+  // supersession.
+  const expands = new Map<string, string[]>();
+  for (const rel of relations) {
+    if (rel.relationType !== 'expands' || !byId.has(rel.fromRequirementId) || !byId.has(rel.toRequirementId)) continue;
+    expands.set(rel.fromRequirementId, [...(expands.get(rel.fromRequirementId) ?? []), rel.toRequirementId]);
+  }
+  const reaches = (from: string, target: string): boolean => {
+    const seen = new Set<string>();
+    const stack = [from];
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      if (cur === target) return true;
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      for (const next of expands.get(cur) ?? []) stack.push(next);
+    }
+    return false;
+  };
   for (const rel of relations) {
     if (rel.relationType !== 'expands') continue;
     if (!byId.has(rel.fromRequirementId) || !byId.has(rel.toRequirementId)) continue;
+    if (reaches(rel.toRequirementId, rel.fromRequirementId)) continue;
     if (completed(rel.toRequirementId)) archived.add(rel.toRequirementId);
   }
   return archived;

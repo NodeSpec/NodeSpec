@@ -5,20 +5,28 @@
 // whose last_used_at has been stamped — never by intent, so a user who pasted
 // config but never let their AI call sees "Not connected" and knows to finish.
 //
-// Deliberately quiet: a small dot on a button, muted until it matters. The
-// popover carries the one-line fix and a link to the full per-client guides
-// rather than restating them here.
+// Deliberately quiet: a small dot on a button, muted until it matters.
+//
+// AK.1 (owner 2026-10-01): this is the status of the connections Agents,
+// Connected lists, never a second place to connect. It used to open its own
+// per-client guide (sign-in only) beside the Connected tab's (keys only), so
+// the two taught different methods and could disagree. Now both the fix and
+// the list are that tab: "Connect an agent" and "See connected agents" open
+// it. The label is evidence of a call; a key minted but never used still
+// reads disconnected, and the tab says so under its rows.
 import { useState, useRef, useEffect } from 'react';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { useMcpConnection } from '../../hooks/useMcpConnection.js';
-import { McpConnectModal } from './McpConnectModal.js';
 
-export function McpStatusIndicator({ buttonStyle }: { buttonStyle: React.CSSProperties }) {
+export function McpStatusIndicator({ buttonStyle, onOpenConnected }: {
+  buttonStyle: React.CSSProperties;
+  /** Agents, Connected: the one place an agent is connected. */
+  onOpenConnected?: () => void;
+}) {
   const { theme } = useTheme();
   const c = theme.colors;
   const { state, refresh } = useMcpConnection();
   const [open, setOpen] = useState(false);
-  const [guideOpen, setGuideOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -72,7 +80,7 @@ export function McpStatusIndicator({ buttonStyle }: { buttonStyle: React.CSSProp
 
       {open && (
         <div style={{
-          position: 'absolute', top: 'calc(100% + 8px)', right: 0, width: '280px',
+          position: 'absolute', top: 'calc(100% + 8px)', right: 0, width: '280px', maxWidth: 'calc(100vw - 32px)',
           backgroundColor: c.surface, border: `1px solid ${c.border}`,
           borderRadius: '10px', boxShadow: '0 10px 30px rgba(0,0,0,0.18)',
           zIndex: 1000, padding: '14px 16px',
@@ -83,25 +91,25 @@ export function McpStatusIndicator({ buttonStyle }: { buttonStyle: React.CSSProp
               {state === 'unknown' ? 'Checking…' : connected ? 'AI connected' : 'No AI connected'}
             </span>
           </div>
-          <p style={{ fontSize: '12px', color: c.textMuted, lineHeight: 1.55, margin: '0 0 10px' }}>
+          <p data-testid="mcp-status-line" style={{ fontSize: '12px', color: c.textMuted, lineHeight: 1.55, margin: '0 0 10px' }}>
             {connected
-              ? 'An assistant has authenticated and called NodeSpec. Ask it to list your projects to confirm which one.'
-              : 'Connect Claude, Claude Code, Cursor, or Codex to NodeSpec so it can read your architecture and build against it.'}
+              ? 'An agent you connected has called NodeSpec. Agents, Connected lists every connection and revokes them.'
+              : 'No agent has called NodeSpec yet. Connect the one you build with under Agents, Connected; this turns green after its first call.'}
           </p>
-          {!connected && (
+          {onOpenConnected && (
             <button
-              onClick={() => { setOpen(false); setGuideOpen(true); }}
+              data-testid="mcp-open-connected"
+              onClick={() => { setOpen(false); onOpenConnected(); }}
               style={{
                 fontSize: '12px', fontWeight: 600, color: c.primary, cursor: 'pointer',
                 background: 'none', border: 'none', padding: 0, textAlign: 'left',
               }}
             >
-              Connection instructions →
+              {connected ? 'See connected agents' : 'Connect an agent'}
             </button>
           )}
         </div>
       )}
-      {guideOpen && <McpConnectModal onClose={() => { setGuideOpen(false); refresh(); }} />}
     </div>
   );
 }

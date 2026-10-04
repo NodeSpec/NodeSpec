@@ -19,40 +19,45 @@ describe('primary-branch identity — client', () => {
     expect(repo).toContain('is_primary: isPrimary === true');
     const types = read('persistence/types.ts');
     expect(types).toContain('isPrimary: boolean');
-    // Project creation marks its first branch primary explicitly.
-    expect(read('ui/services/ProjectService.ts')).toContain("branchRepo.create(project.id, 'main', userId, undefined, undefined, true)");
+    // Project creation marks its first branch primary: driven through the
+    // real repositories in item16-project-branch.test.ts (this pin used to
+    // read an unused ProjectService copy while the app's own path wrote the
+    // row unflagged).
   });
 
-  it('GraphEditor resolves the primary name from data and aims every lane at it', () => {
+  it('GraphEditor resolves the primary name from data and aims every remaining lane at it', () => {
     const ge = read('ui/components/GraphEditor.tsx');
-    expect(ge).toContain("availableBranches.find(b => b.isPrimary)?.name ?? 'main'");
-    // Merge lanes target the RESOLVED name — no hardcoded 'main' target remains.
-    expect(ge).toContain('gitService.openPullRequest(projectId, branchName, integrationId, primaryBranchName)');
-    expect(ge).toContain('gitService.mergeBranchDirect(projectId, branchName, integrationId, primaryBranchName)');
-    expect(ge).toContain('gitService.restoreModel(integrationId, primaryBranchName)');
-    expect(ge).not.toContain("openPullRequest(projectId, branchName, integrationId, 'main')");
-    expect(ge).not.toContain("mergeBranchDirect(projectId, branchName, integrationId, 'main')");
-    // Guards protect the primary, whatever it is named.
+    // AD.4 (D15): null until the branches load, never the literal 'main'.
+    expect(ge).toContain("() => availableBranches.find(b => b.isPrimary)?.name ?? null,");
+    // Item 16: the open branch named from the loaded rows by id (openBranchName).
+    expect(ge).toContain('const gitBranchName: string | null = openName || primaryBranchName;');
+    // V3 1.2 (2026-09-19): the editor's merge, create and delete lanes left
+    // with multi-branch; item 16 (2026-09-26) removed the client methods they
+    // called (createRemoteBranch, openPullRequest, mergeBranchDirect), which
+    // had no caller left. A caller written again fails to compile.
+    // The one branch-row lane that stays (the ref-deleted card's Archive)
+    // still guards the primary by identity, whatever it is named.
     expect(ge).toContain("if (name === primaryBranchName) throw new Error('Cannot archive the primary branch')");
-    expect(ge).toContain('if (deleteBranchName === primaryBranchName)');
-    // Change detection polls the ACTIVE branch with the primary as fallback —
+    // Change detection polls the ACTIVE branch with the primary as fallback,
     // never the literal 'main' (the owner's "detecting on main only" worry).
     expect(ge).toContain('branchName: branchNameRef.current || primaryBranchNameRef.current');
-    expect(ge).toContain('checkBranchFreshness(branchName || primaryBranchNameRef.current)');
+    expect(ge).toContain('checkBranchFreshness(openName || primaryBranchNameRef.current)');
   });
 
   it('the header re-reads branches when the git panel closes (the rename must show up)', () => {
     const ge = read('ui/components/GraphEditor.tsx');
-    expect(ge).toContain('onGitIntegrationClosed={loadBranches}');
+    // AL.21: and the connected repository, for the start card
+    expect(ge).toContain('onGitIntegrationClosed={() => { loadBranches(); loadGitIntegration(); }}');
     const tb = read('ui/components/panels/TopBar.tsx');
     expect(tb).toContain('onGitIntegrationClosed?.()');
-    // The merge button hides on the primary by IDENTITY.
-    expect(tb).toContain("branchName !== (primaryBranchName ?? 'main')");
+    // V3 1.2: the chip reads the rows the re-read produced; there is no merge button to hide.
+    expect(tb).toContain('availableBranches={availableBranches}');
+    expect(tb).not.toContain('onMergeBranch');
   });
 
-  it('BranchManager marks the default by flag, with the naming rule only as legacy fallback', () => {
-    const bm = read('ui/components/panels/BranchManager.tsx');
-    expect(bm).toContain("availableBranches.find(b => b.name === name)?.isPrimary ?? name === 'main'");
-    expect(bm).toContain("branch.isPrimary ?? branch.name === 'main'");
+  it('the branch chip marks the default by flag, with the naming rule only as legacy fallback', () => {
+    // Rendered proof lives in branch-chip.test.tsx; this pins the expression itself.
+    const chip = read('ui/components/panels/BranchChip.tsx');
+    expect(chip).toContain("availableBranches.find(b => b.name === name)?.isPrimary ?? name === 'main'");
   });
 });

@@ -10,7 +10,10 @@ import { generateTaskDocument, simpleHash } from "./task-document-generator.ts";
 import { collectInheritedScopes, type InheritedScope } from "./inherited-context.ts";
 import { generateTestDocument, getTestDocumentPath, findExistingTestArtifact, computeTestContextFingerprint, preserveTestStrategySection } from "./test-document-generator.ts";
 import { liveNodeIdSet } from "./mapping-liveness.ts";
+import { loadNodeConstraints, loadConstraintsAndRules, constraintRef, type NodeConstraint } from "./node-constraints.ts";
 import { effectiveTreatment, treatmentForRole } from "./ontology.ts";
+import { holdingLine } from "./role-registry.ts";
+import { loadServedVision, servedVisionLines, type ServedVision } from "./served-vision.ts";
 
 export interface CodingTaskTarget {
   type: 'node' | 'artifact' | 'requirement';
@@ -27,12 +30,64 @@ export interface AssembledContext {
   promptDocument: string;
   /** P0-7: one-line advisory explaining the <untrusted-data> envelope on user content. */
   untrustedDataAdvisory: string;
+  /** RI-9: for an imported node, files whose blob sha moved since the
+   *  indexed head (from repo_index_freshness) — the brief says which of the
+   *  "existing implementation" files it cannot vouch for. */
+  repoFreshness?: RepoFreshnessContext;
 }
 
+export interface RepoFreshnessContext {
+  modified: number;
+  deleted: number;
+  added: number;
+  unverified: number;
+  samplePaths: string[];
+}
+
+/** Read the node's freshness findings (RI-9). Empty when the node was never
+ *  imported or nothing moved. Never throws — a brief is never blocked by it. */
+export async function loadRepoFreshness(
+  supabase: SupabaseClient,
+  branchId: string,
+  nodeId: string,
+): Promise<RepoFreshnessContext | undefined> {
+  try {
+    const { data } = await supabase
+      .from('repo_index_freshness')
+      .select('path, status')
+      .eq('branch_id', branchId)
+      .eq('node_id', nodeId)
+      .order('path')
+      .limit(200);
+    const rows = (data ?? []) as Array<{ path: string; status: string }>;
+    if (rows.length === 0) return undefined;
+    const count = (s: string) => rows.filter((r) => r.status === s).length;
+    return {
+      modified: count('modified'),
+      deleted: count('deleted'),
+      added: count('added'),
+      unverified: count('unverified'),
+      samplePaths: rows.filter((r) => r.status !== 'added').slice(0, 8).map((r) => `${r.path} (${r.status})`),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** AA.0 (R.2a): a constraint as the context carries it, from project_constraints.
+ *  `mark` rides along so the transport's redactByClearance removes what the
+ *  caller is not cleared for. */
+export type ContextConstraint = NodeConstraint & { ref: string };
+
 export interface SpecificationContext {
-  vision: string;
+  /** The whole vision; null for a node target, which carries `visionServed` instead (AA.6). */
+  vision: string | null;
+  /** AA.6: a node target's vision is the sentences its outcomes cite (served-vision.ts). */
+  visionServed?: ServedVision;
   relevantRequirements: RequirementContext[];
-  constraints: Array<{ type: string; description: string }>;
+  /** A node target: the constraints that apply to it; otherwise the project's.
+   *  AC: absent when the project carries no constraints (below Indie). */
+  constraints?: ContextConstraint[];
   preferences: Record<string, unknown>;
   /** Human requirement id (e.g. "REQ-001") -> all node ids mapped via specification_mappings. */
   requirementNodeMap: Record<string, string[]>;
@@ -81,8 +136,11 @@ export interface NodeContext {
   /** 'user-specified' (values present) · 'delegated-to-ai' (N8.1b "AI decides") · null. */
   configurationSource: 'user-specified' | 'delegated-to-ai' | null;
   contracts: ContractContext[];
-  ports: PortContext[];
-  parentNode: { id: string; label: string; role: string } | null;
+  /** AG.12a: the parent, how it holds this node (placementKind) and what it may hold. */
+  parentNode: { id: string; label: string; role: string; placementKind: string | null; holds: string | null } | null;
+  /** AG.12a (owner 2026-09-28): how this node's type holds, and what it may hold, so an
+   *  agent reads the canvas rule before a proposal is refused by it. */
+  holds: string | null;
   /** N8.4r: configuration set on the CONTAINERS this node lives in — region, environment,
    *  IAM baseline, tagging policy. Outermost first; the innermost wins a key collision.
    *  Before this the parent contributed only a label, so a scoped account context reached
@@ -129,12 +187,6 @@ export interface ContractContext {
   schemaHash: string | null;
 }
 
-export interface PortContext {
-  name: string | null;
-  direction: 'in' | 'out';
-  contractId: string | null;
-}
-
 export interface ArchitectureContext {
   connectedNodes: ConnectedNodeSummary[];
   siblingNodes: Array<{ id: string; label: string; role: string }>;
@@ -172,7 +224,6 @@ interface GraphNode {
   type: string;
   technology?: string;
   parentId?: string;
-  ports?: Array<{ name?: string; direction: 'in' | 'out'; contractId?: string }>;
   metadata?: {
     rationale?: string;
     domainMetadata?: unknown;
@@ -236,7 +287,11 @@ export async function loadSpecificationContext(
   // are branch-local, so mappings pointing at nodes absent from this branch (deleted, or on
   // another branch) are dropped here — the only branch-correct place to do it. Omitted → no
   // liveness filtering (back-compat for callers without a graph).
-  liveNodeIds?: Set<string>
+  liveNodeIds?: Set<string>,
+  // AA.6: the branch whose outcomes a node target's served vision is read from.
+  branchId?: string,
+  /** R.2b: the branch graph, for constraints scoped to a role, technology, contract kind or node. */
+  graph?: unknown,
 ): Promise<SpecificationContext | null> {
   const { data: spec } = await supabase
     .from('project_specifications')
@@ -286,12 +341,37 @@ export async function loadSpecificationContext(
       : []
   );
 
-  const relevantRequirements = targetNodeId && mappedReqIds.size > 0
+  // AA.0: a node's context carries the node's requirements and nothing else;
+  // a node with none mapped says so with an empty list (it used to fall back
+  // to the project's first ten, which were neither scoped nor chosen). A read
+  // with no node keeps the project-level sample.
+  const relevantRequirements = targetNodeId
     ? requirements.filter((r: { id: string }) => mappedReqIds.has(r.id))
     : requirements.slice(0, 10);
 
+  // AA.0 (R.2a): constraints come from the one store, scoped to the node.
+  // AC: below Indie there are none to carry, and the field is left out.
+  let constraintRows: NodeConstraint[] | undefined;
+  if (targetNodeId) {
+    constraintRows = (await loadNodeConstraints(supabase, projectId, [targetNodeId], undefined, graph)).get(targetNodeId);
+  } else {
+    const read = await loadConstraintsAndRules(supabase, projectId);
+    constraintRows = read.carried ? read.constraints : undefined;
+  }
+
+  // AA.6: a node carries the sentences its outcomes cite, not the whole vision.
+  // When they cannot be read the read falls back to the whole vision rather
+  // than telling the agent the node serves nothing.
+  let visionServed: ServedVision | undefined;
+  if (targetNodeId) {
+    try {
+      visionServed = (await loadServedVision(supabase, projectId, branchId ?? null, spec.vision, new Map([[targetNodeId, [...mappedReqIds]]]))).get(targetNodeId);
+    } catch { visionServed = undefined; }
+  }
+
   return {
-    vision: spec.vision,
+    vision: visionServed ? null : spec.vision,
+    ...(visionServed ? { visionServed } : {}),
     relevantRequirements: relevantRequirements.map((r: {
       requirement_id: string;
       name: string;
@@ -307,7 +387,7 @@ export async function loadSpecificationContext(
       status: r.status,
       acceptanceCriteria: r.acceptance_criteria || [],
     })),
-    constraints: (spec.constraints as Array<{ type: string; description: string }>) || [],
+    ...(constraintRows ? { constraints: constraintRows.map((c) => ({ ...c, ref: constraintRef(c.id) })) } : {}),
     preferences: (spec.preferences as Record<string, unknown>) || {},
     requirementNodeMap,
   };
@@ -435,17 +515,16 @@ export function buildNodeContext(
     });
   }
 
-  const ports: PortContext[] = (node.ports || []).map(p => ({
-    name: p.name || null,
-    direction: p.direction,
-    contractId: p.contractId || null,
-  }));
-
-  let parentNode: { id: string; label: string; role: string } | null = null;
+  // AG.12a: the holding lines come from the catalog; a failed load leaves them null.
+  const holds = (roleId: string) => (catalogs.nodeRoles[roleId] ? holdingLine(catalogs, roleId) : null);
+  let parentNode: NodeContext['parentNode'] = null;
   if (node.parentId) {
     const parent = graph.nodes[node.parentId];
     if (parent) {
-      parentNode = { id: parent.id, label: parent.label, role: parent.type };
+      parentNode = {
+        id: parent.id, label: parent.label, role: parent.type,
+        placementKind: (node as { placementKind?: string }).placementKind ?? null, holds: holds(parent.type),
+      };
     }
   }
 
@@ -502,8 +581,8 @@ export function buildNodeContext(
       ? 'user-specified'
       : null,
     contracts,
-    ports,
     parentNode,
+    holds: holds(node.type),
     inheritedContext: collectInheritedScopes(graph, node.id),
     childNodes,
   };
@@ -601,9 +680,13 @@ export function formatPromptDocument(context: AssembledContext): string {
   lines.push('');
 
   if (context.specification) {
-    lines.push('## Project Vision');
-    lines.push(context.specification.vision);
-    lines.push('');
+    if (context.specification.visionServed) {
+      lines.push(...servedVisionLines(context.specification.visionServed));
+    } else if (context.specification.vision) {
+      lines.push('## Project Vision');
+      lines.push(context.specification.vision);
+      lines.push('');
+    }
 
     if (context.specification.relevantRequirements.length > 0) {
       lines.push('## Relevant Requirements');
@@ -622,10 +705,10 @@ export function formatPromptDocument(context: AssembledContext): string {
       }
     }
 
-    if (context.specification.constraints.length > 0) {
+    if ((context.specification.constraints?.length ?? 0) > 0) {
       lines.push('## Constraints');
-      for (const c of context.specification.constraints) {
-        lines.push(`- [${c.type}] ${c.description}`);
+      for (const c of context.specification.constraints ?? []) {
+        lines.push(`- [${c.ctype}] ${c.title ? `${c.title}: ` : ''}${c.description} (${c.ref})`);
       }
       lines.push('');
     }
@@ -778,6 +861,20 @@ export function formatPromptDocument(context: AssembledContext): string {
     }
   }
 
+  // RI-9: the repo moved under the index — say so before the brief treats
+  // the existing files as current.
+  const fresh = context.repoFreshness;
+  if (fresh && (fresh.modified + fresh.deleted + fresh.unverified + fresh.added) > 0) {
+    lines.push('## Repository Freshness');
+    lines.push(
+      `Since this component was indexed, the repository changed: ${fresh.modified} file(s) modified, ` +
+      `${fresh.deleted} removed, ${fresh.added} added, ${fresh.unverified} unverified. ` +
+      'Treat the existing implementation as possibly stale for these paths; call get_node_context / search_repo_index for the current index.',
+    );
+    for (const p of fresh.samplePaths) lines.push(`- ${p}`);
+    lines.push('');
+  }
+
   return lines.join('\n');
 }
 
@@ -815,14 +912,17 @@ function generateAndStoreTaskDocument(
       type: targetNode.type,
       technology: targetNode.technology,
       parentId: targetNode.parentId,
-      ports: targetNode.ports,
       metadata: targetNode.metadata,
     },
     graph: graphData,
     catalogs,
     requirements,
+    // AA.6: the sentences this node serves (loaded for the node target).
+    servedVision: specification?.visionServed,
     projectVision: specification?.vision || undefined,
     requirementNodeMap: specification?.requirementNodeMap,
+    // AA.0: the node's constraints (the context loaded them for this node).
+    constraints: specification?.constraints ? specification.constraints.map(({ ref: _ref, ...c }) => c) : undefined,
   });
 }
 
@@ -832,7 +932,11 @@ export async function assembleContextForTarget(
   branchId: string,
   targetType: string,
   targetId: string,
-  userId?: string
+  userId?: string,
+  // Q: the repo index is repo import's, Indie and above. The caller says
+  // whether the plan carries it; absent means no (a Free brief never points
+  // at get_node_context or search_repo_index).
+  opts: { repoIndex?: boolean } = {},
 ): Promise<AssembledContext> {
   const projectQuery = userId
     ? supabase.from('projects').select('name, owner_id').eq('id', projectId).eq('owner_id', userId).maybeSingle()
@@ -842,14 +946,27 @@ export async function assembleContextForTarget(
     projectQuery,
     supabase.from('branches').select('name').eq('id', branchId).eq('project_id', projectId).maybeSingle(),
     loadGraphData(supabase, branchId),
-    loadCatalogs(supabase),
+    loadCatalogs(supabase, { projectIds: [projectId] }),
   ]);
 
-  if (userId && !projectResult.data) {
+  // 7.0: not the owner — a roster seat reads (the tool already resolved the
+  // project through membership; this is the assembler's own guard).
+  let projectRow: { name?: string } | null = projectResult.data as { name?: string } | null;
+  if (userId && !projectRow) {
+    const { data: seat } = await supabase
+      .from('project_members')
+      .select('role, projects!inner(name)')
+      .eq('project_id', projectId)
+      .eq('user_id', userId)
+      .maybeSingle();
+    const via = (seat as { projects?: { name?: string } | null } | null)?.projects;
+    if (via) projectRow = { name: via.name };
+  }
+  if (userId && !projectRow) {
     throw new Error('Project not found or access denied');
   }
 
-  const projectName = projectResult.data?.name || 'Unknown Project';
+  const projectName = projectRow?.name || 'Unknown Project';
   const branchName = branchResult.data?.name || 'main';
 
   let targetNode: GraphNode | null = null;
@@ -865,7 +982,7 @@ export async function assembleContextForTarget(
   // Filter requirement→node mappings to nodes actually present in this branch's graph
   // (mappings are spec-global; nodes are branch-local — see mapping-liveness.ts).
   const specification = await loadSpecificationContext(
-    supabase, projectId, targetNode?.id, liveNodeIdSet(graphData?.nodes),
+    supabase, projectId, targetNode?.id, liveNodeIdSet(graphData?.nodes), branchId, graphData,
   );
 
   const architecture = targetNode && graphData
@@ -875,6 +992,10 @@ export async function assembleContextForTarget(
   const existingArtifacts = targetNode && graphData
     ? collectExistingArtifacts(graphData, targetNode.id)
     : [];
+  const fromRepo = opts.repoIndex === true && targetNode?.metadata?.importedFromRepo === true;
+  const repoFreshness = targetNode && fromRepo
+    ? await loadRepoFreshness(supabase, branchId, targetNode.id)
+    : undefined;
 
   const context: AssembledContext = {
     projectName,
@@ -889,6 +1010,7 @@ export async function assembleContextForTarget(
     existingArtifacts,
     promptDocument: '',
     untrustedDataAdvisory: UNTRUSTED_ADVISORY,
+    ...(repoFreshness ? { repoFreshness } : {}),
   };
 
   let promptDocument: string | null = null;
@@ -911,13 +1033,20 @@ export async function assembleContextForTarget(
 /** P0-7: wrap the user-authored string fields of an assembled context in place. */
 function applyUntrustedFieldWrapping(context: AssembledContext): void {
   if (context.specification) {
-    context.specification.vision = wrapField(context.specification.vision);
+    if (context.specification.vision) context.specification.vision = wrapField(context.specification.vision);
+    for (const v of context.specification.visionServed?.sentences ?? []) v.text = wrapField(v.text);
     for (const req of context.specification.relevantRequirements) {
       req.name = wrapField(req.name);
       req.description = req.description ? wrapField(req.description) : req.description;
       for (const ac of req.acceptanceCriteria || []) {
         ac.text = wrapField(ac.text);
       }
+    }
+    // AA.0: constraints are user-authored text too.
+    for (const c of context.specification.constraints ?? []) {
+      c.description = wrapField(c.description);
+      c.title = wrapFieldNullable(c.title);
+      c.rationale = wrapFieldNullable(c.rationale);
     }
   }
 
@@ -934,9 +1063,6 @@ function applyUntrustedFieldWrapping(context: AssembledContext): void {
       // WS1: the preview is user-authored schema text too — same envelope; the hash
       // and presence flag are structural and stay bare by design.
       contract.schemaPreview = wrapFieldNullable(contract.schemaPreview);
-    }
-    for (const port of node.ports) {
-      port.name = wrapFieldNullable(port.name);
     }
   }
 

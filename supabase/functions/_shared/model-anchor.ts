@@ -14,8 +14,18 @@
 // stable key order, no timestamps). Hashes are sha256 (matching the P0-5 integrity primitive),
 // computed per element and over the whole content (modelHash excludes itself).
 
+import { withholdCredentials, keepWithheldFromCanvas } from "./credential-withhold.ts";
+
 export const MODEL_ANCHOR_PATH = ".nodespec/model.json";
-export const MODEL_ANCHOR_VERSION = 1;
+// V3 AD.2 (owner 2026-09-24, ruling 5): version 2 carries the whole design:
+// each node's configuration and each contract's schema body, beside the
+// architecture version 1 held. Version 1 files still parse, verify and load.
+// AG.13 (owner 2026-09-28): version 3 is version 2 without ports (ports came
+// out of the model). Versions 1 and 2 still parse, and every comparison
+// ignores ports, so a repository's file loses its port lines on the next push
+// and nothing reads as changed.
+export const MODEL_ANCHOR_VERSION = 3;
+export const SUPPORTED_MODEL_VERSIONS: readonly number[] = [1, 2, 3];
 
 export interface AnchorPort {
   id: string;
@@ -30,8 +40,18 @@ export interface AnchorNode {
   technology?: string;
   parentId?: string;
   placementKind?: string;
-  ports: AnchorPort[];
+  /** Versions 1 and 2 only (AG.13: ports came out of the model); comparisons ignore it. */
+  ports?: AnchorPort[];
+  /** Architecture only. Versions 1 and 2 hashed the ports in, so comparisons
+   *  leave it out and compare the fields it covers (`portBlind`). */
   contentHash: string;
+  /** AD.2 (v2): the node's configuration (`metadata.config`), credentials
+   *  withheld. Present only when the node has one. */
+  config?: Record<string, unknown>;
+  /** AD.2 (v2): who decides the configuration: "manual" or "ai". */
+  configSource?: string;
+  /** AD.2 (v2): sha256 over `config` and `configSource`, present with them. */
+  configHash?: string;
 }
 
 export interface AnchorEdge {
@@ -39,6 +59,7 @@ export interface AnchorEdge {
   source: string;
   target: string;
   contractId: string;
+  /** Versions 1 and 2 only (AG.13); comparisons ignore them. */
   sourcePortId?: string;
   targetPortId?: string;
   label?: string;
@@ -56,8 +77,11 @@ export interface AnchorContract {
   interactionKind?: string;
   transport?: string;
   specFormat?: string;
+  /** sha256 over the schema as written here (credentials withheld). */
   schemaHash?: string;
   contentHash: string;
+  /** AD.2 (v2): the schema body, present exactly when `schemaHash` is. */
+  schema?: Record<string, unknown>;
 }
 
 export interface AnchorArtifact {
@@ -103,6 +127,51 @@ function stable(o: unknown): string {
   return JSON.stringify(o);
 }
 
+/** Keys sorted at every level: a node's configuration is written the same
+ *  whatever order its fields were typed in. */
+function canonical(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(canonical);
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(v as Record<string, unknown>).sort()) out[k] = canonical((v as Record<string, unknown>)[k]);
+    return out;
+  }
+  return v;
+}
+
+/** AD.2: a value NodeSpec kept out of git because it looked like a credential. */
+export interface WithheldValue {
+  entity: "node" | "contract";
+  id: string;
+  /** The node's label or the contract's name. */
+  name: string;
+  /** Where in it: `config.database.password`, `schema.properties.token.default`. */
+  path: string;
+}
+
+/** The design details version 2 adds to an element; stripping them leaves the
+ *  element exactly as version 1 wrote it. */
+const DETAIL_KEYS = ["config", "configSource", "configHash", "schema"] as const;
+
+function withoutDetails<T extends object>(element: T): T {
+  const out = { ...element } as Record<string, unknown>;
+  for (const k of DETAIL_KEYS) delete out[k];
+  return out as T;
+}
+
+/** AG.13 (owner 2026-09-28): ports came out of the model, so a node's ports and
+ *  an edge's port ids never make two designs differ. A file written with them
+ *  and the same design written without them compare equal, and a canvas that
+ *  stops storing them reads as unchanged. `contentHash` goes too: it covers the
+ *  ports, and the fields it covers are compared directly. */
+const PORT_KEYS = ["ports", "sourcePortId", "targetPortId", "contentHash"] as const;
+
+function portBlind<T extends object>(element: T): Record<string, unknown> {
+  const out = { ...element } as Record<string, unknown>;
+  for (const k of PORT_KEYS) delete out[k];
+  return out;
+}
+
 // deno-lint-ignore no-explicit-any
 type AnyRecord = Record<string, any>;
 
@@ -115,15 +184,20 @@ export interface MappingInput {
  * Serialize a graph into the canonical model.json string.
  * Pure over its inputs; sorted by id at every level.
  *
- * R7d: ARCHITECTURE ONLY — no requirement mappings. One fact, one file: the
- * spec plane (requirements, criteria, mappings) is `.nodespec/spec.json`'s.
+ * R7d: no requirement mappings. One fact, one file: the spec plane
+ * (requirements, criteria, mappings) is `.nodespec/spec.json`'s.
+ * AD.2: the architecture plus each node's configuration and each contract's
+ * schema body, credentials withheld.
  */
 export async function serializeModel(graph: AnyRecord): Promise<string> {
+  return (await serializeModelWithReport(graph)).text;
+}
+
+/** `serializeModel`, and every value it kept out of git. */
+export async function serializeModelWithReport(graph: AnyRecord): Promise<{ text: string; withheld: WithheldValue[] }> {
+  const withheld: WithheldValue[] = [];
   const nodes: AnchorNode[] = [];
   for (const n of Object.values((graph.nodes ?? {}) as AnyRecord) as AnyRecord[]) {
-    const ports: AnchorPort[] = ((n.ports ?? []) as AnyRecord[])
-      .map((p) => ({ id: String(p.id), name: String(p.name ?? ""), direction: String(p.direction ?? "") }))
-      .sort((a, b) => a.id.localeCompare(b.id));
     const core = {
       id: String(n.id),
       type: String(n.type ?? ""),
@@ -131,9 +205,22 @@ export async function serializeModel(graph: AnyRecord): Promise<string> {
       ...(n.technology ? { technology: String(n.technology) } : {}),
       ...(n.parentId ? { parentId: String(n.parentId) } : {}),
       ...(n.placementKind ? { placementKind: String(n.placementKind) } : {}),
-      ports,
     };
-    nodes.push({ ...core, contentHash: await sha256Hex(stable(core)) });
+    // AD.2: the configuration rides beside the architecture, with its own hash.
+    const meta = (n.metadata ?? {}) as AnyRecord;
+    const rawConfig = meta.config && typeof meta.config === "object" && !Array.isArray(meta.config) &&
+        Object.keys(meta.config).length > 0
+      ? meta.config as Record<string, unknown>
+      : undefined;
+    const configSource = meta.configSource === "ai" || meta.configSource === "manual" ? String(meta.configSource) : undefined;
+    let detail: { config?: Record<string, unknown>; configSource?: string; configHash: string } | null = null;
+    if (rawConfig || configSource) {
+      const held = rawConfig ? withholdCredentials(canonical(rawConfig) as Record<string, unknown>, "config") : null;
+      for (const path of held?.withheld ?? []) withheld.push({ entity: "node", id: core.id, name: core.label, path });
+      const body = { ...(held ? { config: held.value } : {}), ...(configSource ? { configSource } : {}) };
+      detail = { ...body, configHash: await sha256Hex(stable(body)) };
+    }
+    nodes.push({ ...core, contentHash: await sha256Hex(stable(core)), ...(detail ?? {}) });
   }
   nodes.sort((a, b) => a.id.localeCompare(b.id));
 
@@ -144,8 +231,6 @@ export async function serializeModel(graph: AnyRecord): Promise<string> {
       source: String(e.source ?? ""),
       target: String(e.target ?? ""),
       contractId: String(e.contractId ?? ""),
-      ...(e.sourcePortId ? { sourcePortId: String(e.sourcePortId) } : {}),
-      ...(e.targetPortId ? { targetPortId: String(e.targetPortId) } : {}),
       ...(e.label ? { label: String(e.label) } : {}),
       ...(e.direction ? { direction: String(e.direction) } : {}),
       ...(e.criticality ? { criticality: String(e.criticality) } : {}),
@@ -167,9 +252,16 @@ export async function serializeModel(graph: AnyRecord): Promise<string> {
   const contracts: AnchorContract[] = [];
   for (const c of Object.values((graph.contracts ?? {}) as AnyRecord) as AnyRecord[]) {
     if (!referencedContractIds.has(String(c.id))) continue;
-    const schemaHash = c.schema !== undefined && c.schema !== null
-      ? await sha256Hex(stable(c.schema))
-      : undefined;
+    // AD.2: the schema body is written, credentials withheld, and schemaHash
+    // covers exactly what is written (for a schema without credentials, the
+    // same hash version 1 wrote).
+    let schemaBody: Record<string, unknown> | undefined;
+    if (c.schema !== undefined && c.schema !== null) {
+      const held = withholdCredentials(c.schema as Record<string, unknown>, "schema");
+      for (const path of held.withheld) withheld.push({ entity: "contract", id: String(c.id), name: String(c.name ?? ""), path });
+      schemaBody = held.value;
+    }
+    const schemaHash = schemaBody !== undefined ? await sha256Hex(stable(schemaBody)) : undefined;
     const core = {
       id: String(c.id),
       kind: String(c.kind ?? ""),
@@ -179,7 +271,7 @@ export async function serializeModel(graph: AnyRecord): Promise<string> {
       ...(c.specFormat ? { specFormat: String(c.specFormat) } : {}),
       ...(schemaHash ? { schemaHash } : {}),
     };
-    contracts.push({ ...core, contentHash: await sha256Hex(stable(core)) });
+    contracts.push({ ...core, contentHash: await sha256Hex(stable(core)), ...(schemaBody !== undefined ? { schema: schemaBody } : {}) });
   }
   contracts.sort((a, b) => a.id.localeCompare(b.id));
 
@@ -205,7 +297,7 @@ export async function serializeModel(graph: AnyRecord): Promise<string> {
     modelHash,
     ...content,
   };
-  return JSON.stringify(anchor, null, 2) + "\n";
+  return { text: JSON.stringify(anchor, null, 2) + "\n", withheld };
 }
 
 export type ParseResult =
@@ -222,8 +314,8 @@ export function parseModel(json: string): ParseResult {
   }
   const m = raw as AnyRecord;
   if (!m || typeof m !== "object") return { ok: false, error: "model.json root is not an object" };
-  if (m.modelVersion !== MODEL_ANCHOR_VERSION) {
-    return { ok: false, error: `Unsupported modelVersion: ${m.modelVersion} (expected ${MODEL_ANCHOR_VERSION})` };
+  if (!SUPPORTED_MODEL_VERSIONS.includes(m.modelVersion)) {
+    return { ok: false, error: `Unsupported modelVersion: ${m.modelVersion} (expected one of ${SUPPORTED_MODEL_VERSIONS.join(", ")})` };
   }
   for (const key of ["nodes", "edges", "contracts", "artifacts"]) {
     if (!Array.isArray(m[key])) return { ok: false, error: `model.json ${key} is not an array` };
@@ -234,9 +326,18 @@ export function parseModel(json: string): ParseResult {
   if (m.mappings !== undefined && !Array.isArray(m.mappings)) {
     return { ok: false, error: "model.json mappings is present but not an array" };
   }
+  const isObject = (v: unknown) => !!v && typeof v === "object" && !Array.isArray(v);
   for (const n of m.nodes as AnyRecord[]) {
     if (!n.id || !n.type || typeof n.label !== "string") {
       return { ok: false, error: `model.json node missing id/type/label: ${stable(n).slice(0, 120)}` };
+    }
+    if (n.config !== undefined && !isObject(n.config)) {
+      return { ok: false, error: `model.json node ${n.id} config is not an object` };
+    }
+  }
+  for (const c of m.contracts as AnyRecord[]) {
+    if (c.schema !== undefined && !isObject(c.schema)) {
+      return { ok: false, error: `model.json contract ${c.id} schema is not an object` };
     }
   }
   for (const e of m.edges as AnyRecord[]) {
@@ -274,12 +375,28 @@ export async function verifyModelHash(model: ModelAnchor): Promise<boolean> {
  * the file format.
  */
 export async function coreModelHash(model: ModelAnchor): Promise<string> {
+  // AD.2: the architecture only, whatever the version. Stripping the details
+  // version 2 adds leaves each element exactly as version 1 wrote it.
   return await sha256Hex(stable({
-    nodes: model.nodes,
-    edges: model.edges,
-    contracts: model.contracts,
+    nodes: model.nodes.map((n) => portBlind(withoutDetails(n))),
+    edges: model.edges.map(portBlind),
+    contracts: model.contracts.map(withoutDetails),
     artifacts: model.artifacts,
   }));
+}
+
+/**
+ * AD.2: does `a` hold the same design as `b`? When both are version 2 the
+ * whole design counts, configuration and schema bodies included; when either
+ * is version 1 it cannot say anything about those, so architecture decides.
+ * Every "does the canvas equal the repository?" question asks this.
+ */
+export async function sameDesign(a: ModelAnchor, b: ModelAnchor): Promise<boolean> {
+  if (a.modelVersion >= 2 && b.modelVersion >= 2) {
+    const whole = (m: ModelAnchor) => sha256Hex(stable({ nodes: m.nodes.map(portBlind), edges: m.edges.map(portBlind), contracts: m.contracts, artifacts: m.artifacts }));
+    return (await whole(a)) === (await whole(b));
+  }
+  return (await coreModelHash(a)) === (await coreModelHash(b));
 }
 
 // ── P1-7 R2: adopt-on-connect — materialize an anchor as ordinary NodeSpec patches ────
@@ -323,6 +440,7 @@ function diffBucket<T extends { id: string; contentHash: string }>(
   ours: T[],
   theirs: T[],
   labelOf: (e: T) => string,
+  keyOf: (e: T) => string = (e) => e.contentHash,
 ): AnchorDiffBucket {
   const oursById = new Map(ours.map((e) => [e.id, e]));
   const theirsById = new Map(theirs.map((e) => [e.id, e]));
@@ -332,7 +450,7 @@ function diffBucket<T extends { id: string; contentHash: string }>(
   for (const t of theirs) {
     const o = oursById.get(t.id);
     if (!o) added.push({ id: t.id, label: labelOf(t) });
-    else if (o.contentHash !== t.contentHash) changed.push({ id: t.id, label: labelOf(t) });
+    else if (keyOf(o) !== keyOf(t)) changed.push({ id: t.id, label: labelOf(t) });
   }
   for (const o of ours) {
     if (!theirsById.has(o.id)) removed.push({ id: o.id, label: labelOf(o) });
@@ -347,8 +465,13 @@ export function diffAnchors(ours: ModelAnchor, theirs: ModelAnchor): AnchorDiff 
   const edgeLabel = (e: AnchorEdge) =>
     e.label || `${nodeLabel.get(e.source) ?? e.source.slice(0, 8)} → ${nodeLabel.get(e.target) ?? e.target.slice(0, 8)}`;
 
-  const nodes = diffBucket(ours.nodes, theirs.nodes, (n) => n.label);
-  const edges = diffBucket(ours.edges, theirs.edges, edgeLabel);
+  // AD.2: a node whose configuration changed is changed, when both sides carry
+  // configuration (version 2). A contract's schema body is in its schemaHash.
+  const details = ours.modelVersion >= 2 && theirs.modelVersion >= 2;
+  // AG.13: nodes and edges compare without their ports (portBlind).
+  const nodeKey = (n: AnchorNode) => stable(portBlind(withoutDetails(n)));
+  const nodes = diffBucket(ours.nodes, theirs.nodes, (n) => n.label, (n) => details ? `${nodeKey(n)}|${n.configHash ?? ""}` : nodeKey(n));
+  const edges = diffBucket(ours.edges, theirs.edges, edgeLabel, (e) => stable(portBlind(e)));
   const contracts = diffBucket(ours.contracts, theirs.contracts, (c) => c.name);
   // Anchor artifacts carry no contentHash (path/kind only) — synthesize one from the
   // serialized fields so moved/re-kinded artifacts read as changed.
@@ -449,140 +572,18 @@ export function renderAnchorDiffMarkdown(
   return lines.join("\n");
 }
 
-// ── R3-1: THE LOADER — anchor → whole graph (the inverse of serializeModel) ─────────
-// Replace-graph restore for git-native branching: a git ref's model.json IS that
-// ref's graph. Produces a snapshot-ready graph_data object (the N6.1 snapshot-only
-// persist precedent — graph_patches are NEVER rewritten; the log keeps forward
-// history, the snapshot moves). Honest limits, by construction of the anchor:
-// contract schema CONTENT and artifact file CONTENT are not in the anchor (only
-// hashes/paths) — restored contracts carry empty schemas and restored artifacts
-// hydrate on demand through the R2.1 load-from-repo lane. THE invariant (pinned):
-// serializeModel(anchorToGraph(model)) reproduces the same modelHash.
-export interface RestoredGraphResult {
-  // deno-lint-ignore no-explicit-any
-  graph: Record<string, any>;
-  counts: { nodes: number; edges: number; contracts: number; artifacts: number };
+/** AD.2: the node metadata an anchor node's configuration becomes. Values git
+ *  withheld take the canvas's (`current`), or are left out when it has none. */
+export function nodeDetailMetadata(n: AnchorNode, current: Record<string, unknown> | undefined): Record<string, unknown> {
+  const meta: Record<string, unknown> = {};
+  if (n.config !== undefined) meta.config = keepWithheldFromCanvas(n.config, current);
+  if (n.configSource !== undefined) meta.configSource = n.configSource;
+  return meta;
 }
 
-export function anchorToGraph(
-  model: ModelAnchor,
-  // R3-4b (owner bench 2026-07-30: "anchor-restore provenance_detail is NULL"):
-  // `sourceCommit` is the ref HEAD the anchor was read from, so restored artifacts
-  // carry the same {origin, commitSha, at} detail every other lane writes. Optional
-  // — a caller without a resolved sha still gets origin + timestamp, never NULL.
-  opts: { graphId: string; version: number; nowIso: string; sourceCommit?: string },
-): RestoredGraphResult {
-  // deno-lint-ignore no-explicit-any
-  const nodes: Record<string, any> = {};
-  const artifactsByNode = new Map<string, string[]>();
-  for (const a of model.artifacts) {
-    if (!artifactsByNode.has(a.nodeId)) artifactsByNode.set(a.nodeId, []);
-    artifactsByNode.get(a.nodeId)!.push(a.id);
-  }
-  for (const n of model.nodes) {
-    nodes[n.id] = {
-      id: n.id,
-      type: n.type,
-      label: n.label,
-      ...(n.technology ? { technology: n.technology } : {}),
-      ...(n.parentId ? { parentId: n.parentId } : {}),
-      ...(n.placementKind ? { placementKind: n.placementKind } : {}),
-      ports: n.ports.map((p) => ({ id: p.id, name: p.name, direction: p.direction })),
-      data: {},
-      artifacts: artifactsByNode.get(n.id) ?? [],
-      metadata: {},
-      status: "draft",
-    };
-  }
-
-  // deno-lint-ignore no-explicit-any
-  const edges: Record<string, any> = {};
-  for (const e of model.edges) {
-    edges[e.id] = {
-      id: e.id,
-      source: e.source,
-      target: e.target,
-      contractId: e.contractId,
-      ...(e.sourcePortId ? { sourcePortId: e.sourcePortId } : {}),
-      ...(e.targetPortId ? { targetPortId: e.targetPortId } : {}),
-      ...(e.label ? { label: e.label } : {}),
-      ...(e.direction ? { direction: e.direction } : {}),
-      ...(e.criticality ? { criticality: e.criticality } : {}),
-      metadata: {},
-    };
-  }
-
-  // deno-lint-ignore no-explicit-any
-  const contracts: Record<string, any> = {};
-  for (const c of model.contracts) {
-    contracts[c.id] = {
-      id: c.id,
-      kind: c.kind,
-      name: c.name,
-      ...(c.interactionKind ? { interactionKind: c.interactionKind } : {}),
-      ...(c.transport ? { transport: c.transport } : {}),
-      ...(c.specFormat ? { specFormat: c.specFormat } : {}),
-      schema: {},
-      metadata: {},
-      status: "draft",
-    };
-  }
-
-  // deno-lint-ignore no-explicit-any
-  const artifacts: Record<string, any> = {};
-  for (const a of model.artifacts) {
-    artifacts[a.id] = {
-      id: a.id,
-      nodeId: a.nodeId,
-      path: a.path,
-      kind: a.kind,
-      content: "",
-      createdAt: opts.nowIso,
-      updatedAt: opts.nowIso,
-      metadata: {
-        restoredFromAnchor: true,
-        restoredModelHash: model.modelHash,
-        // R3-4b: BOTH halves of the convention — the string names the lane, the
-        // detail says which commit and when. This half was missing, so every
-        // anchor-restored artifact read as provenance_detail = NULL while the
-        // git-accept / residue-bind lanes carried the full record.
-        provenance: {
-          origin: "anchor-restore",
-          ...(opts.sourceCommit ? { commitSha: opts.sourceCommit } : {}),
-          at: opts.nowIso,
-        },
-      },
-      // R3-4b: one provenance convention across every lane that materializes
-      // external content — sourceProvenance names the origin lane.
-      sourceProvenance: "anchor-restore",
-      status: "draft",
-    };
-  }
-
-  const graph = {
-    id: opts.graphId,
-    // Must satisfy the CLIENT's GraphSchema on its next save (schemaVersion is
-    // required there) — keep in lockstep with core CURRENT_GRAPH_SCHEMA_VERSION.
-    schemaVersion: 8,
-    version: opts.version,
-    hash: model.modelHash,
-    nodes,
-    edges,
-    contracts,
-    artifacts,
-    metadata: { restoredFromAnchor: model.modelHash, restoredAt: opts.nowIso },
-  };
-
-  return {
-    graph,
-    counts: {
-      nodes: model.nodes.length,
-      edges: model.edges.length,
-      contracts: model.contracts.length,
-      artifacts: model.artifacts.length,
-    },
-  };
-}
+// AD.2b: `anchorToGraph` (R3-1's loader, anchor to a whole replacement graph)
+// is gone. No path writes a snapshot from git: a load is a diff filed as a
+// proposal (`_shared/anchor-load.ts`).
 
 export function anchorToPatches(model: ModelAnchor, actorId = "git-adopt", sourceCommit?: string): PatchOp[] {
   const now = new Date().toISOString();
@@ -605,6 +606,8 @@ export function anchorToPatches(model: ModelAnchor, actorId = "git-adopt", sourc
         ...(c.interactionKind ? { interactionKind: c.interactionKind } : {}),
         ...(c.transport ? { transport: c.transport } : {}),
         ...(c.specFormat ? { specFormat: c.specFormat } : {}),
+        // AD.2: the schema body, without the values git withheld.
+        ...(c.schema !== undefined ? { schema: keepWithheldFromCanvas(c.schema, undefined) } : {}),
       },
     });
   }
@@ -622,8 +625,10 @@ export function anchorToPatches(model: ModelAnchor, actorId = "git-adopt", sourc
         ...(n.technology ? { technology: n.technology } : {}),
         ...(n.parentId ? { parentId: n.parentId } : {}),
         ...(n.placementKind ? { placementKind: n.placementKind } : {}),
-        ports: n.ports ?? [],
+        // AG.13 (owner 2026-09-28): ports came out of the model; an adopt writes none.
         status: "draft",
+        // AD.2: the configuration, without the values git withheld.
+        ...(n.config !== undefined || n.configSource !== undefined ? { metadata: nodeDetailMetadata(n, undefined) } : {}),
       },
     });
   }
@@ -634,8 +639,6 @@ export function anchorToPatches(model: ModelAnchor, actorId = "git-adopt", sourc
       metadata: meta(`Adopt edge from anchor`),
       payload: {
         id: e.id, source: e.source, target: e.target, contractId: e.contractId,
-        ...(e.sourcePortId ? { sourcePortId: e.sourcePortId } : {}),
-        ...(e.targetPortId ? { targetPortId: e.targetPortId } : {}),
         ...(e.label ? { label: e.label } : {}),
         ...(e.direction ? { direction: e.direction } : {}),
         ...(e.criticality ? { criticality: e.criticality } : {}),

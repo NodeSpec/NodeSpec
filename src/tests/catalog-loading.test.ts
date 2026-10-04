@@ -51,7 +51,8 @@ describe('Catalog Loader Module Structure', () => {
     expect(source).toContain('palette_category: string');
     expect(source).toContain('is_container: boolean');
     expect(source).toContain('container_layer: string | null');
-    expect(source).toContain('default_ports:');
+    // AG.13: ports came out of the model; the loader no longer reads the column.
+    expect(source).not.toContain('default_ports');
     expect(source).toContain('suggested_contracts:');
   });
 
@@ -72,49 +73,6 @@ describe('Catalog Loader Module Structure', () => {
   it('TechnologyRow supports user-contributed technologies', () => {
     expect(source).toContain('is_user_contributed: boolean');
     expect(source).toContain('project_id: string | null');
-  });
-});
-
-describe('ToolContext Catalog Integration', () => {
-  const toolExecutorSource = loadFile('../../supabase/functions/_shared/tool-executor.ts');
-
-  it('imports CatalogData type from catalog-loader', () => {
-    expect(toolExecutorSource).toContain('from "./catalog-loader.ts"');
-    expect(toolExecutorSource).toContain('CatalogData');
-  });
-
-  it('ToolContext interface includes optional catalogs field', () => {
-    expect(toolExecutorSource).toContain('catalogs?: CatalogData');
-  });
-});
-
-describe('Agent Loop Catalog Wiring', () => {
-  const agentLoopSource = loadFile('../../supabase/functions/_shared/agent-loop-v4.ts');
-
-  it('imports loadCatalogs from catalog-loader', () => {
-    expect(agentLoopSource).toContain('import { loadCatalogs } from "./catalog-loader.ts"');
-  });
-
-  it('calls loadCatalogs in the main Promise.all block alongside other loaders', () => {
-    const allBlocks = [...agentLoopSource.matchAll(/Promise\.all\(\[([\s\S]*?)\]\)/g)];
-    const mainBlock = allBlocks.find(m =>
-      m[1].includes('loadGraphState') || m[1].includes('loadCatalogs')
-    );
-    expect(mainBlock).toBeTruthy();
-    expect(mainBlock![1]).toContain('loadGraphState');
-    expect(mainBlock![1]).toContain('loadLockedNodeIds');
-    expect(mainBlock![1]).toContain('loadProjectContext');
-    expect(mainBlock![1]).toContain('loadCatalogs');
-  });
-
-  it('destructures catalogs from Promise.all result', () => {
-    expect(agentLoopSource).toContain('graph, lockedNodeIds, projectContext, catalogs');
-  });
-
-  it('passes catalogs into ToolContext construction', () => {
-    const ctxBlock = agentLoopSource.match(/const ctx:\s*ToolContext\s*=\s*\{([\s\S]*?)\};/);
-    expect(ctxBlock).toBeTruthy();
-    expect(ctxBlock![1]).toContain('catalogs');
   });
 });
 

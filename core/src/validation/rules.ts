@@ -6,7 +6,6 @@ import type {
   ValidationCategory,
 } from './types';
 import type { ContractKind } from '../types';
-import { getNodeTypeById } from '../node-types.js';
 import { assessConfigStaleness } from '../configuration-fingerprint.js';
 import { assessTaskStaleness } from '../task-context-fingerprint.js';
 import { extractNodeDomainMetadata } from '../node-metadata.js';
@@ -182,64 +181,6 @@ const schemaRefValid: ValidationRule = {
   },
 };
 
-const nodeHasRequiredPorts: ValidationRule = {
-  id: 'node-has-required-ports',
-  name: 'Nodes must have ports matching their connections',
-  category: 'port_configuration',
-  severity: 'info',
-  check: (context: ValidationContext): GraphValidationIssue[] => {
-    if (!context.node) return [];
-
-    const node = context.node;
-    const edges = context.allEdges.filter(
-      (e: any) => e.source === node.id || e.target === node.id
-    );
-
-    const issues: GraphValidationIssue[] = [];
-    const ports = node.ports || [];
-
-    for (const edge of edges) {
-      const portId = edge.source === node.id ? edge.sourcePortId : edge.targetPortId;
-
-      if (!portId) continue;
-
-      const portExists = ports.some((p: any) => p.id === portId);
-
-      if (!portExists) {
-        const isSource = edge.source === node.id;
-        const direction = isSource ? 'out' : 'in';
-        const contract = context.graph.contracts[edge.contractId];
-        const contractKind = contract?.kind || 'unknown';
-
-        issues.push(
-          createIssue(
-            'warning',
-            'port_configuration',
-            `Edge references missing connection point`,
-            `Connection to ${isSource ? 'target' : 'source'} node references port ID "${portId}" which doesn't exist.`,
-            { nodeId: node.id, edgeId: edge.id, portId },
-            [
-              {
-                id: 'add-port',
-                label: 'Add Connection Point',
-                description: `Add ${direction}put connection point`,
-                action: {
-                  type: 'add_port',
-                  nodeId: node.id,
-                  direction,
-                  contractKind,
-                },
-              },
-            ]
-          )
-        );
-      }
-    }
-
-    return issues;
-  },
-};
-
 const artifactImplementsContract: ValidationRule = {
   id: 'artifact-implements-contract',
   name: 'Verify artifacts implement their contracts',
@@ -287,80 +228,6 @@ const artifactImplementsContract: ValidationRule = {
     }
 
     return [];
-  },
-};
-
-const portMatchesNodeTypeTemplate: ValidationRule = {
-  id: 'port-matches-node-type-template',
-  name: 'Ports should match node type template',
-  category: 'port_configuration',
-  severity: 'warning',
-  check: (context: ValidationContext): GraphValidationIssue[] => {
-    if (!context.node) return [];
-
-    const node = context.node;
-    const typeDef = getNodeTypeById(node.type);
-    if (!typeDef?.defaultPorts || typeDef.defaultPorts.length === 0) return [];
-
-    const issues: GraphValidationIssue[] = [];
-    const ports = node.ports || [];
-
-    const requiredTemplatePorts = typeDef.defaultPorts.filter(tp => tp.required === true);
-
-    for (const templatePort of requiredTemplatePorts) {
-      const portsOfDirection = ports.filter((p: any) => p.direction === templatePort.direction);
-
-      if (portsOfDirection.length === 0) {
-        issues.push(
-          createIssue(
-            'warning',
-            'port_configuration',
-            `Missing required ${templatePort.direction}put port`,
-            `Node type "${typeDef.label}" expects a ${templatePort.direction}put port "${templatePort.name}" but none exists.`,
-            { nodeId: node.id },
-            [
-              {
-                id: `reconcile-ports-${node.id}-${templatePort.direction}`,
-                label: 'Reconcile Ports',
-                description: `Add missing ${templatePort.direction}put port from template`,
-                action: {
-                  type: 'reconcile_ports',
-                  nodeId: node.id,
-                  suggestedPorts: [{ name: templatePort.name, direction: templatePort.direction, required: templatePort.required }],
-                },
-              },
-            ]
-          )
-        );
-      } else {
-        const nameMatches = portsOfDirection.some((p: any) => p.name === templatePort.name);
-        if (!nameMatches) {
-          issues.push(
-            createIssue(
-              'info',
-              'port_configuration',
-              `Port name differs from template`,
-              `Template expects "${templatePort.name}" but node has "${portsOfDirection.map((p: any) => p.name).join(', ')}". The port may be stale.`,
-              { nodeId: node.id },
-              [
-                {
-                  id: `reconcile-port-name-${node.id}-${templatePort.direction}`,
-                  label: 'Reconcile Port Names',
-                  description: `Rename port to match template "${templatePort.name}"`,
-                  action: {
-                    type: 'reconcile_ports',
-                    nodeId: node.id,
-                    suggestedPorts: [{ name: templatePort.name, direction: templatePort.direction, required: templatePort.required }],
-                  },
-                },
-              ]
-            )
-          );
-        }
-      }
-    }
-
-    return issues;
   },
 };
 
@@ -422,80 +289,6 @@ const configArtifactStaleness: ValidationRule = {
             )
           );
         }
-      }
-    }
-
-    return issues;
-  },
-};
-
-const edgePortDirectionValid: ValidationRule = {
-  id: 'edge-port-direction-valid',
-  name: 'Edge port references must have correct direction',
-  category: 'graph_structure',
-  severity: 'error',
-  check: (context: ValidationContext): GraphValidationIssue[] => {
-    if (!context.edge) return [];
-
-    const edge = context.edge;
-    const issues: GraphValidationIssue[] = [];
-
-    const sourceNode = context.graph.nodes[edge.source];
-    const targetNode = context.graph.nodes[edge.target];
-
-    if (edge.sourcePortId && sourceNode) {
-      const sourcePorts = sourceNode.ports || [];
-      const sourcePort = sourcePorts.find((p: any) => p.id === edge.sourcePortId);
-      if (sourcePort && sourcePort.direction !== 'out' && sourcePort.direction !== 'bidirectional') {
-        issues.push(
-          createIssue(
-            'error',
-            'graph_structure',
-            'Source port has wrong direction',
-            `Edge source references port "${sourcePort.name}" which has direction "${sourcePort.direction}" instead of "out" or "bidirectional".`,
-            { edgeId: edge.id, nodeId: edge.source, portId: edge.sourcePortId },
-            [
-              {
-                id: `swap-ports-${edge.id}`,
-                label: 'Swap Port References',
-                description: 'Swap source and target port IDs',
-                action: {
-                  type: 'update_contract',
-                  edgeId: edge.id,
-                  updates: { sourcePortId: edge.targetPortId, targetPortId: edge.sourcePortId },
-                },
-              },
-            ]
-          )
-        );
-      }
-    }
-
-    if (edge.targetPortId && targetNode) {
-      const targetPorts = targetNode.ports || [];
-      const targetPort = targetPorts.find((p: any) => p.id === edge.targetPortId);
-      if (targetPort && targetPort.direction !== 'in' && targetPort.direction !== 'bidirectional') {
-        issues.push(
-          createIssue(
-            'error',
-            'graph_structure',
-            'Target port has wrong direction',
-            `Edge target references port "${targetPort.name}" which has direction "${targetPort.direction}" instead of "in" or "bidirectional".`,
-            { edgeId: edge.id, nodeId: edge.target, portId: edge.targetPortId },
-            [
-              {
-                id: `swap-ports-${edge.id}`,
-                label: 'Swap Port References',
-                description: 'Swap source and target port IDs',
-                action: {
-                  type: 'update_contract',
-                  edgeId: edge.id,
-                  updates: { sourcePortId: edge.targetPortId, targetPortId: edge.sourcePortId },
-                },
-              },
-            ]
-          )
-        );
       }
     }
 
@@ -745,11 +538,8 @@ export const VALIDATION_RULES: ValidationRule[] = [
   edgeHasContract,
   contractHasSchema,
   schemaRefValid,
-  nodeHasRequiredPorts,
-  portMatchesNodeTypeTemplate,
   artifactImplementsContract,
   configArtifactStaleness,
-  edgePortDirectionValid,
   containmentMismatch,
   orphanedPlatformCapability,
   taskDocumentStaleness,

@@ -21,13 +21,13 @@
 import type { Graph } from './types.js';
 
 export const NODE_SLICE_VERSION = 1;
-export const SLICE_MODEL_VERSION = 1; // must track MODEL_ANCHOR_VERSION in model-anchor.ts
-
-export interface SlicePort {
-  id: string;
-  name: string;
-  direction: string;
-}
+// Must track MODEL_ANCHOR_VERSION in model-anchor.ts. V3 AD.2: version 2
+// anchors add each node's configuration and each contract's schema body beside
+// the architecture; the slice carries the architecture only (a node export is
+// the node's shape, and its configuration travels with the export's context),
+// so its elements equal the anchor's with those details left out, contentHash
+// included. AG.13 (owner 2026-09-28): version 3, no ports and no edge port ids.
+export const SLICE_MODEL_VERSION = 3;
 
 export interface SliceNode {
   id: string;
@@ -36,7 +36,6 @@ export interface SliceNode {
   technology?: string;
   parentId?: string;
   placementKind?: string;
-  ports: SlicePort[];
   contentHash: string;
 }
 
@@ -45,8 +44,6 @@ export interface SliceEdge {
   source: string;
   target: string;
   contractId: string;
-  sourcePortId?: string;
-  targetPortId?: string;
   label?: string;
   /** N8.6(C): behavior fields are anchor content — present-only, so slices of
    *  graphs that never set them hash byte-identically to pre-(C) slices. */
@@ -123,9 +120,6 @@ export async function buildNodeAnchorSlice(
   if (!n) return null;
 
   const makeNode = async (raw: AnyRecord): Promise<SliceNode> => {
-    const ports: SlicePort[] = ((raw.ports ?? []) as AnyRecord[])
-      .map(p => ({ id: String(p.id), name: String(p.name ?? ''), direction: String(p.direction ?? '') }))
-      .sort((a, b) => a.id.localeCompare(b.id));
     const core = {
       id: String(raw.id),
       type: String(raw.type ?? ''),
@@ -133,7 +127,6 @@ export async function buildNodeAnchorSlice(
       ...(raw.technology ? { technology: String(raw.technology) } : {}),
       ...(raw.parentId ? { parentId: String(raw.parentId) } : {}),
       ...(raw.placementKind ? { placementKind: String(raw.placementKind) } : {}),
-      ports,
     };
     return { ...core, contentHash: await sha256Hex(stable(core)) };
   };
@@ -150,8 +143,6 @@ export async function buildNodeAnchorSlice(
       source: String(e.source ?? ''),
       target: String(e.target ?? ''),
       contractId: String(e.contractId ?? ''),
-      ...(e.sourcePortId ? { sourcePortId: String(e.sourcePortId) } : {}),
-      ...(e.targetPortId ? { targetPortId: String(e.targetPortId) } : {}),
       ...(e.label ? { label: String(e.label) } : {}),
       ...(e.direction ? { direction: String(e.direction) } : {}),
       ...(e.criticality ? { criticality: String(e.criticality) } : {}),

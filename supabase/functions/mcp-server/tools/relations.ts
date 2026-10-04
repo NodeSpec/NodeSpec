@@ -12,7 +12,7 @@
 import type { SupabaseClient } from "jsr:@supabase/supabase-js@2";
 import type { AuthResult, MCPResponse } from "../shared.ts";
 import { checkScope, resolveProjectByName } from "../shared.ts";
-import { resolveRequirementRow, resolveSpecForProject } from "./requirements.ts";
+import { lockedRefusal, resolveRequirementRow, resolveSpecForProject } from "./requirements.ts";
 
 export const RELATION_TYPES = ["expands", "depends_on", "relates_to"] as const;
 export type RelationType = (typeof RELATION_TYPES)[number];
@@ -50,6 +50,10 @@ export async function handleRelateRequirements(
   if (!to) return { success: false, error: `Requirement not found: ${args.to_requirement_id}` };
   if (from.id === to.id) {
     return { success: false, error: "A requirement cannot relate to itself." };
+  }
+  // v3x (doctrine 6): a relation is a write on BOTH of its ends, add or remove.
+  for (const end of [from, to]) {
+    if (end.locked) return { success: false, error: lockedRefusal(end.requirement_id) };
   }
 
   if (mode === "remove") {

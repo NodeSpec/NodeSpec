@@ -4,7 +4,6 @@ export {
   useAuth,
   useProject,
   useSpecification,
-  useCodeStructure,
   useTemplates,
 } from './ServiceContext.js';
 export type { Services, ServiceProviderProps } from './ServiceContext.js';

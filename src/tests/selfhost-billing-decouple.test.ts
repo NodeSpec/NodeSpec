@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
+import { projectCapReached, HOSTED_COMMUNITY_PROJECT_LIMIT } from '../ui/config/tiers';
 
 /*
   Self-hosted sign-in must NEVER depend on the billing lane
@@ -43,11 +44,12 @@ describe('self-hosted builds carry no client billing lane', () => {
     const ensureIdx = gate.indexOf('ensureFreeCustomer', recoveryIdx);
     expect(recoveryGateIdx).toBeGreaterThan(recoveryIdx);
     expect(recoveryGateIdx).toBeLessThan(ensureIdx);
-    // The 1-project cap is a hosted-Free concept; a container's users all
-    // resolve to 'community' (no billing rows) and must stay uncapped.
-    const limitIdx = gate.indexOf('const projectLimitReached');
-    const limitGateIdx = gate.indexOf('if (!isHostedEdition) return false;', limitIdx);
-    expect(limitGateIdx).toBeGreaterThan(limitIdx);
+    // The project cap is the managed site's Free plan's alone; a container's
+    // users all resolve to 'community' (no billing rows) and stay uncapped
+    // (the gate in each edition: new-project-cap.test.tsx).
+    expect(projectCapReached('community', 50, false)).toBe(false);
+    expect(projectCapReached('community', HOSTED_COMMUNITY_PROJECT_LIMIT, true)).toBe(true);
+    expect(projectCapReached('indie', 50, true)).toBe(false);
   });
 
   it('server parity: the MCP create_project cap lifts on self-host (regression pin)', () => {

@@ -3,7 +3,7 @@
 // comes up instead of having to hunt for it"). Server twin of the nature wording:
 // supabase/functions/_shared/catalog-search.ts::describeNature — phrases must stay aligned.
 import { describe, expect, it } from 'vitest';
-import { deriveNodeNature, rankCatalogMatches, isCustomDependencyRole, paletteChip, usagePhraseForRole, providerPlatformRoleId } from '../ui/utils/node-nature.js';
+import { deriveNodeNature, rankCatalogMatches, isCustomDependencyRole, usagePhraseForRole, providerPlatformRoleId } from '../ui/utils/node-nature.js';
 import type { NodeRole, TechnologyCatalogEntry } from '../persistence/supabase/catalog-repository.js';
 
 function role(over: Partial<NodeRole>): NodeRole {
@@ -12,7 +12,7 @@ function role(over: Partial<NodeRole>): NodeRole {
     rfVisualType: 'service', paletteCategory: 'Services',
     nature: 'build', interfaceKind: 'service', provider: null, capabilityTags: [],
     isContainer: false, containerLayer: null, containerStyle: null, canContain: [],
-    metadataSchema: null, defaultPorts: [], suggestedContracts: [], sortOrder: 1,
+    metadataSchema: null, suggestedContracts: [], sortOrder: 1,
     deprecated: false, defaultTechnology: null,
     ...over,
   } as NodeRole;
@@ -69,16 +69,17 @@ describe('deriveNodeNature — plain language from the axes', () => {
   });
 });
 
-describe('N3.7 paletteChip — the ONLY recognition-time vocabulary: Build / Connect / Host', () => {
-  it('collapses the seven natures into three words (or none)', () => {
-    expect(paletteChip(role({}))).toBe('Build');
-    expect(paletteChip(role({ nature: 'call' }))).toBe('Connect');
-    expect(paletteChip(role({ nature: 'integrate' }))).toBe('Connect');
-    expect(paletteChip(role({ nature: 'engine' }))).toBe('Connect');
-    expect(paletteChip(role({}), tech({ treatmentOverride: 'boundary' }))).toBe('Connect');
-    expect(paletteChip(role({ nature: 'host' }))).toBe('Host');
-    expect(paletteChip(role({ isContainer: true, containerStyle: 'hosting' }))).toBe('Host');
-    expect(paletteChip(role({ isContainer: true, containerStyle: 'logical-boundary' }))).toBeNull();
+// AG.3 (owner 2026-09-28, "chips out"): the Build / Connect / Host chip left the app;
+// the sentence stays where it changes the work, and a self-hostable technology no
+// longer reads as only a provider's.
+describe('AG.3: a self-hostable technology is not only a provider\'s', () => {
+  it('PostgreSQL reads provider-managed or self-hosted; AWS RDS and Stripe read as before', () => {
+    expect(deriveNodeNature(role({}), { ...tech({ configMode: 'declarative' }), id: 'postgresql' }).line)
+      .toBe('Provider-managed, or operated by you if self-hosted');
+    expect(deriveNodeNature(role({}), { ...tech({ configMode: 'declarative' }), id: 'aws-rds' }).line)
+      .toMatch(/^Managed service\W+provider runs it, you configure it$/);
+    expect(deriveNodeNature(role({}), { ...tech({ configMode: 'external' }), id: 'stripe' }).line)
+      .toMatch(/^Managed service\W+provider runs it, you configure it$/);
   });
 });
 

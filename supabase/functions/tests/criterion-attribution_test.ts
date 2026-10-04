@@ -24,7 +24,6 @@ const CATALOGS: any = {
       id: 'backend-service', label: 'Backend Service', description: 'App service',
       nature: 'build', palette_category: 'services', is_container: false,
       container_layer: null, capability_tags: [],
-      default_ports: [{ name: 'input', direction: 'in' }, { name: 'output', direction: 'out' }],
     },
   },
   technologies: {}, deploymentTargets: {}, legacyMappings: {}, cloudPatterns: {}, scopeArchetypes: {},

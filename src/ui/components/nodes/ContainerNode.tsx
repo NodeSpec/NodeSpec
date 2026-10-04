@@ -1,10 +1,12 @@
 import { memo, useCallback, useEffect, useRef, Component, type ReactNode, type ErrorInfo } from 'react';
 import { FallbackHandles } from './FallbackHandles.js';
-import { Handle, Position, NodeResizer, useStore } from '@xyflow/react';
+import { LeafHandles } from './LeafHandles.js';
+import { NodeResizer, useStore } from '@xyflow/react';
 import { NodeActionToolbar, useNodeToolbarHover } from './NodeActionToolbar.js';
 import type { RFNodeData } from '../../adapters/graph-to-reactflow.js';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { getContainerTypeById } from '@nodespec/core/container-types.js';
+import { dataShapeCounts } from '../../adapters/data-shape.js';
 import { NodeIcon } from '../common/index.js';
 import { ContainerConnectionBadge } from './ContainerConnectionBadge.js';
 import { getTechnologyLogo } from '../../utils/technology-logo-map.js';
@@ -92,7 +94,11 @@ function ContainerNodeComponent({ data, selected, highlighted, id }: ContainerNo
     };
   });
 
-  const isExpanded = (data.metadata?.containerExpanded as boolean | undefined) ?? true;
+  // AB.7: an exploded node (functional view only) opens by its own toggle and
+  // is closed until opened; a container keeps its expanded default.
+  const isExpanded = data.exploded
+    ? data.metadata?.partsShown === true
+    : ((data.metadata?.containerExpanded as boolean | undefined) ?? true);
   const isCollapsed = !isExpanded;
   const isDropTarget = data.isDropTarget || false;
 
@@ -160,7 +166,13 @@ function ContainerNodeComponent({ data, selected, highlighted, id }: ContainerNo
 
   const layer = containerDef?.layer ?? 'infrastructure';
   const layerEntry = LAYER_COLORS[layer as keyof typeof LAYER_COLORS] ?? LAYER_COLORS.infrastructure;
-  const layerColor = isDark ? layerEntry.dark : layerEntry.light;
+  // AA.3: an exploded node keeps its own colour; it is the node, not a hosting layer.
+  const layerColor = data.exploded && typeof data.color === 'string' && data.color
+    ? data.color
+    : (isDark ? layerEntry.dark : layerEntry.light);
+  const childNoun = data.exploded ? 'part' : 'node';
+  // AA.3b: an exploded data store carries its model and counts.
+  const dataShape = data.dataShape;
 
   const currentTransitionPhase = data.transitionPhase ?? 'idle';
   const isEntering = currentTransitionPhase === 'entering-nested';
@@ -272,11 +284,21 @@ function ContainerNodeComponent({ data, selected, highlighted, id }: ContainerNo
     }, 300);
   }, [data]);
 
+  // AB.7: say what opens. A data store opens into its schema, any other
+  // exploded node into its parts.
+  const toggleWords = data.exploded
+    ? `${isExpanded ? 'Hide' : 'Show'} ${data.dataShape ? 'schema' : 'parts'}`
+    : isExpanded ? 'Collapse container' : 'Expand container';
+
   const handleToggleExpand = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
-    if (!data.onUpdateMetadata || !node) return;
-
+    if (!data.onUpdateMetadata) return;
+    if (data.exploded) {
+      data.onUpdateMetadata({ partsShown: !isExpanded });
+      return;
+    }
+    if (!node) return;
     if (isExpanded) {
       const currentWidth = node.width ?? 600;
       const currentHeight = node.height ?? 400;
@@ -298,11 +320,9 @@ function ContainerNodeComponent({ data, selected, highlighted, id }: ContainerNo
     [debouncedMetadataSave]
   );
 
-  const inputPorts = data.ports.filter(p => p.direction === 'in');
-  const outputPorts = data.ports.filter(p => p.direction === 'out');
   const resizerVisible = selected && isExpanded && !isLogicalBoundary;
 
-  const layerLabel = isLogicalBoundary ? 'boundary' : (containerDef?.layer ?? '');
+  const layerLabel = data.exploded ? (data.nodeTypeLabel ?? '') : isLogicalBoundary ? 'boundary' : (containerDef?.layer ?? '');
 
   return (
     <>
@@ -360,6 +380,29 @@ function ContainerNodeComponent({ data, selected, highlighted, id }: ContainerNo
               position="center"
             />
             <span>{data.label}</span>
+          </div>
+        )}
+
+        {!isCollapsed && dataShape && (
+          <div
+            data-testid="data-shape-strip"
+            style={{
+              position: 'absolute',
+              top: '36px',
+              left: '16px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '4px 10px',
+              borderRadius: '8px',
+              backgroundColor: isDark ? `${layerColor}1f` : `${layerColor}14`,
+              fontSize: '12px',
+              whiteSpace: 'nowrap',
+              zIndex: 10,
+            }}
+          >
+            {dataShape.model && <span style={{ fontWeight: 600, color: layerColor }}>{dataShape.model}</span>}
+            <span style={{ color: c.textMuted }}>{dataShape.model ? '· ' : ''}{dataShapeCounts(dataShape)}</span>
           </div>
         )}
 
@@ -423,7 +466,8 @@ function ContainerNodeComponent({ data, selected, highlighted, id }: ContainerNo
             pointerEvents: 'auto',
           }}
           onClick={(e) => { e.stopPropagation(); handleToggleExpand(e); }}
-          title={isExpanded ? 'Collapse container' : 'Expand container'}
+          title={toggleWords}
+          aria-label={`${toggleWords}: ${data.label}`}
           className="nodrag nopan"
         >
           {isCollapsed ? '+' : '\u2212'}
@@ -466,23 +510,23 @@ function ContainerNodeComponent({ data, selected, highlighted, id }: ContainerNo
 
         <NodeActionToolbar visible={!!selected || toolbarHover.hoverVisible} data={data} bridgeProps={toolbarHover.bridgeProps} />
 
-        <FallbackHandles showTarget={inputPorts.length === 0} showSource={outputPorts.length === 0} />
-        {inputPorts.map((port) => (
-          <Handle
-            key={port.id}
-            type="target"
-            position={Position.Left}
-            id={port.id}
+        {/* AG.13/AG.14: an exploded node's box is a leaf and takes edges; a
+            container takes none (an edge ends on the node inside), so it draws
+            only the invisible handles its summary edges end on. */}
+        {data.exploded ? (
+          <LeafHandles
             style={{
               width: isCollapsed ? '8px' : '10px',
               height: isCollapsed ? '8px' : '10px',
               backgroundColor: layerColor,
               border: `2px solid ${isDark ? '#1e293b' : '#ffffff'}`,
-              top: isCollapsed ? '50%' : `${52 + inputPorts.indexOf(port) * 30}px`,
+              top: isCollapsed ? '50%' : '52px',
               boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)',
             }}
           />
-        ))}
+        ) : (
+          <FallbackHandles showTarget showSource />
+        )}
 
         {!isCollapsed && (
           <>
@@ -498,7 +542,7 @@ function ContainerNodeComponent({ data, selected, highlighted, id }: ContainerNo
                 alignItems: 'center',
                 gap: '4px',
               }}>
-                <span style={{ opacity: 0.6 }}>{childCount} {childCount === 1 ? 'node' : 'nodes'}</span>
+                <span style={{ opacity: 0.6 }}>{childCount} {childCount === 1 ? childNoun : `${childNoun}s`}</span>
               </div>
             )}
           </>
@@ -529,7 +573,13 @@ function ContainerNodeComponent({ data, selected, highlighted, id }: ContainerNo
               />
               <span>{data.label}</span>
             </div>
-            {childCount > 0 && (
+            {dataShape && (
+              <div data-testid="data-shape-strip" style={{ fontSize: '11px', display: 'flex', alignItems: 'center', gap: '5px', whiteSpace: 'nowrap' }}>
+                {dataShape.model && <span style={{ fontWeight: 600, color: layerColor }}>{dataShape.model}</span>}
+                <span style={{ color: c.textMuted }}>{dataShape.model ? '· ' : ''}{dataShapeCounts(dataShape)}</span>
+              </div>
+            )}
+            {childCount > 0 && !dataShape && (
               <div style={{ fontSize: '10px', fontWeight: 500, color: c.textMuted, display: 'flex', alignItems: 'center', gap: '5px' }}>
                 {childTechIds.length > 0 && (
                   <span style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
@@ -545,7 +595,7 @@ function ContainerNodeComponent({ data, selected, highlighted, id }: ContainerNo
                     })}
                   </span>
                 )}
-                <span>{childCount} {childCount === 1 ? 'node' : 'nodes'}</span>
+                <span>{childCount} {childCount === 1 ? childNoun : `${childNoun}s`}</span>
               </div>
             )}
           </div>
@@ -558,22 +608,6 @@ function ContainerNodeComponent({ data, selected, highlighted, id }: ContainerNo
           />
         )}
 
-        {outputPorts.map((port) => (
-          <Handle
-            key={port.id}
-            type="source"
-            position={Position.Right}
-            id={port.id}
-            style={{
-              width: isCollapsed ? '8px' : '10px',
-              height: isCollapsed ? '8px' : '10px',
-              backgroundColor: layerColor,
-              border: `2px solid ${isDark ? '#1e293b' : '#ffffff'}`,
-              top: isCollapsed ? '50%' : `${52 + outputPorts.indexOf(port) * 30}px`,
-              boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)',
-            }}
-          />
-        ))}
       </div>
     </>
   );

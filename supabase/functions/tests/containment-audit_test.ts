@@ -18,14 +18,32 @@ const role = (over: Record<string, unknown>): any => ({
 Deno.test("audit: dead-ref — deprecated id still listed (the shipped-catalog defect class)", () => {
   const findings = auditContainmentMatrix([
     role({ id: "vpc", is_container: true, container_style: "hosting", can_contain: ["websocket-server", "backend-service"] }),
-    role({ id: "websocket-server", deprecated: true }),
-    role({ id: "backend-service" }),
+    role({ id: "websocket-server", deprecated: true, palette_category: "Messaging" }),
+    role({ id: "backend-service", palette_category: "Services" }),
   ]);
   const dead = findings.filter((f) => f.kind === "dead-ref");
   assertEquals(dead.length, 1);
   assertEquals(dead[0].severity, "error");
   assertEquals(dead[0].roleId, "vpc");
   assert(dead[0].detail.includes("websocket-server"));
+});
+
+// AG.11e (owner 2026-09-28): a retired type stays in every list on purpose (AG.4,
+// AG.10), so existing nesting stays valid. Where the container also admits a live type
+// of the same category, that is a note; where it admits none, it stays an error.
+Deno.test("AG.11e: a retired type kept beside its live replacement is a note, not an error", () => {
+  const findings = auditContainmentMatrix([
+    role({ id: "vpc", is_container: true, container_style: "hosting", can_contain: ["message-broker", "queue", "logging"] }),
+    role({ id: "phone", is_container: true, container_style: "hosting", can_contain: ["sensor", "mobile-app"] }),
+    role({ id: "message-broker", deprecated: true, palette_category: "Messaging" }),
+    role({ id: "queue", palette_category: "Messaging" }),
+    role({ id: "logging", deprecated: true, palette_category: "Observability" }),
+    role({ id: "sensor", deprecated: true, palette_category: "Hardware" }),
+    role({ id: "mobile-app", palette_category: "Services" }),
+  ]);
+  const dead = findings.filter((f) => f.kind === "dead-ref").map((f) => `${f.severity} ${f.roleId}:${f.detail.match(/"([^"]+)"/)![1]}`).sort();
+  assertEquals(dead, ["error phone:sensor", "error vpc:logging", "note vpc:message-broker"]);
+  assert(findings.find((f) => f.severity === "note")!.detail.includes('"queue"'), "the note names the live type it admits");
 });
 
 Deno.test("audit: unknown-ref — id that exists nowhere", () => {

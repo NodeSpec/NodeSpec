@@ -9,13 +9,17 @@ import { OssCommunitySection } from './OssCommunitySection.js';
 import { PricingSection } from '../pricing/PricingSection.js';
 import { isHostedEdition, isEnterpriseEdition, editionLabel } from '../../config/edition.js';
 import { getSupabaseClient } from '../../../persistence/supabase/client.js';
-import { usePageSeo, BASE_URL } from '../../hooks/usePageSeo.js';
+import { usePageSeo } from '../../hooks/usePageSeo.js';
+import { HOME_SEO, ORGANIZATION_JSON_LD, WEBSITE_JSON_LD, softwareApplicationJsonLd } from '../../../seo/site-meta.js';
 import logoLight from '../../assets/lightmode_nodal.png';
 
 const PRIMARY = '#8B8FE6';
 const PRIMARY_LIGHT = 'rgba(139, 143, 230, 0.15)';
 const PRIMARY_BORDER = 'rgba(139, 143, 230, 0.2)';
 const PRIMARY_SHADOW = 'rgba(139, 143, 230, 0.3)';
+const FOOTER_LINK = { color: 'inherit', textDecoration: 'none' } as const;
+
+type NavItem = { label: string; path?: string; action?: () => void };
 
 interface AuthLandingPageProps {
   onSignIn: (email: string, password: string, captchaToken?: string) => Promise<{ mfaRequired: boolean; factorId?: string } | void>;
@@ -74,56 +78,15 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
     }
   }, [oauthMfaFactorId]);
 
+  // One source with the prerendered homepage (src/seo/site-meta.ts), so a crawler
+  // that runs no script and one that does read the same page (AJ.2).
   usePageSeo({
-    title: 'NodeSpec - AI Architecture Context for Cursor, Claude & Agents',
-    description: 'Visually map your software architecture, export it as structured AI context, and stop hallucinations. Give Cursor, Claude, and any AI agent a complete system blueprint.',
+    ...HOME_SEO,
     path: '/',
-    keywords: 'AI coding context, Cursor architecture, Claude code context, AI agent architecture, spec-driven development, software specification, acceptance criteria, agent task generation, agentic workflow, MCP Model Context Protocol, Cursor rules, coding agent context, architecture documentation, architecture to code, vibe coding tool, system design for AI, architecture diagram, software architecture tool, visual system map, prevent AI hallucination',
     jsonLd: [
-      {
-        id: 'org-schema',
-        data: {
-          '@context': 'https://schema.org',
-          '@type': 'Organization',
-          name: 'NodeSpec',
-          url: BASE_URL,
-          logo: `${BASE_URL}/lightmode_nodal.png`,
-          sameAs: [
-            'https://x.com/NodeSpec',
-            'https://www.linkedin.com/company/nodespec/',
-          ],
-        },
-      },
-      {
-        id: 'webapp-schema',
-        data: {
-          '@context': 'https://schema.org',
-          '@type': 'WebApplication',
-          name: 'NodeSpec',
-          url: BASE_URL,
-          applicationCategory: 'DeveloperApplication',
-          operatingSystem: 'Web',
-          offers: {
-            '@type': 'Offer',
-            price: '0',
-            priceCurrency: 'USD',
-          },
-          description: 'NodeSpec is a visual architecture tool for spec-driven development. Map your system components on an interactive canvas, generate software specifications with requirements and acceptance criteria, produce agent task context, and export structured blueprints for Cursor, Claude, and any AI coding agent. Stop AI hallucinations by giving your agent a complete system blueprint — not just a prompt.',
-          featureList: [
-            'Visual architecture canvas',
-            'Spec-driven development workflow',
-            'Software specification generation',
-            'Acceptance criteria generation',
-            'Agent task context export',
-            'MCP Model Context Protocol integration',
-            'Cursor rules export',
-            'Agentic workflow support',
-            'AI coding context for Cursor and Claude',
-            'Architecture-to-code generation',
-          ],
-          author: { '@type': 'Organization', name: 'NodeSpec' },
-        },
-      },
+      { id: 'org-schema', data: ORGANIZATION_JSON_LD },
+      { id: 'website-schema', data: WEBSITE_JSON_LD },
+      { id: 'software-schema', data: softwareApplicationJsonLd() },
     ],
   });
 
@@ -263,6 +226,13 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
     }
   };
 
+  // Plain clicks stay in the app; a modified or middle click opens the page as a link does.
+  const followLink = (e: React.MouseEvent, path: string) => {
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    navigate(path);
+  };
+
   const scrollTo = (ref: React.RefObject<HTMLDivElement | null>) => {
     ref.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -333,18 +303,27 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
           </div>
         </>
       ) : (
-      <div className="landing-hero-headline" style={{
+      <>
+      <h1 className="landing-hero-headline" style={{
         fontSize: showForm ? '28px' : '36px',
         fontWeight: 600,
         color: '#1f2937',
         letterSpacing: '-0.01em',
-        lineHeight: '1.4',
-        marginBottom: '20px',
+        lineHeight: '1.3',
+        margin: '0 0 12px',
       }}>
-        <span style={{ color: PRIMARY }}>Design</span> Smarter.{' '}
-        <span style={{ color: PRIMARY }}>Build</span> Better.{' '}
-        <span style={{ color: PRIMARY }}>Ship</span> Faster.
-      </div>
+        The AI System Design <span style={{ color: PRIMARY }}>Governance Platform</span> for Agents
+      </h1>
+      <p className="landing-hero-slogan" style={{
+        fontSize: showForm ? '17px' : '20px',
+        fontWeight: 600,
+        color: '#374151',
+        letterSpacing: '-0.01em',
+        margin: '0 0 20px',
+      }}>
+        <span style={{ color: PRIMARY }}>Design</span> Smarter, <span style={{ color: PRIMARY }}>Build</span> Better, <span style={{ color: PRIMARY }}>Ship</span> Faster
+      </p>
+      </>
       )}
       {isHostedEdition && (
       <div className="landing-hero-subtitle" style={{
@@ -1215,19 +1194,21 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
           <div className="landing-nav-links" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
             {(isHostedEdition ? [
               { label: 'Features', action: () => scrollTo(featuresRef) },
-              { label: 'Browse Templates', action: () => navigate('/templates') },
-              { label: 'Blog', action: () => navigate('/blog') },
-              { label: 'MCP Docs', action: () => navigate('/docs/mcp') },
+              { label: 'Browse Templates', path: '/templates' },
+              { label: 'Blog', path: '/blog' },
+              { label: 'MCP Docs', path: '/docs/mcp' },
               { label: 'Pricing', action: () => scrollTo(pricingRef) },
-              { label: 'Government', action: () => navigate('/government') },
+              { label: 'Government', path: '/government' },
               { label: 'Contact', action: () => scrollTo(contactRef) },
-            ] : [
+            ] as NavItem[] : [
               // Self-hosted: no marketing pages. Enterprise keeps the gallery.
-              ...(isEnterpriseEdition ? [{ label: 'Browse Templates', action: () => navigate('/templates') }] : []),
-              { label: 'MCP Docs', action: () => navigate('/docs/mcp') },
-            ]).map(item => (
-              <span
+              ...(isEnterpriseEdition ? [{ label: 'Browse Templates', path: '/templates' }] : []),
+              { label: 'MCP Docs', path: '/docs/mcp' },
+            ] as NavItem[]).map(item => (
+              // A page is a real link, so a crawler can follow it (AJ.2); a section of this page scrolls.
+              <a
                 key={item.label}
+                href={item.path ?? undefined}
                 style={{
                   fontSize: '14px',
                   fontWeight: 500,
@@ -1237,8 +1218,12 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
                   borderRadius: '8px',
                   transition: 'all 0.15s ease',
                   whiteSpace: 'nowrap',
+                  textDecoration: 'none',
                 }}
-                onClick={item.action}
+                onClick={(e) => {
+                  if (item.path) followLink(e, item.path);
+                  else item.action?.();
+                }}
                 onMouseEnter={(e) => {
                   e.currentTarget.style.color = navDark ? '#E6E9EF' : '#111827';
                   e.currentTarget.style.backgroundColor = PRIMARY_LIGHT;
@@ -1249,7 +1234,7 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
                 }}
               >
                 {item.label}
-              </span>
+              </a>
             ))}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '8px', paddingLeft: '8px', borderLeft: navDark ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(0,0,0,0.1)' }}>
@@ -1595,7 +1580,7 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
             <div style={{ fontSize: '14px', lineHeight: 2 }}>
               <div style={{ cursor: 'pointer' }} onClick={() => scrollTo(featuresRef)}>Features</div>
               <div style={{ cursor: 'pointer' }} onClick={() => scrollTo(pricingRef)}>Pricing</div>
-              <div style={{ cursor: 'pointer' }} onClick={() => navigate('/templates')}>Templates</div>
+              <div><a href="/templates" style={FOOTER_LINK} onClick={(e) => followLink(e, '/templates')}>Templates</a></div>
             </div>
           </div>
 
@@ -1604,8 +1589,8 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
               Resources
             </div>
             <div style={{ fontSize: '14px', lineHeight: 2 }}>
-              <div style={{ cursor: 'pointer' }} onClick={() => navigate('/blog')}>Blog</div>
-              <div style={{ cursor: 'pointer' }} onClick={() => navigate('/docs/mcp')}>MCP Documentation</div>
+              <div><a href="/blog" style={FOOTER_LINK} onClick={(e) => followLink(e, '/blog')}>Blog</a></div>
+              <div><a href="/docs/mcp" style={FOOTER_LINK} onClick={(e) => followLink(e, '/docs/mcp')}>MCP Documentation</a></div>
             </div>
           </div>
 
@@ -1614,8 +1599,8 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
               Legal
             </div>
             <div style={{ fontSize: '14px', lineHeight: 2 }}>
-              <div style={{ cursor: 'pointer' }} onClick={() => navigate('/privacy')}>Privacy Policy</div>
-              <div style={{ cursor: 'pointer' }} onClick={() => navigate('/terms')}>Terms of Service</div>
+              <div><a href="/privacy" style={FOOTER_LINK} onClick={(e) => followLink(e, '/privacy')}>Privacy Policy</a></div>
+              <div><a href="/terms" style={FOOTER_LINK} onClick={(e) => followLink(e, '/terms')}>Terms of Service</a></div>
             </div>
           </div>
         </div>

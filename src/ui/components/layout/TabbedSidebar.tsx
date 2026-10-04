@@ -1,13 +1,10 @@
-import { memo, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { memo, useState, useCallback, useMemo, useRef } from 'react';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { RepoExplorer } from '../panels/RepoExplorer.js';
-import { SpecificationPanelV3 } from '../spec-v3/index.js';
 import type { Graph } from '@nodespec/core/types.js';
-import { useSpecification, useAuth } from '../../context/ServiceContext.js';
 import {
   FolderTree,
   Workflow,
-  FileText,
   Search,
   X,
   ChevronDown,
@@ -15,10 +12,10 @@ import {
 } from 'lucide-react';
 import { useCatalog } from '../../hooks/useCatalog.js';
 import { getRoleIcon } from '../../utils/palette-roles.js';
-import { buildAlphabeticalPalette, buildStructureListItems, buildPlatformListItems, buildFunctionalRoleItems, groupByLetter, familiesInList, familyPlatformRoleIds } from '../../utils/palette-list.js';
+import { buildAlphabeticalPalette, buildStructureListItems, buildPlatformsAndHostsItems, buildFunctionalRoleItems, groupByLetter, familiesInList, technologyVisibleInProject } from '../../utils/palette-list.js';
 import type { PaletteListItem } from '../../utils/palette-list.js';
 import { getTechnologyLogo } from '../../utils/technology-logo-map.js';
-import { deriveNodeNature, paletteChip, rankCatalogMatches } from '../../utils/node-nature.js';
+import { rankCatalogMatches } from '../../utils/node-nature.js';
 import type { NodeRole, TechnologyCatalogEntry } from '../../../persistence/supabase/catalog-repository.js';
 
 interface TabbedSidebarProps {
@@ -32,29 +29,28 @@ interface TabbedSidebarProps {
   refreshCounter?: number;
 }
 
-type TabType = 'repo' | 'nodes' | 'spec';
+type TabType = 'repo' | 'nodes';
 
 // M6: onNodeSelect / branchId / viewMode / onRefresh were passed by GraphEditor and
 // destructured to `_`-prefixed names that nothing read. Dropped on both sides.
-function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDragStart, projectId, refreshCounter }: TabbedSidebarProps) {
+// refreshCounter stays on the props for the callers that pass it. The project
+// decides which custom technology rows the palette shows (AG.6c).
+function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDragStart, projectId }: TabbedSidebarProps) {
   const { theme } = useTheme();
   const c = theme.colors;
-  const specificationService = useSpecification();
-  const auth = useAuth();
   const catalog = useCatalog();
   const graphIsEmpty = Object.keys(graph.nodes).length === 0;
   const [activeTab, setActiveTab] = useState<TabType>(
-    graphIsEmpty ? 'nodes' : 'spec'
+    graphIsEmpty ? 'nodes' : 'repo'
   );
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [specificationId, setSpecificationId] = useState<string | null>(null);
   const [paletteSearch, setPaletteSearch] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
   // N4.5: letter-snap rail — refs to each letter section in the A–Z list.
   const letterRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // N4.6: provider-family filter (AWS/Azure/GCP/… logo chips above the list).
   const [activeFamily, setActiveFamily] = useState<string | null>(null);
-  const alphaItems = useMemo(() => (catalog ? buildAlphabeticalPalette(catalog) : []), [catalog]);
+  const alphaItems = useMemo(() => (catalog ? buildAlphabeticalPalette(catalog, projectId) : []), [catalog, projectId]);
   const familyChips = useMemo(() => familiesInList(alphaItems), [alphaItems]);
   // 2026-08-05: brand-logo lookup for Platforms rows — same fallback the family chips
   // use (platform tech row's own logo, else the first family member with one), but
@@ -77,47 +73,6 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
     });
   }, []);
 
-  const loadSpecificationId = useCallback(async () => {
-    if (!projectId) {
-      setSpecificationId(null);
-      return;
-    }
-
-    try {
-      const specs = await specificationService.getSpecificationsByProject(projectId);
-      if (specs.length > 0) {
-        setSpecificationId(specs[0].id);
-      } else {
-        const session = await auth.getSession();
-        if (!session?.user?.id) {
-          setSpecificationId(null);
-          return;
-        }
-        const newSpec = await specificationService.createSpecification({
-          vision: '',
-          projectId,
-          createdBy: session.user.id,
-        });
-        setSpecificationId(newSpec.id);
-      }
-    } catch {
-      setSpecificationId(null);
-    }
-  }, [projectId, specificationService, auth]);
-
-  // Load specification ID when project changes
-  useEffect(() => {
-    loadSpecificationId();
-  }, [loadSpecificationId]);
-
-  // Reload specification when refreshCounter changes
-  useEffect(() => {
-    if (refreshCounter !== undefined && refreshCounter > 0) {
-      setTimeout(() => {
-        loadSpecificationId();
-      }, 800);
-    }
-  }, [refreshCounter, loadSpecificationId]);
 
 
   // N4.8 (owner): the Recently-Used picker is gone — the three-section browse IS the
@@ -179,7 +134,7 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
 
   if (isCollapsed) {
     return (
-      <div style={containerStyles}>
+      <div data-tour="nodes-sidebar" style={containerStyles}>
         <div style={{
           display: 'flex',
           flexDirection: 'column',
@@ -283,45 +238,13 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
           >
             <Workflow size={18} />
           </button>
-          <button
-            style={{
-              width: '36px',
-              height: '36px',
-              borderRadius: '8px',
-              border: 'none',
-              backgroundColor: activeTab === 'spec'
-                ? (theme.mode === 'dark' ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.08)')
-                : (theme.mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.02)'),
-              color: activeTab === 'spec' ? c.text : c.textMuted,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              transition: 'all 0.2s ease',
-            }}
-            onClick={() => {
-              setActiveTab('spec');
-              setIsCollapsed(false);
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = theme.mode === 'dark' ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.08)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = activeTab === 'spec'
-                ? (theme.mode === 'dark' ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.08)')
-                : (theme.mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.02)');
-            }}
-            title="Specification"
-          >
-            <FileText size={18} />
-          </button>
         </div>
       </div>
     );
   }
 
   return (
-    <div style={containerStyles}>
+    <div data-tour="nodes-sidebar" style={containerStyles}>
       <div style={{
         display: 'flex',
         alignItems: 'center',
@@ -390,23 +313,6 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
           <Workflow size={16} />
           Nodes
         </button>
-        <button
-          style={tabStyles(activeTab === 'spec')}
-          onClick={() => setActiveTab('spec')}
-          onMouseEnter={(e) => {
-            if (activeTab !== 'spec') {
-              e.currentTarget.style.backgroundColor = theme.mode === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.02)';
-            }
-          }}
-          onMouseLeave={(e) => {
-            if (activeTab !== 'spec') {
-              e.currentTarget.style.backgroundColor = 'transparent';
-            }
-          }}
-        >
-          <FileText size={16} />
-          Spec
-        </button>
         </div>
       </div>
 
@@ -420,11 +326,6 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
             graph={graph}
             onFileSelect={onFileSelect || (() => {})}
             selectedArtifactId={selectedArtifactId}
-          />
-        ) : activeTab === 'spec' ? (
-          <SpecificationPanelV3
-            specificationId={specificationId}
-            graph={graph}
           />
         ) : (
           <div style={{ ...nodePanelStyles, display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, boxSizing: 'border-box' }}>
@@ -536,7 +437,7 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
             {paletteSearch.trim() && catalog && (() => {
               const matches = rankCatalogMatches(
                 paletteSearch,
-                catalog.getAllTechnologies().map(t => ({
+                catalog.getAllTechnologies().filter(t => technologyVisibleInProject(t, projectId)).map(t => ({
                   id: t.id,
                   name: t.name,
                   displayName: t.displayName,
@@ -557,16 +458,16 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
                 if (liveRoles.length === 0) continue;
                 rows.push({ tech, primaryRole: liveRoles[0], liveRoles });
               }
-              // N4.8 (owner): `requirement` never appears in a picker — requirement
-              // nodes live only on the decomposition canvas, generated or created via
-              // CRUD, never dragged. (buildRoleListItems already excluded the kind;
-              // this SEARCH lane did not.)
+              // N4.8 (owner): `requirement` never appears in a picker — requirements
+              // are spec-plane rows (Ideation/Trace surfaces), generated or created
+              // via CRUD, never dragged onto the canvas. (buildRoleListItems already
+              // excluded the kind; this SEARCH lane did not.)
               const customRoles = catalog.getAllRoles()
                 .filter(r => !r.deprecated && !r.isContainer && r.nature !== 'integrate')
                 .sort((a, b) => a.label.localeCompare(b.label));
-              // N4.4: structure (container) roles join the ranked search lane — "bounded
-              // context" must come up like "AWS S3" does. Groups carry a 'Group' chip;
-              // hosting containers keep 'Host'.
+              // N4.4: container roles join the ranked search lane, so "bounded context"
+              // comes up like "AWS S3" does. AG.1: hosts and platforms list under
+              // Platforms and hosts, groups under Structure.
               const structureMatches = rankCatalogMatches(
                 paletteSearch,
                 catalog.getAllRoles()
@@ -602,8 +503,7 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
                       </div>
                       {rows.map(({ tech, primaryRole, liveRoles }) => {
                         const aiCtx = tech.aiContext as Record<string, unknown> | undefined;
-                        const purpose = (aiCtx?.purpose as string) ?? deriveNodeNature(primaryRole, tech).line;
-                        const chip = paletteChip(primaryRole, tech);
+                        const purpose = (aiCtx?.purpose as string) ?? null;
                         // N3.8: brand logo (or brand-color initial) — recognition is visual
                         // first; same pattern as TechnologyPicker rows.
                         const logoSrc = getTechnologyLogo(tech.id);
@@ -622,7 +522,6 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
                                 e.dataTransfer.setData('application/specgraph-node', primaryRole.id);
                               }
                             }}
-                            title={deriveNodeNature(primaryRole, tech).line}
                             style={{
                               display: 'flex', alignItems: 'center', gap: '10px', padding: '7px 10px',
                               borderRadius: '8px', cursor: 'grab', border: `1px solid transparent`,
@@ -647,33 +546,31 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
                               <div style={{ fontSize: '13px', fontWeight: 500, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                 {tech.displayName || tech.name}
                               </div>
-                              <div style={{ fontSize: '11px', color: c.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                {purpose}
-                              </div>
+                              {purpose && (
+                                <div style={{ fontSize: '11px', color: c.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {purpose}
+                                </div>
+                              )}
                             </div>
-                            {chip && (
-                              <span style={{ fontSize: '9px', color: c.textMuted, border: `1px solid ${c.border}`, borderRadius: '4px', padding: '1px 5px', flexShrink: 0 }}>
-                                {chip}
-                              </span>
-                            )}
                           </div>
                         );
                       })}
                     </>
                   )}
-                  {structureMatches.length > 0 && (
-                    <>
+                  {[
+                    { label: 'Platforms and hosts', matches: structureMatches.filter(m => m.role.containerStyle !== 'logical-boundary') },
+                    { label: 'Structure', matches: structureMatches.filter(m => m.role.containerStyle === 'logical-boundary') },
+                  ].filter(lane => lane.matches.length > 0).map(lane => (
+                    <div key={lane.label}>
                       <div style={{ fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: c.textMuted, padding: '8px 4px 6px' }}>
-                        Structure
+                        {lane.label}
                       </div>
-                      {structureMatches.map(m => {
-                        const chip = paletteChip(m.role) ?? 'Group';
+                      {lane.matches.map(m => {
                         return (
                           <div
                             key={m.id}
                             draggable
                             onDragStart={(e) => handleDragStart(e, m.id)}
-                            title={deriveNodeNature(m.role).line}
                             style={{
                               display: 'flex', alignItems: 'center', gap: '10px', padding: '7px 10px',
                               borderRadius: '8px', cursor: 'grab', border: `1px solid transparent`,
@@ -691,28 +588,23 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
                                 </div>
                               )}
                             </div>
-                            <span style={{ fontSize: '9px', color: c.textMuted, border: `1px solid ${c.border}`, borderRadius: '4px', padding: '1px 5px', flexShrink: 0 }}>
-                              {chip}
-                            </span>
                           </div>
                         );
                       })}
-                    </>
-                  )}
+                    </div>
+                  ))}
                   {roleMatches.length > 0 && (
                     <>
                       <div style={{ fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: c.textMuted, padding: '8px 4px 6px' }}>
-                        Functional Node Types
+                        Node types
                       </div>
                       {roleMatches.map(m => {
                         const RoleIcon = getRoleIcon(m.role.iconName);
-                        const chip = paletteChip(m.role);
                         return (
                           <div
                             key={m.id}
                             draggable
                             onDragStart={(e) => handleDragStart(e, m.id)}
-                            title={deriveNodeNature(m.role).line}
                             style={{
                               display: 'flex', alignItems: 'center', gap: '10px', padding: '7px 10px',
                               borderRadius: '8px', cursor: 'grab', border: `1px solid transparent`,
@@ -737,11 +629,6 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
                                 </div>
                               )}
                             </div>
-                            {chip && (
-                              <span style={{ fontSize: '9px', color: c.textMuted, border: `1px solid ${c.border}`, borderRadius: '4px', padding: '1px 5px', flexShrink: 0 }}>
-                                {chip}
-                              </span>
-                            )}
                           </div>
                         );
                       })}
@@ -793,22 +680,16 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
               );
             })()}
 
-            {/* N4.7 browse (owner: "the sidebar should have internal scrolls of three
-                sections: Structure, Technology, Functional Node Types"): three stacked
-                sections, EACH with its own scroll. Technology keeps the A–Z letter
-                rail; Functional Node Types shows the catalog-derived generic set
-                (pure-provider and zero-tech app_service roles are hidden — searchable
-                still; see buildFunctionalRoleItems). */}
+            {/* AG.1 (owner 2026-09-28): the browse follows the model's four layers,
+                each section with its own scroll: Node types (what a node does),
+                Platforms and hosts (where it runs), Structure (how it is grouped),
+                Technologies (what it is built with, A to Z with the letter rail). */}
             {!paletteSearch.trim() && catalog && (() => {
-              // Owner rulings 2026-08-05: Structure = the organizational group roles
-              // ONLY; Platforms = BRAND platforms only (nature 'host' — generic hosting
-              // concepts browse under Functional Node Types). The N4.6/N4.7 family
-              // filter narrows Technology and Platforms to that provider; logical
-              // groups and generic concepts belong to no platform.
+              // The N4.6/N4.7 provider filter narrows Technologies and Platforms and
+              // hosts to that provider; node types, groups and generic hosts belong to
+              // no provider.
               const structureItems = activeFamily ? [] : buildStructureListItems(catalog);
-              const platformItems = activeFamily
-                ? buildPlatformListItems(catalog).filter(s => familyPlatformRoleIds(activeFamily).includes(s.id))
-                : buildPlatformListItems(catalog);
+              const platformItems = buildPlatformsAndHostsItems(catalog, activeFamily);
               const letterGroups = groupByLetter(
                 activeFamily ? alphaItems.filter(i => i.family === activeFamily) : alphaItems,
               );
@@ -839,7 +720,6 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
                         handleDragStart(e, item.id);
                       }
                     }}
-                    title={item.natureLine}
                     style={{
                       display: 'flex', alignItems: 'center', gap: '10px', padding: '6px 8px',
                       borderRadius: '8px', cursor: 'grab', border: '1px solid transparent',
@@ -871,11 +751,6 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
                         </div>
                       )}
                     </div>
-                    {item.chip && (
-                      <span style={{ fontSize: '9px', color: c.textMuted, border: `1px solid ${c.border}`, borderRadius: '4px', padding: '1px 5px', flexShrink: 0 }}>
-                        {item.chip}
-                      </span>
-                    )}
                   </div>
                 );
               };
@@ -898,8 +773,32 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
 
               return (
                 <>
-                  {/* Section 1 — Structure: the organizational group roles only
-                      (owner ruling 2026-08-05). */}
+                  {/* AG.1 Node types: what a node does, functional leaves only, the
+                      technology picked later. Hidden under a provider filter: a type
+                      belongs to no provider. */}
+                  {!activeFamily && functionalItems.length > 0 && (
+                    <div style={{ flex: isOpen('functional') ? '0 1 auto' : '0 0 auto', maxHeight: isOpen('functional') ? '30%' : undefined, minHeight: isOpen('functional') ? '96px' : undefined, display: 'flex', flexDirection: 'column' }}>
+                      {sectionHeader('Node types', 'functional')}
+                      {isOpen('functional') && (
+                        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+                          {functionalItems.map(listRow)}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* AG.1 Platforms and hosts: where a node runs. Brand platforms first,
+                      then generic hosts and devices; a provider filter narrows it. */}
+                  {platformItems.length > 0 && (
+                    <div style={{ flex: isOpen('platforms') ? '0 1 auto' : '0 0 auto', maxHeight: isOpen('platforms') ? '20%' : undefined, minHeight: isOpen('platforms') ? '72px' : undefined, display: 'flex', flexDirection: 'column', marginBottom: '8px' }}>
+                      {sectionHeader('Platforms and hosts', 'platforms')}
+                      {isOpen('platforms') && (
+                        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+                          {platformItems.map(listRow)}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* Structure: the organizational groups only (owner ruling 2026-08-05). */}
                   {structureItems.length > 0 && (
                     <div style={{ flex: isOpen('structure') ? '0 1 auto' : '0 0 auto', maxHeight: isOpen('structure') ? '18%' : undefined, minHeight: isOpen('structure') ? '72px' : undefined, display: 'flex', flexDirection: 'column', marginBottom: '8px' }}>
                       {sectionHeader('Structure', 'structure')}
@@ -910,21 +809,9 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
                       )}
                     </div>
                   )}
-                  {/* Section 2 — Platforms: brand platforms ONLY (nature 'host'); generic
-                      hosting concepts live under Functional Node Types. */}
-                  {platformItems.length > 0 && (
-                    <div style={{ flex: isOpen('platforms') ? '0 1 auto' : '0 0 auto', maxHeight: isOpen('platforms') ? '20%' : undefined, minHeight: isOpen('platforms') ? '72px' : undefined, display: 'flex', flexDirection: 'column', marginBottom: '8px' }}>
-                      {sectionHeader('Platforms', 'platforms')}
-                      {isOpen('platforms') && (
-                        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-                          {platformItems.map(listRow)}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {/* Section 3 — Technology (A–Z with letter rail) */}
+                  {/* Technologies, A to Z with the letter rail. */}
                   <div style={{ flex: isOpen('technology') ? '1 1 auto' : '0 0 auto', minHeight: isOpen('technology') ? '140px' : undefined, display: 'flex', flexDirection: 'column', marginBottom: '8px' }}>
-                    {sectionHeader('Technology', 'technology')}
+                    {sectionHeader('Technologies', 'technology')}
                     {isOpen('technology') && (
                     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
                       <div style={{ display: 'flex', gap: '2px', alignItems: 'flex-start' }}>
@@ -966,19 +853,6 @@ function TabbedSidebarComponent({ graph, onFileSelect, selectedArtifactId, onDra
                     </div>
                     )}
                   </div>
-                  {/* Section 4 — Functional Node Types (generic concepts incl. generic
-                      hosting/hardware containers; technology picked later). Hidden under
-                      a platform filter — these concepts belong to no platform. */}
-                  {!activeFamily && functionalItems.length > 0 && (
-                    <div style={{ flex: isOpen('functional') ? '0 1 auto' : '0 0 auto', maxHeight: isOpen('functional') ? '30%' : undefined, minHeight: isOpen('functional') ? '96px' : undefined, display: 'flex', flexDirection: 'column' }}>
-                      {sectionHeader('Functional Node Types', 'functional')}
-                      {isOpen('functional') && (
-                        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-                          {functionalItems.map(listRow)}
-                        </div>
-                      )}
-                    </div>
-                  )}
                 </>
               );
             })()}

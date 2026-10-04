@@ -134,7 +134,7 @@ Deno.serve(async (req) => {
 
     const { data: existingRow } = await supabase
       .from('stripe_subscriptions')
-      .select('id, plan_name, status, amount_cents, billing_interval, token_limit, cancel_at_period_end')
+      .select('id, plan_name, status, amount_cents, billing_interval, cancel_at_period_end')
       .eq('stripe_customer_id', customerId)
       .maybeSingle();
 
@@ -161,7 +161,6 @@ Deno.serve(async (req) => {
       status: existingRow.status,
       amount_cents: existingRow.amount_cents,
       billing_interval: existingRow.billing_interval,
-      token_limit: existingRow.token_limit,
       cancel_at_period_end: existingRow.cancel_at_period_end,
     } : null;
 
@@ -170,7 +169,6 @@ Deno.serve(async (req) => {
       status: subscription.status,
       amount_cents: upsertData.amount_cents,
       billing_interval: upsertData.billing_interval,
-      token_limit: upsertData.token_limit,
       cancel_at_period_end: subscription.cancel_at_period_end,
     };
 

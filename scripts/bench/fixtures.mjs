@@ -8,9 +8,29 @@ import { rest, uid, sleep } from './lib.mjs';
 
 export const RUN_PREFIX = 'bench-auto-';
 
+/**
+ * Delete the previous run's projects the way the app does: project_delete_step
+ * in slices until each answers done (one cascading DELETE of a project a
+ * scenario imported into outran the statement timeout in production), then
+ * one plain DELETE for anything left, on a stack without the function.
+ * Returns how many projects it removed and what it could not.
+ */
 export async function cleanupPreviousRuns(env) {
   const db = rest(env);
+  const rows = await db.select('projects', `name=like.${RUN_PREFIX}*&select=id`);
+  const problems = [];
+  for (const { id } of rows) {
+    try {
+      for (let step = 0; step < 400; step++) {
+        const r = await db.rpc('project_delete_step', { p_project_id: id });
+        if (r?.done !== false) break;
+      }
+    } catch (err) {
+      if (!/could not find the function|PGRST202/i.test(String(err?.message ?? err))) problems.push(`${id}: ${String(err?.message ?? err).slice(0, 160)}`);
+    }
+  }
   await db.delete('projects', `name=like.${RUN_PREFIX}*`);
+  return { removed: rows.length, problems };
 }
 
 /**

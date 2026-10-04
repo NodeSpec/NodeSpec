@@ -7,6 +7,7 @@
 import type { RequirementMapping } from '../../services/MappingService.js';
 import type { Requirement } from '../../../persistence/supabase/requirements-repository.js';
 import type { RequirementRelation } from '../../../persistence/supabase/requirement-relations-repository.js';
+import { computeArchivedRowIds } from '../board/derive-status.js';
 
 export interface CouplingEntry {
   /** Row uuid of the coupled requirement. */
@@ -113,15 +114,20 @@ export function computeExpandSuggestions(
     expandsPairs.add(`${rel.toRequirementId} ${rel.fromRequirementId}`);
   }
 
+  // 9.9: an archived row is out of the working set on both ends — a
+  // superseded (or hand-archived) target is never suggested again, and an
+  // archived source gets no suggestion.
+  const archived = computeArchivedRowIds(requirements, relations);
+
   const out = new Map<string, ExpandSuggestion[]>();
   for (const req of requirements) {
-    if (isRequirementCompleted(req)) continue;
+    if (isRequirementCompleted(req) || archived.has(req.id)) continue;
     const suggestions: ExpandSuggestion[] = [];
     for (const entry of couplingByRequirement.get(req.id) || []) {
       if (entry.kind !== 'shared_node') continue;
       if (expandsPairs.has(`${req.id} ${entry.requirementRowId}`)) continue;
       const target = byRowId.get(entry.requirementRowId);
-      if (!target || !isRequirementCompleted(target)) continue;
+      if (!target || !isRequirementCompleted(target) || archived.has(target.id)) continue;
       suggestions.push({
         targetRowId: target.id,
         targetRequirementId: target.requirementId,

@@ -39,15 +39,18 @@ export async function matchFilesToArtifacts(
   supabase: any,
   projectId: string,
   changedFiles: ChangedFile[],
-  branchName = "main"
+  branchName?: string,
 ): Promise<MatchResult> {
   try {
-    const { data: branches, error: branchError } = await supabase
-      .from("branches")
-      .select("id")
-      .eq("project_id", projectId)
-      .eq("name", branchName)
-      .maybeSingle();
+    // AD.4 (D15): no branch named means the primary branch, found by its flag.
+    const { data: branches, error: branchError } = branchName
+      ? await supabase
+        .from("branches")
+        .select("id")
+        .eq("project_id", projectId)
+        .eq("name", branchName)
+        .maybeSingle()
+      : { data: await getPrimaryBranch(supabase, projectId, "id"), error: null };
 
     if (branchError) {
       return { matches: [], error: `Branch lookup failed: ${branchError.message}` };
@@ -109,14 +112,25 @@ export async function matchFilesToArtifacts(
 // baseline). Self-push-only ranges fast-forward the baseline silently. Pure decision helpers are
 // exported for offline tests; the orchestrator's provider calls run only on the live bench.
 
-import { providerApiBase, fetchRemoteHeadShaDetailed, fetchCompare, fetchRepoFile } from "./git-provider.ts";
-import { isPrimaryRow } from "./primary-branch.ts";
+import { providerApiBase, fetchRemoteHeadShaDetailed, fetchRepoFile, readRepoFile, fetchCommitFiles } from "./git-provider.ts";
+import { advanceBaseline, ancestryFor, planBaselineMove, writeBaselineMove, baselineOutcomeNote, type BaselinePlan } from "./baseline.ts";
+import { readRange } from "./push-plan.ts";
+import { hasUnappliedTicks } from "./card-resolve.ts";
+import { buildGitHubHeaders, fetchFullGitHubTree, fetchGitHubFiles } from "./git-tree.ts";
+// RI-9: closed module (stubbed in the community export — the stub reports
+// 'unsupported' and the sweep carries on).
+import { refreshRepoIndexForBranch, type IndexFreshness } from "./import-freshness.ts";
+import { isPrimaryRow, getPrimaryBranch } from "./primary-branch.ts";
+import { releaseHeldEvidence } from "./evidence-commit.ts";
+import { groupFilesByAuthor, authorLine, MAX_ATTRIBUTED_COMMITS, type AuthorGroup } from "./commit-authors.ts";
 import { decryptWithUpgrade, isEncrypted } from "./crypto.ts";
-import { MODEL_ANCHOR_PATH, parseModel, serializeModel, diffAnchors, capAnchorDiff, anchorToGraph, verifyModelHash, coreModelHash, type CappedAnchorDiff, type ModelAnchor } from "./model-anchor.ts";
-import { SPEC_ANCHOR_PATH, parseSpec, serializeSpec, loadSpecPlane, diffSpecs, capSpecDiff, adoptSpecAnchor, applySpecAnchor, type CappedSpecDiff } from "./spec-anchor.ts";
+import { MODEL_ANCHOR_PATH, parseModel, serializeModel, diffAnchors, capAnchorDiff, verifyModelHash, sameDesign, type CappedAnchorDiff, type ModelAnchor } from "./model-anchor.ts";
+import { anchorLoadPatches } from "./anchor-load.ts";
+import { SPEC_ANCHOR_PATH, parseSpec, serializeSpec, loadSpecPlane, diffSpecs, capSpecDiff, adoptSpecAnchor, applySpecAnchor, type CappedSpecDiff, type SpecAnchor } from "./spec-anchor.ts";
+import { constraintsCarried } from "./node-constraints.ts";
 import {
   parseTaskDocCriteria, computeCriterionDeltas, applyTickDeltas, applicableDeltas,
-  type CriterionDeltaResult,
+  type CriterionDeltaResult, type CurrentCriterion,
 } from "./criterion-deltas.ts";
 import { computeSweepTaskDeltas, type TaskDeltaResult } from "./task-deltas.ts";
 import { computeSweepBindingResolution } from "./binding-sweep.ts";
@@ -152,7 +166,7 @@ export function summarizeAnchor(model: ModelAnchor): AnchorSummary {
 export type ConnectAnchorAction =
   | "none"           // no anchor, or already-baselined divergence (the drift sweep owns that)
   | "adopt"          // empty project + valid anchor → restore proposal (existing R2 lane)
-  | "auto-baseline"  // repo anchor IS this project's model — re-establish the baseline silently (disconnect/reconnect with no changes must be a no-op, owner bench 2026-07-28)
+  | "auto-baseline"  // repo anchor IS this project's model on an UNBASELINED branch: establish the baseline silently (disconnect/reconnect with no changes must be a no-op, owner bench 2026-07-28)
   | "mismatch-card"  // NON-empty project, GENUINE divergence, unbaselined → surface a pending card; accept = baseline (repo yields on next push), dismiss = stay unbaselined (push guard keeps protecting)
   | "invalid-skip";  // anchor present but unparseable/hash-failed → never auto-act on it
 
@@ -169,8 +183,11 @@ export function decideConnectAnchorAction(args: {
   if (!args.anchorPresent) return "none";
   if (!args.parsedOk || !args.hashOk) return "invalid-skip";
   if (args.nodeCount === 0) return "adopt";
-  if (args.projectMatchesAnchor) return "auto-baseline";
+  // AD.1 (D10): a baselined branch is the sync check's, whatever the anchor
+  // says. Re-saving used to set the baseline to HEAD whenever the
+  // architecture matched, skipping every code commit since the last sync.
   if (args.baselined) return "none";
+  if (args.projectMatchesAnchor) return "auto-baseline";
   return "mismatch-card";
 }
 
@@ -186,16 +203,22 @@ export async function loadLatestSnapshot(supabase: any, branchId: string): Promi
   // deno-lint-ignore no-explicit-any
   graph: any | null;
   error: { message: string } | null;
+  /** AD.2b: the patch sequence the snapshot holds, null when there is none. */
+  patchSequence: number | null;
 }> {
   const { data, error } = await supabase
     .from("graph_snapshots")
-    .select("graph_data")
+    .select("graph_data, patch_sequence")
     .eq("branch_id", branchId)
     .order("patch_sequence", { ascending: false })
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  return { graph: data?.graph_data ?? null, error: error ?? null };
+  return {
+    graph: data?.graph_data ?? null,
+    error: error ?? null,
+    patchSequence: typeof data?.patch_sequence === "number" ? data.patch_sequence : null,
+  };
 }
 
 // R7d: loadAnchorMappings DELETED. Its one job was feeding requirement mappings
@@ -276,14 +299,32 @@ export function decideBranchFreshness(args: {
    * advance a baseline past content this canvas has not seen.
    */
   specDivergent?: boolean;
+  /**
+   * AD.1 (D6): the range carries ticks in a task doc or the board. Ticks are
+   * applied only from a card, so neither automatic lane may run past them.
+   */
+  carriesTicks?: boolean;
+  /**
+   * AD.1 (D7): the range touched `.nodespec/spec.json` and the project's
+   * requirements match it (`specDivergent` false): a spec load answered it.
+   */
+  specChanged?: boolean;
 }): BranchFreshnessAction {
   if (args.refDeleted) return "ref-deleted-card";
   if (!args.refMoved) return "none";
   if (args.specDivergent) return "card";
+  if (args.carriesTicks) return "card";
   if (args.modelChanged && args.canvasMatchesHead && args.matchedArtifactCount === 0 && args.residueCount === 0) {
     return "baseline-fast-forward";
   }
-  if (args.modelChanged && args.canvasMatchesBaseline && args.residueCount === 0 && args.userInitiated) {
+  // AD.1: a range whose only change is a spec.json the project already matches
+  // (a spec load answered it) is bookkeeping too.
+  if (!args.modelChanged && args.specChanged && args.matchedArtifactCount === 0 && args.residueCount === 0) {
+    return "baseline-fast-forward";
+  }
+  // AD.1 (D7): loading the model brings no file content, so a range that also
+  // edited bound files is never loaded silently; it goes on a card.
+  if (args.modelChanged && args.canvasMatchesBaseline && args.matchedArtifactCount === 0 && args.residueCount === 0 && args.userInitiated) {
     return "auto-restore";
   }
   return "card";
@@ -320,37 +361,16 @@ export function resolveWebhookBranchName(
 }
 
 export const SWEEP_THROTTLE_MS = 60_000;
-// Rebrand 2026-07-30 (owner: "Nodal" is the old app name): new pushes sign as
-// NodeSpec, but every MATCHER accepts the legacy prefix forever — existing
-// repos carry self-push history under the old name, and a prefix-only cutover
-// would misread that history as out-of-band drift.
+// The subject every NodeSpec commit carries, a label for people. NodeSpec
+// knows its own commits by the sha and blobs it records (AD.1), never by this
+// message, so nothing matches on it (AD.4 retired the message matchers).
 export const SELF_PUSH_PREFIX = "Update from NodeSpec:";
-export const LEGACY_SELF_PUSH_PREFIXES = ["Update from Nodal:"] as const;
-
-export function isSelfPushMessage(message: string): boolean {
-  return message.startsWith(SELF_PUSH_PREFIX) ||
-    LEGACY_SELF_PUSH_PREFIXES.some((p) => message.startsWith(p));
-}
 
 export function shouldRunSweep(lastCheckAt: string | null | undefined, nowMs: number, throttleMs = SWEEP_THROTTLE_MS): boolean {
   if (!lastCheckAt) return true;
   const last = Date.parse(lastCheckAt);
   if (Number.isNaN(last)) return true;
   return nowMs - last >= throttleMs;
-}
-
-/**
- * Every commit in the range is a NodeSpec push.
- *
- * NOT a safe basis for advancing a baseline on its own — see the sweep's
- * merge-arrival comment (owner bench 2026-07-30). "Our own commits" does not
- * imply "this branch's canvas has them": a merged PR delivers commits authored
- * on ANOTHER branch. Kept as a predicate (and a strict subset of
- * `isNodeSpecMergeArrival`); the sweep decides via the merge-arrival lane and
- * the freshness ladder, never via this alone.
- */
-export function isSelfPushOnly(commits: Array<{ message: string }>): boolean {
-  return commits.length > 0 && commits.every((c) => isSelfPushMessage(c.message));
 }
 
 /**
@@ -395,27 +415,6 @@ export function computeStalePaths(
   return stale;
 }
 
-/**
- * Owner bench 2026-07-29 ("a PR brings the merge up — is this correct?"): a merged
- * NodeSpec pull request comes home as a push whose commits are OUR OWN self-pushes
- * plus git's merge machinery — the head-commit-only self-push guard missed it, so
- * the merge raised a pending "# changes" card against content NodeSpec itself
- * authored. A range qualifies as a NodeSpec merge arrival when EVERY commit is
- * either NodeSpec-authored (self-push prefix, or the squash commit carrying our
- * own PR title "Merge design branch '…'") or pure merge machinery — AND at least
- * one commit is genuinely NodeSpec-authored (a range of only foreign merge
- * commits proves nothing).
- */
-export function isNodeSpecMergeArrival(commits: Array<{ message: string }>): boolean {
-  if (commits.length === 0) return false;
-  const isOwn = (m: string) =>
-    isSelfPushMessage(m) || m.startsWith("Merge design branch '");
-  const isMergeMachinery = (m: string) =>
-    /^Merge (pull request |branch |remote-tracking branch )/.test(m);
-  return commits.every((c) => isOwn(c.message) || isMergeMachinery(c.message)) &&
-    commits.some((c) => isOwn(c.message));
-}
-
 /** Split changed files into anchor/model, matched-artifact, and residue (unattributed) sets. */
 export function classifySweepFiles(
   files: ChangedFile[],
@@ -450,8 +449,14 @@ export async function upsertCumulativeSweepEvent(supabase: any, args: {
   headSha: string;
   summary: string;
   files: ChangedFile[];
+  /** AD.3: who made the commits, for the card's header. */
+  author?: string | null;
   // deno-lint-ignore no-explicit-any
   metadata: Record<string, any>;
+  /** AD.4 (D15): whether this card's branch is the primary one, by its flag,
+   *  so a card from before R3-3c (no branchName) is recognised as the
+   *  primary's. Defaults to "the card names no branch". */
+  isPrimary?: boolean;
 }): Promise<string | undefined> {
   const { data: pending } = await supabase
     .from("git_change_events")
@@ -460,12 +465,14 @@ export async function upsertCumulativeSweepEvent(supabase: any, args: {
     .eq("status", "pending");
   // R3-3c: the cumulative card is per BRANCH now — a feature branch's sweep must
   // never supersede main's card (or vice versa). Legacy cards carry no branchName
-  // and read as main.
-  const cardBranch = (args.metadata?.branchName as string | undefined) ?? "main";
+  // and belong to the primary branch (AD.4: known by its flag, not by "main").
+  const own = {
+    name: String(args.metadata?.branchName ?? ""),
+    isPrimary: args.isPrimary ?? !args.metadata?.branchName,
+  };
   // deno-lint-ignore no-explicit-any
   const sweepEvents = ((pending ?? []) as any[]).filter((e) =>
-    e?.metadata?.source === "sweep" &&
-    ((e?.metadata?.branchName as string | undefined) ?? "main") === cardBranch
+    e?.metadata?.source === "sweep" && cardOnBranch(e?.metadata, own)
   );
 
   if (sweepEvents.length === 0) {
@@ -477,6 +484,7 @@ export async function upsertCumulativeSweepEvent(supabase: any, args: {
         commit_sha: args.headSha,
         commit_message: args.summary,
         changed_files: args.files,
+        ...(args.author ? { author: args.author } : {}),
         status: "pending",
         metadata: args.metadata,
       })
@@ -504,17 +512,47 @@ export async function upsertCumulativeSweepEvent(supabase: any, args: {
     .from("git_change_events")
     .update({
       commit_sha: args.headSha, commit_message: args.summary, changed_files: args.files,
+      ...(args.author !== undefined ? { author: args.author } : {}),
       metadata: { ...args.metadata, ...(survivorIgnored.length ? { ignoredResidue: survivorIgnored } : {}) },
     })
     .eq("id", survivor.id);
   return survivor.id;
 }
 
+/** AD.1: pending sweep cards on this branch whose whole range turned out to be
+ *  NodeSpec's own writing (a GitLab push the check saw before its record
+ *  landed): dismissed, never accepted, and no baseline moves here. */
+// deno-lint-ignore no-explicit-any
+async function dismissCardsCoveredByOwnRange(supabase: any, projectId: string, branch: { name: string; isPrimary: boolean }): Promise<void> {
+  const { data: pending } = await supabase
+    .from("git_change_events")
+    .select("id, metadata")
+    .eq("project_id", projectId)
+    .eq("status", "pending");
+  // deno-lint-ignore no-explicit-any
+  for (const card of (pending ?? []) as any[]) {
+    if (card?.metadata?.source !== "sweep") continue;
+    if (!cardOnBranch(card?.metadata, branch)) continue;
+    // AD.1 (D6): ticks nobody applied keep their card.
+    if (hasUnappliedTicks(card?.metadata)) continue;
+    await supabase.from("git_change_events")
+      .update({
+        status: "dismissed",
+        resolved_at: new Date().toISOString(),
+        metadata: { ...(card.metadata ?? {}), note: "every change it covered is NodeSpec's own" },
+      })
+      .eq("id", card.id)
+      .eq("status", "pending");
+  }
+}
+
 export type DriftSweepStatus =
   | "no_integration" | "unbaselined" | "throttled" | "clean"
   | "fast_forwarded" | "drift" | "error"
   // R3-3c: branch lifecycle + switch-freshness outcomes
-  | "ref_deleted" | "behind_in_sync";
+  | "ref_deleted" | "behind_in_sync"
+  // AD.2b: an arriving merge filed git's model as a proposal.
+  | "load_proposed";
 
 export interface DriftSweepResult {
   status: DriftSweepStatus;
@@ -527,15 +565,10 @@ export interface DriftSweepResult {
   specChanged?: boolean;
   eventId?: string;
   detail?: string;
-  /**
-   * The sweep LOADED a new model into this branch's snapshot (merge-arrival lane)
-   * rather than merely advancing bookkeeping. Both cases report `fast_forwarded`,
-   * but only this one leaves the caller's in-memory canvas stale — the client must
-   * refresh and say so. Owner bench 2026-07-30: without this flag the R3-3c
-   * auto-load step silently updated the DB while the canvas kept showing the old
-   * model, which reads as "the feature is broken".
-   */
-  restoredModel?: boolean;
+  /** AD.2b: the load proposal a merge arrival filed. */
+  proposalId?: string;
+  /** RI-9: repo index freshness outcome for this head (accepted imports only). */
+  indexFreshness?: IndexFreshness;
 }
 
 /**
@@ -548,7 +581,6 @@ export interface DriftSweepResult {
 // deno-lint-ignore no-explicit-any
 export async function runDriftSweep(supabase: any, projectId: string, opts?: { branchName?: string; force?: boolean }): Promise<DriftSweepResult> {
   try {
-    const branchName = opts?.branchName ?? "main";
     const userInitiated = opts?.force === true;
 
     const { data: integration } = await supabase
@@ -580,13 +612,21 @@ export async function runDriftSweep(supabase: any, projectId: string, opts?: { b
       }
     }
 
-    const { data: branch } = await supabase
-      .from("branches")
-      .select("id, name, git_ref, last_synced_commit, is_primary")
-      .eq("project_id", projectId)
-      .eq("name", branchName)
-      .maybeSingle();
-    if (!branch) return { status: "error", detail: `No '${branchName}' branch` };
+    // AD.4 (D15): no branch named means the primary branch, found by its
+    // flag. The literal "main" missed once connect renamed the primary to the
+    // git default's name.
+    const { data: branch } = opts?.branchName
+      ? await supabase
+        .from("branches")
+        .select("id, name, git_ref, last_synced_commit, is_primary")
+        .eq("project_id", projectId)
+        .eq("name", opts.branchName)
+        .maybeSingle()
+      : { data: await getPrimaryBranch(supabase, projectId, "id, name, git_ref, last_synced_commit, is_primary") };
+    if (!branch) return { status: "error", detail: opts?.branchName ? `No '${opts.branchName}' branch` : "No primary branch" };
+    const branchName: string = branch.name;
+    // Cards from before R3-3c name no branch; they are the primary's.
+    const onPrimary = isPrimaryRow(branch);
 
     const ref = branch.git_ref || integration.default_branch;
     const baseline = branch.last_synced_commit;
@@ -642,47 +682,106 @@ export async function runDriftSweep(supabase: any, projectId: string, opts?: { b
             : "network error reaching the provider";
       return { status: "error", detail: `Could not resolve remote HEAD for ${where}: ${hint}` };
     }
+
+    // AD.3a (D18): test results held for a commit that was not on the tracked
+    // branch count once the head is it or descends from it. Evidence is not
+    // a design change, so this runs whatever the sweep decides below.
+    if (isPrimaryRow({ ...branch, name: branchName })) {
+      try {
+        await releaseHeldEvidence(supabase, {
+          projectId, headSha: head,
+          ancestry: ancestryFor(integration.provider, apiBase, integration.repo_owner, integration.repo_name, token),
+        });
+      } catch (err) {
+        console.warn("[git-drift] held evidence was not released this time:", err);
+      }
+    }
+
     if (head === baseline) return { status: "clean", headSha: head };
 
-    const compare = await fetchCompare(integration.provider, apiBase, integration.repo_owner, integration.repo_name, baseline, head, token);
+    // AD.1 (D1, D12): the range with NodeSpec's own writing from this branch
+    // told apart by recorded sha and blob, never by commit message.
+    const range = await readRange(supabase, {
+      provider: integration.provider, apiBase, owner: integration.repo_owner, repo: integration.repo_name, token,
+      integrationId: integration.id, branchId: branch.id, base: baseline, head, ref,
+    });
+    const compare = range.ok ? range.compare : null;
+
+    // RI-9: the repo index (accepted import) is refreshed by blob sha on
+    // every sweep that found a moved head — one tree call + one SQL diff,
+    // bounded re-extraction, deleted paths dropped. Best-effort: a
+    // provider or SQL failure is reported on the card, never thrown.
+    const indexFreshness = await refreshRepoIndexForBranch(supabase, {
+      fetchTree: async () => {
+        const { tree, truncated } = await fetchFullGitHubTree(
+          apiBase, integration.repo_owner, integration.repo_name, ref, buildGitHubHeaders(token),
+        );
+        return {
+          // deno-lint-ignore no-explicit-any
+          entries: (tree as any[]).filter((t) => t.type === "blob").map((t) => ({ path: t.path, sha: t.sha, size: t.size })),
+          truncated,
+        };
+      },
+      fetchFiles: (paths) => fetchGitHubFiles(apiBase, integration.repo_owner, integration.repo_name, head, token, paths),
+    }, { branchId: branch.id, headSha: head, provider: integration.provider });
 
     // Owner bench 2026-07-30 (DATA-LOSS edge case: "merged a branch to main, the
-    // artifact did not exist on main and NodeSpec will not detect it"):
-    // `isSelfPushOnly` used to run FIRST and bare-advance the baseline to HEAD
-    // WITHOUT loading anything. Its premise — "our own commits ⇒ this canvas
-    // already has them" — held only while pushes came from THIS branch. The PR
-    // merge lane broke it: main's ref receives commits NodeSpec authored on
-    // ANOTHER branch, which main's canvas has never seen. A rebase/fast-forward
-    // merge produces a range of pure self-pushes, so that lane swallowed the
-    // merge: baseline := HEAD, model never loaded, and every later sweep read
-    // head === baseline → "clean". The change became PERMANENTLY undetectable.
-    //
-    // isSelfPushOnly is a strict SUBSET of isNodeSpecMergeArrival (pinned), so the
-    // merge-arrival lane below now owns every one of those ranges and does the
-    // right thing: restore when the canvas is untouched, else fall through to the
-    // ladder, which decides honestly (baseline-fast-forward only when the canvas
-    // ALREADY matches HEAD — the safe version of the old shortcut — otherwise a
-    // card). The unconditional advance is gone; nothing may advance a baseline
-    // past content this canvas has not seen.
-    if (compare && isNodeSpecMergeArrival(compare.commits)) {
+    // artifact did not exist on main and NodeSpec will not detect it"): "our own
+    // commits" never implies "this canvas has them". A merge brings commits
+    // NodeSpec wrote on ANOTHER branch, so only this branch's own writing moves
+    // the baseline here; the merge lane below files git's model as a proposal.
+    // AD.1: when everything in the range is NodeSpec's own writing from this
+    // branch, there is nothing to review: the baseline moves forward and a
+    // pending card that covered only that range is dismissed.
+    if (range.ok && range.foreign.length === 0) {
+      const moved = await advanceBaseline(supabase, {
+        branchId: branch.id, to: head,
+        ancestry: ancestryFor(integration.provider, apiBase, integration.repo_owner, integration.repo_name, token),
+      });
+      if (moved.moved || moved.outcome === "same") {
+        await dismissCardsCoveredByOwnRange(supabase, projectId, { name: branchName, isPrimary: onPrimary });
+        return {
+          status: "fast_forwarded", headSha: head, baseSha: baseline, modelChanged: false, indexFreshness,
+          detail: "every change since the last sync is NodeSpec's own",
+        };
+      }
+    }
+
+    // AD.1 (D12): a merge arrives only when every file it changed carries a
+    // blob NodeSpec wrote from some branch (a merge, squash or rebase changes
+    // shas but never blobs), never on a commit message.
+    // Bench 2026-09-25: a recognised merge that still ends as a card says why.
+    let mergeNotFiled: string | null = null;
+    if (range.ok && range.foreignAnyBranch.length === 0) {
       // Owner bench 2026-07-29: a merged NodeSpec PR coming home is OUR content —
       // "a PR brings the merge up". Load the ref's model instead of raising a
       // "# changes" card against ourselves. Guarded: only when this branch's
       // canvas still equals its baseline (nobody designed locally in between);
       // a guard failure falls through to the honest ladder below.
-      const restored = await restoreBranchModelFromRef(supabase, projectId, branchName, {
-        requireCanvasMatchesBaseline: true,
+      // AD.2b (D4): the merge is filed as a load proposal a person accepts,
+      // never loaded under an open editor. Accepting it moves the last sync.
+      const filed = await fileModelLoadProposal(supabase, projectId, branchName, {
+        requestedBy: "automatic", requireCanvasMatchesBaseline: true,
       });
-      if (restored.ok) {
+      if (filed.ok && filed.status !== "identical") {
         return {
-          status: "fast_forwarded", headSha: restored.headSha, baseSha: baseline, modelChanged: true,
-          restoredModel: true,
-          detail: `NodeSpec merge arrived on ${ref} — model loaded and baseline advanced`,
+          status: "load_proposed", headSha: filed.headSha, baseSha: baseline, modelChanged: true,
+          proposalId: filed.proposalId, indexFreshness,
+          detail: `NodeSpec merge arrived on ${ref}: git's model is waiting in Proposals`,
         };
       }
+      if (filed.ok) {
+        return {
+          status: "fast_forwarded", headSha: filed.headSha, baseSha: baseline, modelChanged: true, indexFreshness,
+          detail: filed.baselineMoved
+            ? `NodeSpec merge arrived on ${ref}: the canvas already holds its model`
+            : `NodeSpec merge arrived on ${ref}: the canvas already holds its model; ${filed.baselineNote ?? "the last sync stays where it was"}`,
+        };
+      }
+      mergeNotFiled = `NodeSpec merge arrived on ${ref} but git's model was not filed (${filed.code}: ${filed.message}); the change card asks instead`;
     }
 
-    const files: ChangedFile[] = compare?.files ?? [];
+    const files: ChangedFile[] = range.ok ? range.foreign : [];
     const match = await matchFilesToArtifacts(supabase, projectId, files, branchName);
     const matchedPaths = new Set(match.matches.map((m) => m.path));
     const { modelChanged, specChanged, residuePaths } = classifySweepFiles(files, matchedPaths);
@@ -706,11 +805,12 @@ export async function runDriftSweep(supabase: any, projectId: string, opts?: { b
         const ownParsed = parseModel(await serializeModel(graph));
         if (repoParsed?.ok && ownParsed.ok) {
           modelDiff = capAnchorDiff(diffAnchors(ownParsed.model, repoParsed.model));
-          // R7d: compare the architecture-only projection, never stored hashes —
-          // a legacy repo anchor hashed a mappings section that no longer exists,
-          // and comparing stored hashes would card every pre-R7d repo.
-          canvasMatchesHead =
-            (await coreModelHash(ownParsed.model)) === (await coreModelHash(repoParsed.model));
+          // R7d: never the stored hashes: a legacy repo anchor hashed a mappings
+          // section that no longer exists, and comparing stored hashes would
+          // card every pre-R7d repo. AD.2: the whole design when the repo's
+          // anchor carries it (a configuration change in git is a change), the
+          // architecture when it is version 1.
+          canvasMatchesHead = await sameDesign(ownParsed.model, repoParsed.model);
         }
         // "Working copy untouched since baseline?" costs one more provider call —
         // fetch it only when a silent auto-restore is even on the table.
@@ -721,7 +821,7 @@ export async function runDriftSweep(supabase: any, projectId: string, opts?: { b
           );
           const baselineParsed = baselineAnchorText ? parseModel(baselineAnchorText) : null;
           canvasMatchesBaseline = baselineParsed?.ok === true && ownParsed.ok &&
-            (await coreModelHash(ownParsed.model)) === (await coreModelHash(baselineParsed.model));
+            await sameDesign(ownParsed.model, baselineParsed.model);
         }
       } catch (diffErr) {
         console.warn("[git-drift] model diff computation failed (sweep continues):", diffErr);
@@ -741,7 +841,7 @@ export async function runDriftSweep(supabase: any, projectId: string, opts?: { b
         );
         const repoSpec = repoSpecText ? parseSpec(repoSpecText) : null;
         if (repoSpec?.ok) {
-          const ourPlane = await loadSpecPlane(supabase, projectId);
+          const ourPlane = await loadSpecPlane(supabase, projectId, { constraintsCarried: await constraintsCarried(supabase as never, projectId) });
           const ourSpec = ourPlane
             ? parseSpec(await serializeSpec(ourPlane.spec, ourPlane.requirements, ourPlane.mappings))
             : parseSpec(await serializeSpec({ vision: "" }, [], []));
@@ -827,17 +927,42 @@ export async function runDriftSweep(supabase: any, projectId: string, opts?: { b
       // usable diff means "the requirements moved and we cannot prove they match",
       // which must block the auto lanes exactly like a proven divergence.
       specDivergent: specChanged && (specDiff === null || !specDiff.identical),
+      specChanged,
+      carriesTicks: hasUnappliedTicks({ criterionDeltas, taskDeltas }),
     });
     if (action === "baseline-fast-forward") {
       // The canvas already IS the repo HEAD model and nothing else changed in the
-      // range — pure bookkeeping, no question to ask anyone.
-      await supabase.from("branches").update({ last_synced_commit: head }).eq("id", branch.id);
-      return { status: "fast_forwarded", headSha: head, baseSha: baseline, modelChanged, detail: "canvas already matches the repo HEAD model" };
+      // range: pure bookkeeping, no question to ask anyone. AD.1: through the
+      // one writer, forward only; a move the provider cannot confirm falls
+      // through to an ordinary card.
+      const moved = await advanceBaseline(supabase, {
+        branchId: branch.id, to: head,
+        ancestry: ancestryFor(integration.provider, apiBase, integration.repo_owner, integration.repo_name, token),
+      });
+      if (moved.moved || moved.outcome === "same") {
+        return { status: "fast_forwarded", headSha: head, baseSha: baseline, modelChanged, indexFreshness, detail: "canvas already matches the repo HEAD model" };
+      }
     }
     if (action === "auto-restore") {
       // No card: the caller (branch switch) runs the R3-1 loader, which advances
       // the baseline and resolves any pending model cards itself.
-      return { status: "behind_in_sync", headSha: head, baseSha: baseline, modelChanged: true, detail: "working copy untouched since its baseline — safe to load the ref's model" };
+      // RI-9 (bench 2026-09-04): the index refresh already ran for this head;
+      // every post-freshness return reports it, this lane included.
+      return { status: "behind_in_sync", headSha: head, baseSha: baseline, modelChanged: true, indexFreshness, detail: "working copy untouched since its baseline — safe to load the ref's model" };
+    }
+
+    // AD.3 (D23): the card says who changed which file. Each commit NodeSpec
+    // did not write (newest MAX_ATTRIBUTED_COMMITS) is asked for its files; a
+    // file no read commit accounts for stays unattributed, never guessed.
+    let authors: AuthorGroup[] = [];
+    if (range.ok && files.length > 0) {
+      const foreignCommits = range.compare.commits.filter((c) => !range.recorded.has(c.sha)).slice(-MAX_ATTRIBUTED_COMMITS);
+      const withFiles = await Promise.all(foreignCommits.map(async (c) => ({
+        sha: c.sha,
+        author: c.author ?? null,
+        files: await fetchCommitFiles(integration.provider, apiBase, integration.repo_owner, integration.repo_name, c.sha, token),
+      })));
+      authors = groupFilesByAuthor(withFiles, files.map((f) => f.path)).authors;
     }
 
     const commitCount = compare?.commits.length ?? 0;
@@ -869,9 +994,12 @@ export async function runDriftSweep(supabase: any, projectId: string, opts?: { b
       // B3: declared new files awaiting their bind.
       ...(bindingResolution ? { bindingResolution } : {}),
       residuePaths,
+      ...(authors.length > 0 ? { authors } : {}),
       ...(modelDiff ? { modelDiff } : {}),
       ...(specDiff ? { specDiff } : {}),
       ...(compare ? {} : { compareFailed: true }),
+      // RI-9: what the repo index learned from this head (stale nodes by sha).
+      ...(indexFreshness.status !== "no_index" ? { indexFreshness } : {}),
     };
 
     const eventId = await upsertCumulativeSweepEvent(supabase, {
@@ -880,12 +1008,16 @@ export async function runDriftSweep(supabase: any, projectId: string, opts?: { b
       headSha: head,
       summary,
       files,
+      author: authorLine(authors),
       metadata,
+      isPrimary: onPrimary,
     });
 
     return {
       status: "drift", headSha: head, baseSha: baseline,
       changedFileCount: files.length, residueCount: residuePaths.length, modelChanged, specChanged, eventId,
+      indexFreshness,
+      ...(mergeNotFiled ? { detail: mergeNotFiled } : {}),
     };
   } catch (err) {
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
@@ -921,43 +1053,158 @@ export function cardFullyAnswered(metadata: any, covered: string[]): boolean {
   return flagged.every((p) => covered.includes(p));
 }
 
+// ── AD.1 (D6, D7): a load answers only its own cards ─────────────────────────
+// A load used to accept every pending sweep card in the project, on any
+// branch, and a card that flagged no plane (content only) counted as
+// answered; its ticks, bound files and residue went with it. Now a load
+// answers a card only when the card is this branch's, every plane it flagged
+// has been loaded, and it holds nothing a load does not answer.
+
+/** Residue on the card nobody ignored. */
+// deno-lint-ignore no-explicit-any
+function openResidue(metadata: any): string[] {
+  const ignored = new Set<string>(Array.isArray(metadata?.ignoredResidue) ? metadata.ignoredResidue : []);
+  const residue: string[] = Array.isArray(metadata?.residuePaths) ? metadata.residuePaths : [];
+  return residue.filter((p) => !ignored.has(p));
+}
+
+/** True when the loads in `covered` answer every question the card asks: at
+ *  least one plane flagged and each one loaded, and no bound file to accept,
+ *  no residue nobody bound or ignored, and no tick nobody applied. */
+// deno-lint-ignore no-explicit-any
+export function cardAnsweredByLoads(metadata: any, covered: string[]): boolean {
+  const flagged = cardFlaggedPlanes(metadata);
+  if (flagged.length === 0) return false;
+  if (!flagged.every((p) => covered.includes(p))) return false;
+  if (Array.isArray(metadata?.artifactMatches) && metadata.artifactMatches.length > 0) return false;
+  if (openResidue(metadata).length > 0) return false;
+  if (hasUnappliedTicks(metadata)) return false;
+  return true;
+}
+
+/** Whether a card belongs to this branch. A card with no branch name is the
+ *  primary branch's, except a webhook card for a ref no branch is bound to,
+ *  which is nobody's. */
+// deno-lint-ignore no-explicit-any
+export function cardOnBranch(metadata: any, branch: { name: string; isPrimary: boolean }): boolean {
+  const name = metadata?.branchName;
+  if (typeof name === "string" && name) return name === branch.name;
+  if (metadata?.unmappedRef) return false;
+  return branch.isPrimary;
+}
+
+export interface LoadCardPlan {
+  // deno-lint-ignore no-explicit-any
+  answered: Array<{ id: string; commitSha: string; metadata: any }>;
+  // deno-lint-ignore no-explicit-any
+  progressed: Array<{ id: string; commitSha: string; metadata: any }>;
+}
+
+/** Pure: what a load of `plane` at `headSha` does to the pending cards. A
+ *  card that flagged the plane records it; one the loads now fully answer is
+ *  accepted; every other card is left as it is. */
+export function planCardsAfterLoad(
+  // deno-lint-ignore no-explicit-any
+  cards: any[],
+  plane: "model" | "spec",
+  branch: { name: string; isPrimary: boolean },
+  headSha: string,
+): LoadCardPlan {
+  const plan: LoadCardPlan = { answered: [], progressed: [] };
+  for (const card of cards) {
+    const meta = card?.metadata ?? {};
+    if (meta.source !== "connect-anchor-mismatch" && meta.source !== "sweep") continue;
+    if (!cardOnBranch(meta, branch)) continue;
+    if (!cardFlaggedPlanes(meta).includes(plane)) continue;
+    const covered = Array.from(new Set([...(Array.isArray(meta.restoredPlanes) ? meta.restoredPlanes : []), plane]));
+    const metadata = { ...meta, restoredPlanes: covered, restoredHeadSha: headSha };
+    if (cardAnsweredByLoads(meta, covered)) {
+      plan.answered.push({ id: card.id, commitSha: card.commit_sha, metadata: { ...metadata, resolution: "restored-from-repo" } });
+    } else {
+      plan.progressed.push({ id: card.id, commitSha: card.commit_sha, metadata });
+    }
+  }
+  return plan;
+}
+
+/** Pure (I3): a load moves the baseline forward only when everything in
+ *  baseline..head that NodeSpec did not write, from any branch, is the anchor
+ *  the load brought in. Anything else stays for the sync check, which
+ *  fast-forwards once the project matches git or puts it on a card. */
+export function loadCoversRange(foreignAnyBranch: Array<{ path: string; oldPath?: string }>, anchorPath: string): boolean {
+  return foreignAnyBranch.every((f) => f.path === anchorPath && !f.oldPath);
+}
+
+export const LOAD_KEPT_BASELINE_NOTE =
+  "The last sync stays where it was: git has other changes since, and the next check puts them on a card.";
+
+/** Accept the cards the load answered and record the plane on the rest, each
+ *  only while it is pending and still the version read. No baseline moves
+ *  here: the load decides that from the range. */
 // deno-lint-ignore no-explicit-any
 export async function resolveCardsAfterRestore(
+  // deno-lint-ignore no-explicit-any
   supabase: any,
   projectId: string,
   headSha: string,
   plane: "model" | "spec",
-): Promise<void> {
+  branch: { name: string; isPrimary: boolean },
+): Promise<{ answered: number; progressed: number }> {
   const { data: pendingCards } = await supabase
     .from("git_change_events")
-    .select("id, metadata")
+    .select("id, commit_sha, metadata")
     .eq("project_id", projectId)
     .eq("status", "pending");
+  const plan = planCardsAfterLoad(pendingCards ?? [], plane, branch, headSha);
+  for (const card of plan.answered) {
+    await supabase.from("git_change_events")
+      .update({ status: "accepted", resolved_at: new Date().toISOString(), metadata: card.metadata })
+      .eq("id", card.id)
+      .eq("status", "pending")
+      .eq("commit_sha", card.commitSha);
+  }
+  for (const card of plan.progressed) {
+    // Half-answered: record the progress, keep the card open. What remains is
+    // still live and must not vanish.
+    await supabase.from("git_change_events")
+      .update({ metadata: card.metadata })
+      .eq("id", card.id)
+      .eq("status", "pending")
+      .eq("commit_sha", card.commitSha);
+  }
+  return { answered: plan.answered.length, progressed: plan.progressed.length };
+}
+
+/** After a load: move the baseline as planned when it is a first baseline or
+ *  a person's re-anchor, or forward only when the range holds nothing but the
+ *  anchor loaded (`loadCoversRange`). Exported for offline tests. */
+export async function moveBaselineAfterLoad(
   // deno-lint-ignore no-explicit-any
-  for (const card of (pendingCards ?? []) as any[]) {
-    const source = card?.metadata?.source;
-    if (source !== "connect-anchor-mismatch" && source !== "sweep") continue;
-    const covered = Array.from(new Set([...(card?.metadata?.restoredPlanes ?? []), plane]));
-    const metadata = {
-      ...(card.metadata ?? {}),
-      restoredPlanes: covered,
-      resolution: "restored-from-repo",
-      restoredHeadSha: headSha,
-    };
-    if (cardFullyAnswered(card.metadata, covered)) {
-      await supabase.from("git_change_events")
-        .update({ status: "accepted", resolved_at: new Date().toISOString(), metadata })
-        .eq("id", card.id);
-    } else {
-      // Half-answered: record the progress, keep the card open. The remaining
-      // plane's question is still live and must not vanish.
-      await supabase.from("git_change_events").update({ metadata }).eq("id", card.id);
+  supabase: any,
+  args: {
+    plan: BaselinePlan;
+    anchorPath: string;
+    provider: string; apiBase: string; owner: string; repo: string; token: string;
+    integrationId: string;
+  },
+): Promise<{ moved: boolean; note: string | null }> {
+  const { plan } = args;
+  if (!plan.decision.move) return { moved: false, note: baselineOutcomeNote(plan.decision.outcome) };
+  if (plan.decision.outcome === "forward" && plan.current) {
+    const range = await readRange(supabase, {
+      provider: args.provider, apiBase: args.apiBase, owner: args.owner, repo: args.repo, token: args.token,
+      integrationId: args.integrationId, branchId: plan.branchId, base: plan.current, head: plan.to,
+    });
+    if (!range.ok || !loadCoversRange(range.foreignAnyBranch, args.anchorPath)) {
+      return { moved: false, note: LOAD_KEPT_BASELINE_NOTE };
     }
   }
+  const written = await writeBaselineMove(supabase, plan);
+  return { moved: written.moved, note: written.moved ? null : baselineOutcomeNote(written.outcome) };
 }
 
 // ── R7c: spec restore (shared core) ───────────────────────────────────────────
-// The spec-plane twin of restoreBranchModelFromRef. Deliberately separate: the
+// The spec-plane twin of the model load. Deliberately separate: the
 // two anchors move independently, and a user who wants the repo's requirements
 // must not be forced to also replace their canvas.
 
@@ -970,10 +1217,14 @@ export type RestoreSpecResult =
     mode: "adopted" | "applied";
     counts: unknown;
     keptLocal?: string[];
+    /** AD.2c: locked requirements git changed; not written. */
+    locked?: string[];
+    baselineMoved: boolean;
+    baselineNote?: string;
   }
   | {
     ok: false;
-    code: "no-integration" | "no-branch" | "no-head" | "no-spec-file" | "invalid-spec" | "hash-failed" | "no-owner" | "write-failed";
+    code: "no-integration" | "no-branch" | "no-head" | "read-failed" | "no-spec-file" | "invalid-spec" | "hash-failed" | "no-owner" | "write-failed";
     message: string;
   };
 
@@ -996,7 +1247,7 @@ export async function restoreSpecFromRef(supabase: any, projectId: string, branc
 
   const { data: branch } = await supabase
     .from("branches")
-    .select("id, git_ref")
+    .select("id, git_ref, last_synced_commit, is_primary")
     .eq("project_id", projectId)
     .eq("name", branchName)
     .maybeSingle();
@@ -1009,9 +1260,14 @@ export async function restoreSpecFromRef(supabase: any, projectId: string, branc
   const headSha = headResult.sha;
   if (!headSha) return { ok: false, code: "no-head", message: `Could not resolve remote HEAD for ${ref}` };
 
-  const specText = await fetchRepoFile(
+  // AD.1 (D11): an unreadable spec is not an absent one.
+  const specRead = await readRepoFile(
     integration.provider, apiBase, integration.repo_owner, integration.repo_name, SPEC_ANCHOR_PATH, ref, token,
   );
+  if (specRead.status === "failed") {
+    return { ok: false, code: "read-failed", message: `Could not read ${SPEC_ANCHOR_PATH} on ${ref} (${specRead.error}); nothing was loaded. Try again.` };
+  }
+  const specText = specRead.status === "found" ? specRead.text : null;
   if (!specText) {
     return {
       ok: false,
@@ -1034,6 +1290,34 @@ export async function restoreSpecFromRef(supabase: any, projectId: string, branc
   const { data: existingSpec } = await supabase
     .from("project_specifications").select("id").eq("project_id", projectId).limit(1).maybeSingle();
 
+  // AD.1: this branch's cards record the load, and those it fully answers are
+  // accepted. A spec load never sets a first baseline; on a baselined branch
+  // it moves forward only when spec.json is all git changed other than by
+  // NodeSpec (`loadCoversRange`).
+  const afterSpecLoad = async (): Promise<{ baselineMoved: boolean; baselineNote?: string }> => {
+    let moved = false;
+    let note: string | null = null;
+    if (branch.last_synced_commit) {
+      const plan = await planBaselineMove(supabase, {
+        branchId: branch.id, to: headSha,
+        ancestry: ancestryFor(integration.provider, apiBase, integration.repo_owner, integration.repo_name, token),
+      });
+      if (plan) {
+        const after = await moveBaselineAfterLoad(supabase, {
+          plan, anchorPath: SPEC_ANCHOR_PATH,
+          provider: integration.provider, apiBase, owner: integration.repo_owner, repo: integration.repo_name, token,
+          integrationId: integration.id,
+        });
+        moved = after.moved;
+        note = after.note;
+      }
+    }
+    await resolveCardsAfterRestore(supabase, projectId, headSha, "spec", {
+      name: branchName, isPrimary: isPrimaryRow({ ...branch, name: branchName }),
+    });
+    return { baselineMoved: moved, ...(note ? { baselineNote: note } : {}) };
+  };
+
   // No spec yet → the R7b adopt lane. Already has one → the R7c upsert, which
   // preserves evidence (see mergeCriteria).
   if (!existingSpec) {
@@ -1043,59 +1327,93 @@ export async function restoreSpecFromRef(supabase: any, projectId: string, branc
     if (!adopted.adopted) {
       // "already-has-spec" cannot happen on this branch (we just proved there is
       // none) — a race would land here, and write-failed is the honest report.
-      const code: "hash-failed" | "no-owner" | "write-failed" =
+      const code: "hash-failed" | "invalid-spec" | "no-owner" | "write-failed" =
         adopted.reason === "already-has-spec" ? "write-failed" : adopted.reason;
       return { ok: false, code, message: adopted.message ?? adopted.reason };
     }
-    await resolveCardsAfterRestore(supabase, projectId, headSha, "spec");
-    return { ok: true, headSha, ref, specHash: parsed.spec.specHash, mode: "adopted", counts: adopted.counts };
+    const after = await afterSpecLoad();
+    return { ok: true, headSha, ref, specHash: parsed.spec.specHash, mode: "adopted", counts: adopted.counts, ...after };
+  }
+
+  // AD.2c: git's spec at the last sync is the third side of the mapping
+  // plan (planSpecMappings): a mapping git removed since then is removed, one
+  // only the project has stays. An unreadable baseline refuses the load, as
+  // the head's does; a baseline without a readable spec.json removes nothing.
+  let baselineSpec: SpecAnchor | null = null;
+  if (branch.last_synced_commit === headSha) {
+    baselineSpec = parsed.spec;
+  } else if (branch.last_synced_commit) {
+    const baseRead = await readRepoFile(
+      integration.provider, apiBase, integration.repo_owner, integration.repo_name, SPEC_ANCHOR_PATH, branch.last_synced_commit, token,
+    );
+    if (baseRead.status === "failed") {
+      return { ok: false, code: "read-failed", message: `Could not read ${SPEC_ANCHOR_PATH} at the last sync (${baseRead.error}); nothing was loaded. Try again.` };
+    }
+    if (baseRead.status === "found") {
+      const base = parseSpec(baseRead.text);
+      if (base.ok) baselineSpec = base.spec;
+    }
   }
 
   const applied = await applySpecAnchor(supabase, {
-    projectId, ownerId, spec: parsed.spec, sourceCommit: headSha,
+    projectId, ownerId, spec: parsed.spec, baseline: baselineSpec, sourceCommit: headSha,
   });
   if (!applied.applied) {
     return { ok: false, code: applied.reason === "no-spec" ? "write-failed" : applied.reason, message: applied.message ?? applied.reason };
   }
-  await resolveCardsAfterRestore(supabase, projectId, headSha, "spec");
+  const after = await afterSpecLoad();
   return {
     ok: true, headSha, ref, specHash: parsed.spec.specHash,
     mode: "applied", counts: applied.counts, keptLocal: applied.keptLocal,
+    ...(applied.locked.length ? { locked: applied.locked } : {}), ...after,
   };
 }
 
-// ── Model restore (shared core) ────────────────────────────────────────────────
-// One implementation of "load the ref's anchor as this branch's model": used by
-// git-pull's explicit restore-model action, by the sweep's merge-arrival lane,
-// and by the webhook when a NodeSpec PR merge comes home. Loads its own
-// integration row + token (same pattern as runDriftSweep) so callers stay thin.
+// ── AD.2b: loading git's model files a proposal ────────────────────────────────
+// A load used to write a new snapshot built from the anchor alone, dropping
+// schemas, configuration, positions and file content, and it ran unasked on a
+// page load and when a merge arrived (findings D3, D4). No path writes a
+// snapshot from git now. The anchor at the ref's head is compared with the
+// canvas and filed as ONE proposal of ordinary patches (`anchorLoadPatches`);
+// a person accepts it, and only then does the last sync move (git-pull
+// `proposal-baseline`, which also answers the cards the load answers). One
+// pending load per branch: a newer head replaces the older proposal.
 
-export type RestoreBranchResult =
-  | { ok: true; headSha: string; ref: string; modelHash: string; counts: unknown }
+export type ModelLoadResult =
+  | {
+    ok: true;
+    status: "filed" | "already-filed";
+    headSha: string;
+    proposalId: string;
+    patchCount: number;
+    notApplied: string[];
+  }
+  | {
+    ok: true;
+    /** The canvas already holds git's design: nothing to accept. The cards the
+     *  load answers are answered and the last sync moves as a load's does. */
+    status: "identical";
+    headSha: string;
+    baselineMoved: boolean;
+    baselineNote?: string;
+  }
   | {
     ok: false;
-    code: "no-integration" | "no-branch" | "no-head" | "no-anchor" | "invalid-anchor" | "hash-failed" | "guard-failed" | "write-failed";
+    code: "no-integration" | "no-branch" | "no-head" | "no-anchor" | "read-failed" | "invalid-anchor" | "hash-failed" | "guard-failed" | "cannot-express" | "write-failed";
     message: string;
   };
 
 // deno-lint-ignore no-explicit-any
-export async function restoreBranchModelFromRef(supabase: any, projectId: string, branchName: string, opts?: {
-  /**
-   * Auto-restore safety guard (merge-arrival lanes): only proceed when the
-   * branch's canvas model still equals its BASELINE anchor — i.e. nobody
-   * changed the design locally since the last sync. An explicit user-invoked
-   * restore skips this (the user chose git as the winner).
-   */
+export async function fileModelLoadProposal(supabase: any, projectId: string, branchName: string, opts: {
+  /** "person": someone asked for this load, so accepting it may re-anchor a
+   *  rewritten history. "automatic": a page load or an arriving merge; the
+   *  last sync only ever moves forward. */
+  requestedBy: "person" | "automatic";
+  /** Merge arrival: file only when the canvas still equals its baseline's
+   *  model (nobody designed locally since); otherwise the sync check's card
+   *  asks instead. */
   requireCanvasMatchesBaseline?: boolean;
-  /**
-   * R3-6: default TRUE — restoring a model answers pending model cards ("git
-   * won"), and every pre-existing caller relies on that. Connect-time branch
-   * DETECTION passes false: it materializes OTHER branches' models, and letting
-   * it resolve cards would swallow the main mismatch card the same connect may
-   * have just raised on a non-empty project.
-   */
-  resolveCards?: boolean;
-}): Promise<RestoreBranchResult> {
+}): Promise<ModelLoadResult> {
   const { data: integration } = await supabase
     .from("git_integrations")
     .select("id, provider, repo_owner, repo_name, default_branch, base_url, access_token_encrypted")
@@ -1113,13 +1431,11 @@ export async function restoreBranchModelFromRef(supabase: any, projectId: string
 
   const { data: branch } = await supabase
     .from("branches")
-    .select("id, git_ref, last_synced_commit")
+    .select("id, git_ref, last_synced_commit, is_primary")
     .eq("project_id", projectId)
     .eq("name", branchName)
     .maybeSingle();
   if (!branch) return { ok: false, code: "no-branch", message: `No '${branchName}' branch for this project` };
-
-  // R3-3a: a NodeSpec branch restores from ITS bound git ref (1:1 binding).
   const ref = branch.git_ref || integration.default_branch;
 
   const headResult = await fetchRemoteHeadShaDetailed(
@@ -1130,105 +1446,122 @@ export async function restoreBranchModelFromRef(supabase: any, projectId: string
     return { ok: false, code: "no-head", message: `Could not resolve remote HEAD for ${integration.repo_owner}/${integration.repo_name}@${ref}` };
   }
 
-  const anchorText = await fetchRepoFile(
-    integration.provider, apiBase, integration.repo_owner, integration.repo_name,
-    MODEL_ANCHOR_PATH, ref, token,
+  // AD.1 (D11): an unreadable anchor is not an absent one.
+  const anchorRead = await readRepoFile(
+    integration.provider, apiBase, integration.repo_owner, integration.repo_name, MODEL_ANCHOR_PATH, headSha, token,
   );
-  if (!anchorText) {
-    return { ok: false, code: "no-anchor", message: `The repository has no ${MODEL_ANCHOR_PATH} on ${ref} — nothing to restore` };
+  if (anchorRead.status === "failed") {
+    return { ok: false, code: "read-failed", message: `Could not read ${MODEL_ANCHOR_PATH} on ${ref} (${anchorRead.error}); nothing was filed. Try again.` };
   }
-
-  const parsed = parseModel(anchorText);
-  if (!parsed.ok) {
-    return { ok: false, code: "invalid-anchor", message: `Repo model anchor is invalid: ${parsed.error}` };
+  if (anchorRead.status === "absent") {
+    return { ok: false, code: "no-anchor", message: `The repository has no ${MODEL_ANCHOR_PATH} on ${ref}; there is nothing to load` };
   }
+  const parsed = parseModel(anchorRead.text);
+  if (!parsed.ok) return { ok: false, code: "invalid-anchor", message: `Repo model anchor is invalid: ${parsed.error}` };
   if (!(await verifyModelHash(parsed.model))) {
-    return { ok: false, code: "hash-failed", message: "Repo model anchor failed hash verification (tampered or hand-edited) — refusing to restore from it" };
+    return { ok: false, code: "hash-failed", message: "Repo model anchor failed hash verification (tampered or hand-edited); refusing to load it" };
   }
 
-  // Prior snapshot: keep the graph's IDENTITY (id) and version monotonicity — the
-  // restored graph is the same project moving to a new state, not a new project.
-  const { data: prior } = await supabase
-    .from("graph_snapshots")
-    .select("graph_data, patch_sequence")
-    .eq("branch_id", branch.id)
-    .order("patch_sequence", { ascending: false })
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  const priorGraph = prior?.graph_data ?? {};
+  const { graph: snapGraph, patchSequence } = await loadLatestSnapshot(supabase, branch.id);
+  const canvas = snapGraph ?? {};
+  const oursParsed = parseModel(await serializeModel(canvas));
 
-  if (opts?.requireCanvasMatchesBaseline) {
+  if (opts.requireCanvasMatchesBaseline) {
     if (!branch.last_synced_commit) {
-      return { ok: false, code: "guard-failed", message: "Branch has no sync baseline — auto-restore refused" };
+      return { ok: false, code: "guard-failed", message: "Branch has no sync baseline; a merge is not loaded on its own" };
     }
-    try {
-      const baselineAnchorText = await fetchRepoFile(
-        integration.provider, apiBase, integration.repo_owner, integration.repo_name,
-        MODEL_ANCHOR_PATH, branch.last_synced_commit, token,
-      );
-      const baselineParsed = baselineAnchorText ? parseModel(baselineAnchorText) : null;
-      const canvasParsed = parseModel(await serializeModel(priorGraph));
-      // R7d: architecture-only comparison (legacy anchors carry a mappings section).
-      const untouched = baselineParsed?.ok === true && canvasParsed.ok &&
-        (await coreModelHash(canvasParsed.model)) === (await coreModelHash(baselineParsed.model));
-      if (!untouched) {
-        return { ok: false, code: "guard-failed", message: "The canvas diverged from its baseline — keeping the reconciliation card instead of auto-restoring" };
+    const baselineRead = await readRepoFile(
+      integration.provider, apiBase, integration.repo_owner, integration.repo_name, MODEL_ANCHOR_PATH, branch.last_synced_commit, token,
+    );
+    const baselineParsed = baselineRead.status === "found" ? parseModel(baselineRead.text) : null;
+    const untouched = baselineParsed?.ok === true && oursParsed.ok && await sameDesign(oursParsed.model, baselineParsed.model);
+    if (!untouched) {
+      return { ok: false, code: "guard-failed", message: "The canvas changed since the last sync; the change card asks instead" };
+    }
+  }
+
+  const isPrimary = isPrimaryRow({ ...branch, name: branchName });
+  const ancestry = ancestryFor(integration.provider, apiBase, integration.repo_owner, integration.repo_name, token);
+
+  // The canvas already holds git's design: nothing for a person to accept.
+  if (oursParsed.ok && await sameDesign(oursParsed.model, parsed.model)) {
+    const plan = await planBaselineMove(supabase, { branchId: branch.id, to: headSha, ancestry, reanchor: opts.requestedBy === "person" });
+    const after = plan
+      ? await moveBaselineAfterLoad(supabase, {
+        plan, anchorPath: MODEL_ANCHOR_PATH,
+        provider: integration.provider, apiBase, owner: integration.repo_owner, repo: integration.repo_name, token,
+        integrationId: integration.id,
+      })
+      : { moved: false, note: baselineOutcomeNote("no-branch") };
+    await resolveCardsAfterRestore(supabase, projectId, headSha, "model", { name: branchName, isPrimary });
+    return { ok: true, status: "identical", headSha, baselineMoved: after.moved, ...(after.note ? { baselineNote: after.note } : {}) };
+  }
+
+  const nowIso = new Date().toISOString();
+  const load = await anchorLoadPatches(canvas, parsed.model, { actorId: "git-load", sourceCommit: headSha, nowIso });
+  if (load.patches.length === 0) {
+    return {
+      ok: false, code: "cannot-express",
+      message: `Git's model differs from the canvas only in ways a proposal cannot express: ${load.notApplied.join(" ")}`,
+    };
+  }
+
+  // One pending load per branch. The same head is the same proposal (a person
+  // asking for it makes it theirs); an older head is replaced.
+  const { data: pending } = await supabase
+    .from("ai_proposals")
+    .select("id, metadata, patches")
+    .eq("source_branch_id", branch.id)
+    .eq("status", "pending");
+  // deno-lint-ignore no-explicit-any
+  for (const row of ((pending ?? []) as any[]).filter((r) => r?.metadata?.source === "git-load")) {
+    if (row.metadata?.loadsModel?.headSha === headSha) {
+      if (opts.requestedBy === "person" && row.metadata.loadsModel.reanchor !== true) {
+        await supabase.from("ai_proposals")
+          .update({ metadata: { ...row.metadata, loadsModel: { ...row.metadata.loadsModel, reanchor: true } } })
+          .eq("id", row.id);
       }
-    } catch (guardErr) {
-      return { ok: false, code: "guard-failed", message: `Baseline comparison failed: ${guardErr instanceof Error ? guardErr.message : String(guardErr)}` };
+      const patchCount = Array.isArray(row.patches) ? row.patches.length : load.patches.length;
+      return { ok: true, status: "already-filed", headSha, proposalId: row.id, patchCount, notApplied: row.metadata?.notApplied ?? [] };
     }
+    await supabase.from("ai_proposals")
+      .update({
+        status: "rejected",
+        reviewed_at: nowIso,
+        metadata: { ...row.metadata, resolveNote: `Replaced by a load of a newer commit (${headSha.slice(0, 8)}).` },
+      })
+      .eq("id", row.id)
+      .eq("status", "pending");
   }
 
-  const graphId = typeof priorGraph.id === "string" && priorGraph.id ? priorGraph.id : crypto.randomUUID();
-  const version = (typeof priorGraph.version === "number" ? priorGraph.version : 0) + 1;
-  const patchSequence = (typeof prior?.patch_sequence === "number" ? prior.patch_sequence : 0) + 1;
-
-  const { graph, counts } = anchorToGraph(parsed.model, {
-    graphId, version, nowIso: new Date().toISOString(),
-    // R3-4b: the HEAD we restored from IS the provenance commit for every
-    // artifact this restore materializes.
-    sourceCommit: headSha,
+  const aiRunId = crypto.randomUUID();
+  const proposalId = crypto.randomUUID();
+  const { error: runError } = await supabase.from("ai_runs").insert({
+    id: aiRunId, project_id: projectId, branch_id: branch.id,
+    model: "git-load", prompt_hash: "git-load", status: "completed",
+    completed_at: nowIso,
+    metadata: { source: "git-load", modelHash: parsed.model.modelHash, patchCount: load.patches.length },
   });
-
-  const { error: insertError } = await supabase
-    .from("graph_snapshots")
-    .insert({
-      project_id: projectId,
-      branch_id: branch.id,
-      graph_data: graph,
-      version: graph.version,
-      hash: graph.hash,
-      patch_sequence: patchSequence,
-    });
-  if (insertError) {
-    return { ok: false, code: "write-failed", message: `Restore snapshot write failed: ${insertError.message}` };
-  }
-
-  // Baseline = the HEAD we restored from: project and repo now agree by construction.
-  await supabase.from("branches")
-    .update({ last_synced_commit: headSha, git_ref: ref })
-    .eq("id", branch.id);
-
-  // Pending model cards asked "which side wins?" — git did. Resolve them so they
-  // don't re-prompt against a question that no longer exists. (R3-6: connect-time
-  // branch detection opts out — see the opt's doc.)
-  if (opts?.resolveCards !== false) {
-    await resolveCardsAfterRestore(supabase, projectId, headSha, "model");
-  }
-
-  await supabase.from("git_sync_log").insert({
-    integration_id: integration.id,
-    project_id: projectId,
-    branch_id: branch.id,
-    direction: "pull",
-    commit_sha: headSha,
-    status: "success",
-    patches_synced: 0,
-    completed_at: new Date().toISOString(),
+  if (runError) return { ok: false, code: "write-failed", message: `Could not file the load: ${runError.message}` };
+  const { error: propError } = await supabase.from("ai_proposals").insert({
+    id: proposalId, ai_run_id: aiRunId,
+    source_branch_id: branch.id, proposal_branch_id: branch.id,
+    status: "pending",
+    patches: load.patches.map((patch, i) => ({ patch, status: "pending", explanation: load.explanations[i] })),
+    validation_expectations: [],
+    metadata: {
+      source: "git-load",
+      // The commit the design was read at; accepting moves the last sync here.
+      loadsModel: { headSha, branchName, modelHash: parsed.model.modelHash, reanchor: opts.requestedBy === "person" },
+      // The canvas the diff was taken against: a later change to the same
+      // entities is a conflict at accept, as for any proposal (V3 2.1).
+      ...(patchSequence !== null ? { baseSequence: patchSequence } : {}),
+      counts: load.counts,
+      ...(load.notApplied.length > 0 ? { notApplied: load.notApplied } : {}),
+    },
   });
-
-  return { ok: true, headSha, ref, modelHash: parsed.model.modelHash, counts };
+  if (propError) return { ok: false, code: "write-failed", message: `Could not file the load: ${propError.message}` };
+  return { ok: true, status: "filed", headSha, proposalId, patchCount: load.patches.length, notApplied: load.notApplied };
 }
 
 
@@ -1243,7 +1576,7 @@ export async function restoreBranchModelFromRef(supabase: any, projectId: string
 
 /** Load the project's current criteria, keyed by REQ id. */
 // deno-lint-ignore no-explicit-any
-async function loadCurrentCriteria(supabase: any, projectId: string): Promise<Record<string, Array<{ text: string; met?: boolean }>>> {
+async function loadCurrentCriteria(supabase: any, projectId: string): Promise<Record<string, CurrentCriterion[]>> {
   const { data: spec } = await supabase
     .from("project_specifications").select("id").eq("project_id", projectId)
     .order("created_at", { ascending: false }).limit(1).maybeSingle();
@@ -1252,12 +1585,16 @@ async function loadCurrentCriteria(supabase: any, projectId: string): Promise<Re
     .from("specification_requirements")
     .select("requirement_id, acceptance_criteria")
     .eq("specification_id", spec.id);
-  const out: Record<string, Array<{ text: string; met?: boolean }>> = {};
+  const out: Record<string, CurrentCriterion[]> = {};
   // deno-lint-ignore no-explicit-any
   for (const r of ((reqs ?? []) as any[])) {
     const list = Array.isArray(r.acceptance_criteria) ? r.acceptance_criteria : [];
-    out[r.requirement_id] = list.map((c: unknown) =>
-      typeof c === "string" ? { text: c } : { text: String((c as any)?.text ?? ""), met: (c as any)?.met === true }
+    // AD.3: the lane rides along, so a card can say which ticked criteria
+    // expect a test result.
+    out[r.requirement_id] = list.map((c: unknown): CurrentCriterion =>
+      typeof c === "string"
+        ? { text: c }
+        : { text: String((c as any)?.text ?? ""), met: (c as any)?.met === true, ...((c as any)?.verification === "manual" ? { verification: "manual" as const } : {}) }
     ).filter((c: { text: string }) => c.text);
   }
   return out;
@@ -1306,94 +1643,6 @@ export async function computeSweepCriterionDeltas(
 }
 
 /**
- * A3 (docs/WORK_LOOP_PLAN.md): webhook-time completion provenance.
- *
- * Before this, only the 60-second drift sweep computed criterion deltas — a
- * tick arriving by webhook produced a card with no deltas and waited for a
- * later sweep to notice. This wrapper gives the webhook the exact same
- * computation the sweep runs (same fetch, same matcher, same dedupe),
- * owning the one piece the webhook handler lacks: token decryption +
- * provider API base resolution. Callers treat it best-effort — a delta
- * failure must never drop the card.
- */
-export async function computeWebhookCriterionDeltas(
-  // deno-lint-ignore no-explicit-any
-  supabase: any,
-  integration: {
-    provider: string;
-    project_id: string;
-    base_url?: string | null;
-    repo_owner: string;
-    repo_name: string;
-    access_token_encrypted?: string | null;
-  },
-  ref: string,
-  paths: string[],
-): Promise<CriterionDeltaResult> {
-  let token = integration.access_token_encrypted ?? "";
-  if (token && isEncrypted(token)) {
-    const { plaintext } = await decryptWithUpgrade(token);
-    token = plaintext;
-  }
-  const apiBase = providerApiBase(integration.provider, integration.base_url);
-  return computeSweepCriterionDeltas(
-    supabase, integration.project_id, integration, apiBase, token, ref, paths,
-  );
-}
-
-/** B3: the declaration counterpart — read-only resolve for the webhook card. */
-export async function computeWebhookBindingResolution(
-  // deno-lint-ignore no-explicit-any
-  supabase: any,
-  integration: {
-    provider: string;
-    project_id: string;
-    base_url?: string | null;
-    repo_owner: string;
-    repo_name: string;
-    access_token_encrypted?: string | null;
-  },
-  ref: string,
-  branchName: string,
-): Promise<BindingResolution | null> {
-  let token = integration.access_token_encrypted ?? "";
-  if (token && isEncrypted(token)) {
-    const { plaintext } = await decryptWithUpgrade(token);
-    token = plaintext;
-  }
-  const apiBase = providerApiBase(integration.provider, integration.base_url);
-  return computeSweepBindingResolution(supabase, integration.project_id, {
-    integration, apiBase, token, ref, branchName, fetchFile: fetchRepoFile,
-  });
-}
-
-/** A4: the task-checkbox counterpart of computeWebhookCriterionDeltas. */
-export async function computeWebhookTaskDeltas(
-  // deno-lint-ignore no-explicit-any
-  supabase: any,
-  integration: {
-    provider: string;
-    project_id: string;
-    base_url?: string | null;
-    repo_owner: string;
-    repo_name: string;
-    access_token_encrypted?: string | null;
-  },
-  ref: string,
-  files: Array<{ path: string; nodeId: string }>,
-): Promise<TaskDeltaResult> {
-  let token = integration.access_token_encrypted ?? "";
-  if (token && isEncrypted(token)) {
-    const { plaintext } = await decryptWithUpgrade(token);
-    token = plaintext;
-  }
-  const apiBase = providerApiBase(integration.provider, integration.base_url);
-  return computeSweepTaskDeltas(supabase, integration.project_id, {
-    integration, apiBase, token, ref, files, fetchFile: fetchRepoFile,
-  });
-}
-
-/**
  * D2 (docs/WORK_LOOP_PLAN.md): ticks made in `.nodespec/BOARD.md` ingest
  * through the SAME delta lanes task docs use — this fetches the board at the
  * pushed ref, parses it, and delegates to computeCriterionDeltas /
@@ -1429,30 +1678,6 @@ export async function computeSweepBoardDeltas(supabase: any, projectId: string, 
   return computeBoardTickDeltas(parsed, current, doneByNodeKey);
 }
 
-/** D2: the webhook-side wrapper — token decryption + API base, same as every
- *  other webhook wrapper in this file. */
-export async function computeWebhookBoardDeltas(
-  // deno-lint-ignore no-explicit-any
-  supabase: any,
-  integration: {
-    provider: string;
-    project_id: string;
-    base_url?: string | null;
-    repo_owner: string;
-    repo_name: string;
-    access_token_encrypted?: string | null;
-  },
-  ref: string,
-): Promise<{ criterionDeltas: CriterionDeltaResult; taskDeltas: TaskDeltaResult } | null> {
-  let token = integration.access_token_encrypted ?? "";
-  if (token && isEncrypted(token)) {
-    const { plaintext } = await decryptWithUpgrade(token);
-    token = plaintext;
-  }
-  const apiBase = providerApiBase(integration.provider, integration.base_url);
-  return computeSweepBoardDeltas(supabase, integration.project_id, { integration, apiBase, token, ref });
-}
-
 export interface ApplyCriterionResult {
   applied: number;
   requirementsTouched: string[];
@@ -1475,6 +1700,8 @@ export async function applyCriterionDeltas(supabase: any, projectId: string, opt
   deltas: CriterionDeltaResult;
   commitSha?: string;
   actor?: string;
+  /** AD.3: the person applying the ticks (a user id). */
+  appliedBy?: string;
 }): Promise<ApplyCriterionResult> {
   const ticks = applicableDeltas(opts.deltas);
   if (ticks.length === 0) return { applied: 0, requirementsTouched: [] };
@@ -1505,6 +1732,7 @@ export async function applyCriterionDeltas(supabase: any, projectId: string, opt
       source: "git",
       ...(opts.commitSha ? { commitSha: opts.commitSha } : {}),
       ...(opts.actor ? { actor: opts.actor } : {}),
+      ...(opts.appliedBy ? { appliedBy: opts.appliedBy } : {}),
       at,
     });
     if (result.applied === 0) continue;
@@ -1520,70 +1748,4 @@ export async function applyCriterionDeltas(supabase: any, projectId: string, opt
     touched.push(requirementId);
   }
   return { applied, requirementsTouched: touched };
-}
-
-
-// ── R3-6: connect-time design-branch detection ────────────────────────────────
-// Owner bench 2026-07-31 (second project, same repo): "the branches do not
-// detect." The repo's non-default branches created by ANOTHER project already
-// ARE design branches — this materializes them here: a branch row per anchored
-// ref, model loaded through the R3-1 loader, baseline = the loaded HEAD. A
-// branch with no valid anchor is NOT a design branch: its row is rolled back and
-// the skip reason reported (a CI/dependabot ref must not become a phantom design
-// branch). Idempotent — rows that already exist by name are skipped.
-
-export interface BranchDetectResult {
-  created: Array<{ name: string; nodes: number }>;
-  skipped: Array<{ name: string; reason: string }>;
-  /** Set when more anchored candidates existed than the cap allowed. */
-  capped?: number;
-}
-
-const BRANCH_DETECT_CAP = 10;
-
-// deno-lint-ignore no-explicit-any
-export async function detectRepoDesignBranches(supabase: any, opts: {
-  projectId: string;
-  ownerId: string;
-  defaultBranch: string;
-  branchNames: string[];
-}): Promise<BranchDetectResult> {
-  const { projectId, ownerId, defaultBranch, branchNames } = opts;
-  const result: BranchDetectResult = { created: [], skipped: [] };
-
-  const { data: existingRows } = await supabase
-    .from("branches")
-    .select("name")
-    .eq("project_id", projectId);
-  const existing = new Set(((existingRows ?? []) as Array<{ name: string }>).map((b) => b.name));
-
-  const candidates = branchNames
-    .filter((n) => n && n !== defaultBranch && !existing.has(n))
-    .sort();
-  const toProcess = candidates.slice(0, BRANCH_DETECT_CAP);
-  if (candidates.length > toProcess.length) result.capped = candidates.length - toProcess.length;
-
-  for (const name of toProcess) {
-    const { data: row, error: insErr } = await supabase
-      .from("branches")
-      .insert({ project_id: projectId, name, created_by: ownerId, git_ref: name })
-      .select("id")
-      .maybeSingle();
-    if (insErr || !row) {
-      result.skipped.push({ name, reason: insErr?.message ?? "branch row insert failed" });
-      continue;
-    }
-    // The R3-1 loader does the rest: anchor at the ref, hash-verified, snapshot
-    // written, baseline = the loaded HEAD. resolveCards:false — detection must
-    // not swallow the main mismatch card this same connect may have raised.
-    const restored = await restoreBranchModelFromRef(supabase, projectId, name, { resolveCards: false });
-    if (!restored.ok) {
-      await supabase.from("branches").delete().eq("id", row.id);
-      result.skipped.push({ name, reason: `${restored.code}: not a design branch (${restored.message})` });
-      continue;
-    }
-    const counts = restored.counts as { nodes?: number } | undefined;
-    result.created.push({ name, nodes: counts?.nodes ?? 0 });
-  }
-  return result;
 }

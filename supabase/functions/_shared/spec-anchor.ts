@@ -262,14 +262,18 @@ export function summarizeSpec(spec: SpecAnchor): SpecAnchorSummary {
  * THROWS on a failed query: "query failed" must never read as "project has no
  * spec". Exactly that silence hid a schema drift (the dropped features column)
  * that disabled the whole spec plane while every offline test passed.
+ *
+ * AC: `constraintsCarried` is the owner's plan answer (node-constraints.ts
+ * constraintsCarried, asked by the caller so this file stays free of the
+ * plan code). Absent or false, constraints are not read and none is written.
  */
 // deno-lint-ignore no-explicit-any
-export async function loadSpecPlane(supabase: any, projectId: string): Promise<
+export async function loadSpecPlane(supabase: any, projectId: string, opts: { constraintsCarried?: boolean } = {}): Promise<
   { spec: SpecInput; requirements: RequirementInput[]; mappings: SpecMappingInput[] } | null
 > {
   const { data: specRow, error: specErr } = await supabase
     .from("project_specifications")
-    .select("id, vision, constraints, preferences")
+    .select("id, vision, preferences")
     .eq("project_id", projectId)
     .order("created_at", { ascending: false })
     .limit(1)
@@ -284,7 +288,7 @@ export async function loadSpecPlane(supabase: any, projectId: string): Promise<
   const [reqRes, mapRes] = await Promise.all([
     supabase
       .from("specification_requirements")
-      .select("id, requirement_id, name, description, category, status, acceptance_criteria")
+      .select("id, requirement_id, name, description, category, status, acceptance_criteria, archived_at")
       .eq("specification_id", specRow.id),
     supabase
       .from("specification_mappings")
@@ -307,10 +311,48 @@ export async function loadSpecPlane(supabase: any, projectId: string): Promise<
     mappings.push({ requirementId, nodeId: String(m.node_id), mappingType: m.mapping_type });
   }
 
+  // AA.0 (R.2a): spec.json carries the constraints from the one store, not the
+  // legacy jsonb. A marked constraint never leaves in a file committed to git;
+  // the workflow travels by name (readable, and a new project may not have
+  // the lane: the adopt trigger files it project-wide).
+  // R.2b: a check, a scope other than the project and its waivers ride along
+  // (reviewed like code); guidance for the project writes exactly what it did.
+  // A waiver leaves without its owner (an account id stays in the database).
+  // AC (owner 2026-09-24): below Indie constraints do not exist, so spec.json
+  // carries none (the owner's plan decides, the same answer the drift sweep
+  // reads, so a push and a sweep never disagree).
+  const carried = opts.constraintsCarried === true;
+  let { data: conRows, error: conErr }: { data: unknown; error: { message: string } | null } = !carried ? { data: [], error: null } : await supabase
+    .from("project_constraints")
+    .select("ctype, title, description, rationale, workflow_id, mark, kind, scope_kind, scope_value, check_spec, waivers, workflows(name)")
+    .eq("project_id", projectId);
+  if (carried && conErr && /column .* does not exist|42703/i.test(conErr.message)) {
+    ({ data: conRows, error: conErr } = await supabase
+      .from("project_constraints")
+      .select("ctype, title, description, rationale, workflow_id, mark, workflows(name)")
+      .eq("project_id", projectId));
+  }
+  if (conErr) throw new Error(`loadSpecPlane: project_constraints query failed: ${conErr.message}`);
+  const constraints = ((conRows ?? []) as AnyRecord[])
+    .filter((c) => !c.mark)
+    .map((c) => ({
+      type: String(c.ctype),
+      description: String(c.description),
+      ...(c.title ? { title: String(c.title) } : {}),
+      ...(c.rationale ? { rationale: String(c.rationale) } : {}),
+      ...(c.workflow_id && (c.workflows as AnyRecord | null)?.name ? { workflow: String((c.workflows as AnyRecord).name) } : {}),
+      ...(c.kind === "check" && c.check_spec ? { kind: "check", check: c.check_spec } : {}),
+      ...(c.scope_kind && !["project", "workflow"].includes(String(c.scope_kind)) && c.scope_value
+        ? { scope: { kind: String(c.scope_kind), value: String(c.scope_value) } } : {}),
+      ...(Array.isArray(c.waivers) && c.waivers.length > 0
+        ? { waivers: (c.waivers as AnyRecord[]).map(({ owner: _owner, ...w }) => w) } : {}),
+    }))
+    .sort((a, b) => a.type.localeCompare(b.type) || a.description.localeCompare(b.description));
+
   return {
     spec: {
       vision: specRow.vision,
-      constraints: specRow.constraints,
+      constraints,
       preferences: specRow.preferences,
     },
     requirements,
@@ -427,18 +469,160 @@ export function capSpecDiff(diff: SpecDiff, maxPerList = 8): CappedSpecDiff {
   };
 }
 
-// ── R7b: adopt-on-connect — materialize a spec anchor into the DB ──────────────
+// ── R7b / R7c: load a spec anchor into the database ───────────────────────────
 // Mirrors the architecture's provenance ratchet: a repo carrying a spec is ADOPTED,
-// never re-inferred. But unlike the architecture (which adopts through the
-// proposal → accept → patch pipeline, because the graph is patch-versioned), the
-// spec plane has no patch ledger — so this writes rows directly, and it is
-// deliberately ADOPT-ONLY: a project that already has a spec is never overwritten.
-// Reconciling a DIVERGED spec is R7c's card, on the same one-approval rule as
-// every other inbound change.
+// never re-inferred. The spec plane has no patch ledger, so a load writes rows
+// directly, after a person asked for it (connect, or "Load requirements from
+// repo"). Adopt creates the project's spec and is refused when one exists;
+// apply updates the one it has.
+//
+// V3 AD.2c (finding D21): the whole load is ONE call, `apply_spec_load`
+// (migration 20260924140000), so it lands whole or not at all. The old path
+// wrote the spec, each requirement and the mappings as separate requests, so a
+// failure part way left a spec half loaded, and it deleted every mapping of
+// each requirement git named before inserting git's again, which dropped the
+// mappings added in NodeSpec and reset the confidence, notes and validation of
+// the rest. The rules the database now applies:
+//  - a criterion whose TEXT is unchanged keeps its evidence (the whole stored
+//    object: met and whatever R5 stamped beside it); a new or reworded one
+//    arrives unmet, because the evidence proved the old wording. The row is
+//    locked before it is read, so a tick landing at the same moment survives;
+//  - a locked requirement is not written, and is named when git changed it;
+//  - requirements git does not name are kept and named, never deleted;
+//  - mappings follow `planSpecMappings`: every other row stays exactly as it is.
+
+/** The values the database accepts (CHECK constraints on the two tables). */
+const REQUIREMENT_CATEGORIES = ["functional", "non-functional", "technical", "business"];
+const MAPPING_TYPES = new Set(["implements", "depends_on", "validates", "supports"]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export interface SpecMappingPlan {
+  /** Git's mappings; the database adds each one the project lacks. */
+  add: SpecAnchorMapping[];
+  /** Mappings git removed since the last sync; the database removes each one
+   *  the project still has. */
+  remove: SpecAnchorMapping[];
+  /** Git's mappings that cannot land: the requirement is not in git's list,
+   *  the node is not a node id or not in the project, or the type is unknown. */
+  skipped: number;
+}
+
+/**
+ * AD.2c: which mappings a load writes, from three sides: git now (`repo`), git
+ * at the last sync (`baseline`, the spec.json of `last_synced_commit`, null
+ * when there is none) and the project, which the database reads inside the
+ * load. A mapping git holds is added where the project lacks it; a mapping in
+ * the baseline that git no longer holds was removed in git, and is removed;
+ * a mapping only the project has was added in NodeSpec, and stays. Only the
+ * requirements git names are touched: one it does not name is kept whole,
+ * mappings included, as the requirement itself is.
+ */
+export function planSpecMappings(
+  repo: SpecAnchor,
+  baseline: SpecAnchor | null,
+  liveNodeIds: Set<string> | null = null,
+): SpecMappingPlan {
+  const listed = new Set(repo.requirements.map((r) => r.requirementId));
+  const valid = (m: SpecAnchorMapping): SpecAnchorMapping | null => {
+    const mappingType = m.mappingType || "implements";
+    const nodeId = String(m.nodeId ?? "").toLowerCase();
+    if (!listed.has(m.requirementId) || !UUID_RE.test(nodeId) || !MAPPING_TYPES.has(mappingType)) return null;
+    return { requirementId: m.requirementId, nodeId, mappingType };
+  };
+  const key = (m: SpecAnchorMapping) => `${m.requirementId}\u0000${m.nodeId}\u0000${m.mappingType}`;
+
+  const inGit = new Set<string>();
+  const add: SpecAnchorMapping[] = [];
+  let skipped = 0;
+  for (const raw of repo.mappings) {
+    const m = valid(raw);
+    if (!m) { skipped++; continue; }
+    if (inGit.has(key(m))) continue;
+    inGit.add(key(m));
+    if (liveNodeIds && !liveNodeIds.has(m.nodeId) && !liveNodeIds.has(raw.nodeId)) { skipped++; continue; }
+    add.push(m);
+  }
+
+  const remove: SpecAnchorMapping[] = [];
+  const removing = new Set<string>();
+  for (const raw of baseline?.mappings ?? []) {
+    const m = valid(raw);
+    if (!m || inGit.has(key(m)) || removing.has(key(m))) continue;
+    removing.add(key(m));
+    remove.push(m);
+  }
+  return { add, remove, skipped };
+}
+
+/** A category the database refuses would fail the whole load; name each one
+ *  first so the person reads which requirement, not a constraint name. */
+export function specLoadProblems(spec: SpecAnchor): string[] {
+  return spec.requirements
+    .filter((r) => r.category && !REQUIREMENT_CATEGORIES.includes(r.category))
+    .map((r) => `${r.requirementId} has the category "${r.category}"; a requirement is ${REQUIREMENT_CATEGORIES.join(", ")}.`);
+}
+
+interface SpecLoadRow {
+  ok: boolean;
+  reason?: string;
+  specId?: string;
+  added?: number;
+  updated?: number;
+  criteriaPreserved?: number;
+  mappingsAdded?: number;
+  mappingsRemoved?: number;
+  skippedMappings?: number;
+  locked?: string[];
+  keptLocal?: string[];
+}
+
+// deno-lint-ignore no-explicit-any
+async function runSpecLoad(supabase: any, mode: "adopt" | "apply", args: {
+  projectId: string;
+  actorId: string | null;
+  spec: SpecAnchor;
+  mappings: SpecMappingPlan;
+  origin: string;
+  sourceCommit?: string;
+}): Promise<{ ok: true; row: SpecLoadRow } | { ok: false; message: string }> {
+  const { spec } = args;
+  const { data, error } = await supabase.rpc("apply_spec_load", {
+    p_project_id: args.projectId,
+    p_mode: mode,
+    p_actor: args.actorId,
+    p_spec: {
+      vision: spec.vision || "",
+      constraints: Array.isArray(spec.constraints) ? spec.constraints : [],
+      preferences: spec.preferences && typeof spec.preferences === "object" && !Array.isArray(spec.preferences)
+        ? spec.preferences : {},
+      specHash: spec.specHash,
+    },
+    p_requirements: spec.requirements.map((r) => ({
+      requirementId: r.requirementId,
+      name: r.name,
+      description: r.description ?? null,
+      category: r.category || "functional",
+      // `met` is NOT in the anchor by design: evidence travels through R5's
+      // task-doc checkbox lane, so a new criterion arrives unmet.
+      acceptanceCriteria: (r.acceptanceCriteria ?? []).filter((c): c is string => typeof c === "string"),
+    })),
+    p_mappings_add: args.mappings.add,
+    p_mappings_remove: args.mappings.remove,
+    // Same two-half provenance convention the artifact lanes use (R3-4b).
+    p_provenance: {
+      origin: args.origin,
+      ...(args.sourceCommit ? { commitSha: args.sourceCommit } : {}),
+      at: new Date().toISOString(),
+    },
+  });
+  if (error) return { ok: false, message: `The requirements load failed and nothing was written: ${error.message}` };
+  if (!data || typeof data !== "object") return { ok: false, message: "The requirements load returned nothing; nothing was written." };
+  return { ok: true, row: data as SpecLoadRow };
+}
 
 export type SpecAdoptResult =
   | { adopted: true; specId: string; counts: SpecAnchorSummary; skippedMappings: number }
-  | { adopted: false; reason: "already-has-spec" | "hash-failed" | "no-owner" | "write-failed"; message?: string };
+  | { adopted: false; reason: "already-has-spec" | "hash-failed" | "invalid-spec" | "no-owner" | "write-failed"; message?: string };
 
 /**
  * @param liveNodeIds node ids that exist in the adopting project. A mapping to an
@@ -457,305 +641,94 @@ export async function adoptSpecAnchor(supabase: any, opts: {
 }): Promise<SpecAdoptResult> {
   const { projectId, ownerId, spec, liveNodeIds = null, sourceCommit } = opts;
   if (!ownerId) return { adopted: false, reason: "no-owner" };
-
   if (!(await verifySpecHash(spec))) {
     return { adopted: false, reason: "hash-failed", message: "spec.json hash does not match its content" };
   }
+  const problems = specLoadProblems(spec);
+  if (problems.length > 0) return { adopted: false, reason: "invalid-spec", message: problems.join(" ") };
 
-  const { data: existing } = await supabase
-    .from("project_specifications")
-    .select("id")
-    .eq("project_id", projectId)
-    .limit(1)
-    .maybeSingle();
-  if (existing) return { adopted: false, reason: "already-has-spec" };
-
-  const now = new Date().toISOString();
-  const { data: specRow, error: specErr } = await supabase
-    .from("project_specifications")
-    .insert({
-      project_id: projectId,
-      vision: spec.vision || "",
-      constraints: spec.constraints ?? [],
-      preferences: spec.preferences ?? {},
-      created_by: ownerId,
-      metadata: {
-        // Same two-half provenance convention the artifact lanes use (R3-4b).
-        provenance: {
-          origin: "spec-anchor-adopt",
-          ...(sourceCommit ? { commitSha: sourceCommit } : {}),
-          at: now,
-        },
-        specHash: spec.specHash,
-      },
-    })
-    .select("id")
-    .maybeSingle();
-  if (specErr || !specRow) {
-    return { adopted: false, reason: "write-failed", message: specErr?.message ?? "specification insert returned no row" };
+  const mappings = planSpecMappings(spec, null, liveNodeIds);
+  const run = await runSpecLoad(supabase, "adopt", {
+    projectId, actorId: ownerId, spec, mappings, origin: "spec-anchor-adopt", sourceCommit,
+  });
+  if (!run.ok) return { adopted: false, reason: "write-failed", message: run.message };
+  if (!run.row.ok) {
+    return run.row.reason === "already-has-spec"
+      ? { adopted: false, reason: "already-has-spec" }
+      : { adopted: false, reason: "write-failed", message: run.row.reason ?? "the load was refused" };
   }
-
-  const reqRows = spec.requirements.map((r) => ({
-    specification_id: specRow.id,
-    requirement_id: r.requirementId,
-    name: r.name,
-    description: r.description ?? null,
-    category: r.category || "functional",
-    // `met` is NOT in the anchor by design — evidence state travels through R5's
-    // task-doc checkbox lane. An adopted criterion therefore starts unmet, which
-    // is the honest state: a fresh adoption carries no evidence.
-    acceptance_criteria: (r.acceptanceCriteria ?? []).map((text) => ({ text, met: false })),
-    metadata: {
-      provenance: {
-        origin: "spec-anchor-adopt",
-        ...(sourceCommit ? { commitSha: sourceCommit } : {}),
-        at: now,
-      },
-    },
-  }));
-
-  let insertedReqs: Array<{ id: string; requirement_id: string }> = [];
-  if (reqRows.length > 0) {
-    const { data, error } = await supabase
-      .from("specification_requirements")
-      .insert(reqRows)
-      .select("id, requirement_id");
-    if (error) {
-      return { adopted: false, reason: "write-failed", message: `requirements insert failed: ${error.message}` };
-    }
-    insertedReqs = (data ?? []) as Array<{ id: string; requirement_id: string }>;
-  }
-
-  const rowIdOf = new Map(insertedReqs.map((r) => [r.requirement_id, r.id]));
-  const mapRows: Array<Record<string, unknown>> = [];
-  let skippedMappings = 0;
-  for (const m of spec.mappings) {
-    const rowId = rowIdOf.get(m.requirementId);
-    if (!rowId) { skippedMappings++; continue; }
-    if (liveNodeIds && !liveNodeIds.has(m.nodeId)) { skippedMappings++; continue; }
-    mapRows.push({
-      specification_id: specRow.id,
-      requirement_id: rowId,
-      node_id: m.nodeId,
-      mapping_type: m.mappingType || "implements",
-      created_by: ownerId,
-    });
-  }
-  if (mapRows.length > 0) {
-    const { error } = await supabase.from("specification_mappings").insert(mapRows);
-    if (error) {
-      // Requirements landed; traceability did not. Report honestly rather than
-      // rolling back a spec the user can otherwise use.
-      return { adopted: false, reason: "write-failed", message: `mappings insert failed: ${error.message}` };
-    }
-  }
-
   return {
     adopted: true,
-    specId: specRow.id,
-    counts: { ...summarizeSpec(spec), mappings: mapRows.length },
-    skippedMappings,
+    specId: String(run.row.specId),
+    counts: { ...summarizeSpec(spec), mappings: run.row.mappingsAdded ?? 0 },
+    skippedMappings: mappings.skipped + (run.row.skippedMappings ?? 0),
   };
-}
-
-// ── R7c: apply a repo spec onto a project that ALREADY has one ────────────────
-
-export interface StoredCriterion {
-  text: string;
-  met?: boolean;
-  // deno-lint-ignore no-explicit-any
-  [k: string]: any;
-}
-
-/**
- * THE RULE THAT MAKES A SPEC LOAD SAFE: evidence survives.
- *
- * Rebuild a requirement's criteria from the repo's list, carrying `met` (and any
- * provenance R5 stamped alongside it) across for every criterion whose TEXT is
- * unchanged. Exact match only — the same binding rule R5a uses to tie a task-doc
- * checkbox to a criterion.
- *
- *  - repo added a criterion  → arrives unmet (nothing has proved it yet)
- *  - repo removed one        → it goes
- *  - repo EDITED one         → a different criterion, so it arrives unmet. The
- *                              evidence proved the old wording, not the new one;
- *                              silently carrying `met` across an edit would let a
- *                              reworded criterion inherit a tick it never earned.
- *
- * Without this, an AI's "test passed → criterion met" could be erased by the next
- * unrelated spec load, and the loop the owner asked for would not hold.
- */
-export function mergeCriteria(existing: unknown, repoTexts: string[]): { criteria: StoredCriterion[]; preserved: number } {
-  const prior = new Map<string, StoredCriterion>();
-  if (Array.isArray(existing)) {
-    for (const c of existing) {
-      if (typeof c === "string") prior.set(c, { text: c });
-      else if (c && typeof c === "object" && typeof (c as AnyRecord).text === "string") {
-        prior.set((c as AnyRecord).text, c as StoredCriterion);
-      }
-    }
-  }
-  let preserved = 0;
-  const criteria = repoTexts.map((text) => {
-    const before = prior.get(text);
-    if (before && before.met === true) preserved++;
-    // Keep the WHOLE prior object (met + any provenance R5 wrote), not just the flag.
-    return before ? { ...before, text } : { text, met: false };
-  });
-  return { criteria, preserved };
 }
 
 export type SpecApplyResult =
   | {
     applied: true;
     specId: string;
-    counts: { added: number; updated: number; criteriaPreserved: number; mappings: number };
+    counts: { added: number; updated: number; criteriaPreserved: number; mappings: number; mappingsRemoved: number };
     /** Requirements this project has that the repo's spec does not mention — reported, never deleted. */
     keptLocal: string[];
+    /** AD.2c: locked requirements git changed; not written. */
+    locked: string[];
     skippedMappings: number;
   }
-  | { applied: false; reason: "no-spec" | "hash-failed" | "no-owner" | "write-failed"; message?: string };
+  | { applied: false; reason: "no-spec" | "hash-failed" | "invalid-spec" | "write-failed"; message?: string };
 
 /**
  * Apply a repo spec onto an EXISTING project spec. Upsert, never wipe:
  *  - requirements present on both sides take the repo's authored fields and keep
- *    their evidence (see mergeCriteria);
+ *    their evidence;
  *  - requirements only the repo has are inserted;
  *  - requirements only WE have are LEFT ALONE and reported. Deleting a
  *    requirement cascades its mappings, test cases and validation results — that
  *    is not something a sync does behind one click. Removal stays the user's
  *    explicit act in the Spec view.
- *  - mappings are replaced only FOR THE REQUIREMENTS THE REPO MENTIONS: keeping a
- *    mapping the repo dropped would make the next push re-add it (ping-pong),
- *    while touching unrelated requirements' mappings would destroy local work.
+ *  - mappings follow `planSpecMappings` against `baseline`, git's spec at the
+ *    last sync: without one, nothing is removed.
  */
 // deno-lint-ignore no-explicit-any
 export async function applySpecAnchor(supabase: any, opts: {
   projectId: string;
   ownerId: string | null;
   spec: SpecAnchor;
+  baseline?: SpecAnchor | null;
   liveNodeIds?: Set<string> | null;
   sourceCommit?: string;
 }): Promise<SpecApplyResult> {
-  const { projectId, ownerId, spec, liveNodeIds = null, sourceCommit } = opts;
+  const { projectId, ownerId, spec, baseline = null, liveNodeIds = null, sourceCommit } = opts;
   if (!(await verifySpecHash(spec))) {
     return { applied: false, reason: "hash-failed", message: "spec.json hash does not match its content" };
   }
+  const problems = specLoadProblems(spec);
+  if (problems.length > 0) return { applied: false, reason: "invalid-spec", message: problems.join(" ") };
 
-  const { data: specRow } = await supabase
-    .from("project_specifications")
-    .select("id")
-    .eq("project_id", projectId)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (!specRow) return { applied: false, reason: "no-spec" };
-
-  const now = new Date().toISOString();
-  const provenance = {
-    origin: "spec-anchor-load",
-    ...(sourceCommit ? { commitSha: sourceCommit } : {}),
-    at: now,
-  };
-
-  await supabase
-    .from("project_specifications")
-    .update({
-      vision: spec.vision || "",
-      constraints: spec.constraints ?? [],
-      preferences: spec.preferences ?? {},
-      updated_at: now,
-    })
-    .eq("id", specRow.id);
-
-  const { data: existingRows } = await supabase
-    .from("specification_requirements")
-    .select("id, requirement_id, acceptance_criteria, metadata")
-    .eq("specification_id", specRow.id);
-  const existing = new Map(
-    ((existingRows ?? []) as AnyRecord[]).map((r) => [r.requirement_id as string, r]),
-  );
-
-  let added = 0;
-  let updated = 0;
-  let criteriaPreserved = 0;
-  const rowIdOf = new Map<string, string>();
-
-  for (const r of spec.requirements) {
-    const prior = existing.get(r.requirementId);
-    const merged = mergeCriteria(prior?.acceptance_criteria, r.acceptanceCriteria ?? []);
-    criteriaPreserved += merged.preserved;
-    const fields = {
-      name: r.name,
-      description: r.description ?? null,
-      category: r.category || "functional",
-      acceptance_criteria: merged.criteria,
-      updated_at: now,
-    };
-    if (prior) {
-      const { error } = await supabase
-        .from("specification_requirements")
-        .update({ ...fields, metadata: { ...(prior.metadata ?? {}), provenance } })
-        .eq("id", prior.id);
-      if (error) return { applied: false, reason: "write-failed", message: `update ${r.requirementId}: ${error.message}` };
-      rowIdOf.set(r.requirementId, prior.id);
-      updated++;
-    } else {
-      const { data, error } = await supabase
-        .from("specification_requirements")
-        .insert({
-          specification_id: specRow.id,
-          requirement_id: r.requirementId,
-          ...fields,
-          metadata: { provenance },
-        })
-        .select("id")
-        .maybeSingle();
-      if (error || !data) {
-        return { applied: false, reason: "write-failed", message: `insert ${r.requirementId}: ${error?.message ?? "no row"}` };
-      }
-      rowIdOf.set(r.requirementId, data.id);
-      added++;
-    }
+  const mappings = planSpecMappings(spec, baseline, liveNodeIds);
+  const run = await runSpecLoad(supabase, "apply", {
+    projectId, actorId: ownerId, spec, mappings, origin: "spec-anchor-load", sourceCommit,
+  });
+  if (!run.ok) return { applied: false, reason: "write-failed", message: run.message };
+  if (!run.row.ok) {
+    return run.row.reason === "no-spec"
+      ? { applied: false, reason: "no-spec" }
+      : { applied: false, reason: "write-failed", message: run.row.reason ?? "the load was refused" };
   }
-
-  const repoIds = new Set(spec.requirements.map((r) => r.requirementId));
-  const keptLocal = [...existing.keys()].filter((id) => !repoIds.has(id));
-
-  // Mappings: replace the set for the requirements the repo mentions, only.
-  const touchedRowIds = [...rowIdOf.values()];
-  let skippedMappings = 0;
-  const mapRows: Array<Record<string, unknown>> = [];
-  for (const m of spec.mappings) {
-    const rowId = rowIdOf.get(m.requirementId);
-    if (!rowId) { skippedMappings++; continue; }
-    if (liveNodeIds && !liveNodeIds.has(m.nodeId)) { skippedMappings++; continue; }
-    mapRows.push({
-      specification_id: specRow.id,
-      requirement_id: rowId,
-      node_id: m.nodeId,
-      mapping_type: m.mappingType || "implements",
-      ...(ownerId ? { created_by: ownerId } : {}),
-    });
-  }
-  if (touchedRowIds.length > 0) {
-    const { error: delErr } = await supabase
-      .from("specification_mappings")
-      .delete()
-      .eq("specification_id", specRow.id)
-      .in("requirement_id", touchedRowIds);
-    if (delErr) return { applied: false, reason: "write-failed", message: `mapping clear: ${delErr.message}` };
-  }
-  if (mapRows.length > 0) {
-    const { error } = await supabase.from("specification_mappings").insert(mapRows);
-    if (error) return { applied: false, reason: "write-failed", message: `mapping insert: ${error.message}` };
-  }
-
+  const r = run.row;
   return {
     applied: true,
-    specId: specRow.id,
-    counts: { added, updated, criteriaPreserved, mappings: mapRows.length },
-    keptLocal,
-    skippedMappings,
+    specId: String(r.specId),
+    counts: {
+      added: r.added ?? 0,
+      updated: r.updated ?? 0,
+      criteriaPreserved: r.criteriaPreserved ?? 0,
+      mappings: r.mappingsAdded ?? 0,
+      mappingsRemoved: r.mappingsRemoved ?? 0,
+    },
+    keptLocal: r.keptLocal ?? [],
+    locked: r.locked ?? [],
+    skippedMappings: mappings.skipped + (r.skippedMappings ?? 0),
   };
 }

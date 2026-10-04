@@ -70,7 +70,7 @@ function buildArchitectureSummary(data: ProjectExportData): string[] {
 function buildTechStackSection(spec: ProjectExportSpecification): string[] {
   const p = spec.preferences;
   const hasPrefs = p.languages?.length || p.frameworks?.length || p.databases?.length || p.deploymentTarget || p.architecturePattern;
-  const hasConstraints = spec.constraints.length > 0;
+  const hasConstraints = (spec.constraints?.length ?? 0) > 0;
   if (!hasPrefs && !hasConstraints) return [];
 
   const lines: string[] = [];
@@ -103,7 +103,7 @@ function buildTechStackSection(spec: ProjectExportSpecification): string[] {
   if (hasConstraints) {
     lines.push('### Constraints');
     lines.push('');
-    for (const c of spec.constraints) {
+    for (const c of spec.constraints ?? []) {
       lines.push(`- **${formatCategory(c.type)}:** ${c.description}`);
     }
     lines.push('');

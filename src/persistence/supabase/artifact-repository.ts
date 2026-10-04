@@ -12,7 +12,6 @@ interface ArtifactRow {
   content_text: string | null;
   content_hash: string | null;
   language: string | null;
-  status: string | null;
   description: string | null;
   created_at: string;
   updated_at: string | null;
@@ -20,10 +19,11 @@ interface ArtifactRow {
   type: string | null;
   uri: string | null;
   content: unknown | null;
-  storage_path: string | null;
 }
 
-const SELECT_COLUMNS = 'id, project_id, kind, node_id, branch_id, path, content_text, content_hash, language, status, description, created_at, updated_at, metadata, type, uri, content, storage_path';
+// artifacts has no status column (dropped for prod parity, sb2 2026-07-13)
+// and storage_path is being retired; neither may appear in a select.
+const SELECT_COLUMNS = 'id, project_id, kind, node_id, branch_id, path, content_text, content_hash, language, description, created_at, updated_at, metadata, type, uri, content';
 
 function rowToArtifact(row: ArtifactRow): PersistedArtifact {
   return {
@@ -36,7 +36,7 @@ function rowToArtifact(row: ArtifactRow): PersistedArtifact {
     contentText: row.content_text ?? undefined,
     contentHash: row.content_hash ?? undefined,
     language: row.language ?? undefined,
-    status: row.status ?? 'draft',
+    status: 'draft',
     description: row.description ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at ?? row.created_at,
@@ -44,7 +44,6 @@ function rowToArtifact(row: ArtifactRow): PersistedArtifact {
     type: row.type ?? undefined,
     content: row.content ?? undefined,
     uri: row.uri ?? undefined,
-    storagePath: row.storage_path ?? undefined,
   };
 }
 
@@ -63,7 +62,6 @@ export function createSupabaseArtifactRepository(client: SupabaseClient): Artifa
           content_text: artifact.contentText ?? null,
           content_hash: artifact.contentHash ?? null,
           language: artifact.language ?? null,
-          status: artifact.status ?? 'draft',
           description: artifact.description ?? null,
           metadata: artifact.metadata ?? {},
           type: artifact.kind,
@@ -231,7 +229,6 @@ export function createSupabaseArtifactRepository(client: SupabaseClient): Artifa
       if (updates.contentText !== undefined) updateData.content_text = updates.contentText;
       if (updates.contentHash !== undefined) updateData.content_hash = updates.contentHash;
       if (updates.language !== undefined) updateData.language = updates.language;
-      if (updates.status !== undefined) updateData.status = updates.status;
       if (updates.description !== undefined) updateData.description = updates.description;
       if (updates.metadata !== undefined) updateData.metadata = updates.metadata;
 

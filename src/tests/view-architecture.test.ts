@@ -6,9 +6,10 @@ import {
   mapNodeToRFNode,
   mapGraphToRFNodes,
   deriveRFState,
-  type CanvasViewMode,
   type ArchitectureLayerMode,
 } from '../ui/adapters/graph-to-reactflow.js';
+// Type-only: erased at compile, so the node test env never loads the component.
+import type { CanvasViewMode } from '../ui/components/common/ViewToggle.js';
 
 const emptyGraph: Graph = {
   id: '00000000-0000-0000-0000-000000000000',
@@ -53,10 +54,10 @@ function makeContainerGraph(): Graph {
 }
 
 describe('View Architecture - Type Safety', () => {
-  it('CanvasViewMode only allows decomposition and architecture', () => {
-    const validModes: CanvasViewMode[] = ['decomposition', 'architecture'];
+  it('CanvasViewMode only allows ideation and architecture (the V3 two-view shell)', () => {
+    const validModes: CanvasViewMode[] = ['ideation', 'architecture'];
     expect(validModes).toHaveLength(2);
-    expect(validModes).toContain('decomposition');
+    expect(validModes).toContain('ideation');
     expect(validModes).toContain('architecture');
   });
 
@@ -183,22 +184,25 @@ describe('View Architecture - Transition Completeness', () => {
 });
 
 describe('View Architecture - Source File Integrity', () => {
-  it('ViewToggle exports only decomposition and architecture modes', () => {
+  it('ViewToggle exports only ideation and architecture modes', () => {
     const source = readFileSync(
       resolve(__dirname, '../ui/components/common/ViewToggle.tsx'),
       'utf-8'
     );
-    expect(source).toContain("'decomposition' | 'architecture'");
+    expect(source).toContain("'ideation' | 'architecture'");
+    expect(source).not.toContain("'decomposition'");
+    expect(source).not.toContain("'specification'");
     expect(source).not.toContain("'nodes'");
     expect(source).not.toContain("'deployment'");
   });
 
-  it('graph-to-reactflow adapter uses ArchitectureLayerMode not old CanvasViewMode', () => {
+  it('graph-to-reactflow adapter serves the architecture canvas only — layer mode, no view mode', () => {
     const source = readFileSync(
       resolve(__dirname, '../ui/adapters/graph-to-reactflow.ts'),
       'utf-8'
     );
     expect(source).toContain("ArchitectureLayerMode = 'flat' | 'nested'");
+    expect(source).not.toContain("CanvasViewMode =");
     expect(source).not.toMatch(/viewMode.*=.*'deployment'/);
     expect(source).not.toMatch(/viewMode.*=.*'nodes'/);
   });
@@ -229,12 +233,14 @@ describe('View Architecture - Source File Integrity', () => {
     expect(source).not.toContain('DeploymentCanvas');
   });
 
-  it('GraphEditor uses two-state view mode', () => {
+  it('GraphEditor uses the two-state V3 view mode, ideation first', () => {
     const source = readFileSync(
       resolve(__dirname, '../ui/components/GraphEditor.tsx'),
       'utf-8'
     );
-    expect(source).toContain("'decomposition' | 'architecture'");
+    expect(source).toContain("useState<'ideation' | 'architecture'>('ideation')");
+    expect(source).not.toContain("'decomposition'");
+    expect(source).not.toContain("'specification'");
     expect(source).not.toMatch(/useState.*'nodes'/);
   });
 });

@@ -67,7 +67,7 @@ cloud platform, a logical boundary. Every node carries two separate facts:
 
 - **Role** — what it *is* architecturally (`backend-service`, `database`,
   `frontend-app`, `message-broker`). The role determines the doctrine your AI
-  receives, the ports the node exposes, and how it renders.
+  receives and how it renders.
 - **Technology** — what it is *built with* (PostgreSQL, FastAPI, Kotlin). The
   technology carries curated guidance: best practices, anti-patterns, security
   notes, setup checklists, and pointers to live documentation.
@@ -95,11 +95,6 @@ The contract, not the counterparty's source code, is what your AI implements
 against. When two components must agree, they agree on the contract — so the
 interface exists in one place instead of being re-inferred on both sides and
 drifting apart silently.
-
-### Port
-
-The named attachment point where an edge meets a node — inbound or outbound. A
-port takes its meaning from the contract on its connected edge.
 
 ### Artifact
 

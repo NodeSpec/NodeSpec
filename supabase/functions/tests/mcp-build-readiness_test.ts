@@ -8,7 +8,7 @@
 // dangling schemaRefs surface as BROKEN, in the doc and the readiness report alike.
 import { handleGetBuildReadiness } from '../mcp-server/tools/tasks.ts';
 import { generateTaskDocument } from '../_shared/task-document-generator.ts';
-import { FakeSupabase, assert, assertEquals, completeRole } from './helpers.ts';
+import { FakeSupabase, assert, assertEquals, completeRole, scriptOwnerPlan } from './helpers.ts';
 
 const PROJECT = { id: '11111111-1111-4111-8111-111111111111', name: 'Bench' };
 const BRANCH = '22222222-2222-4222-8222-222222222222';
@@ -321,4 +321,75 @@ Deno.test('draftInputs: counterparty apiEndpoints honor that node\'s metadata.co
   // deno-lint-ignore no-explicit-any
   const blocker = (worker.blockers as any[]).find((b) => b.kind === 'schema');
   assertEquals(blocker.draftInputs.apiEndpoints, ['GET /query'], 'selection filters exactly like the packet\'s API Reference');
+});
+
+// ── 8.3: the project-level advisory row ────────────────────────────────────
+Deno.test('get_build_readiness (8.3): pending candidates on the branch surface as the CANDIDATES OPEN advisory row — counted, named, remediated, never a blocker', async () => {
+  const sb = new FakeSupabase();
+  script(sb, benchGraph());
+  sb.script('requirement_candidates', 'select', { count: 3, data: null, error: null });
+  const r = await handleGetBuildReadiness(sb as never, READ_AUTH, { project_id: PROJECT.id, branch_id: BRANCH });
+  assertEquals(r.success, true);
+  // deno-lint-ignore no-explicit-any
+  const data = r.data as any;
+  assertEquals(data.candidatesOpen, 3);
+  assertEquals(data.projectAdvisories, [{ kind: 'candidates', count: 3, detail: '3 outcomes under Work have never been made a requirement' }]);
+  assert(String(data.remediations.candidates).includes('get_outcome_board'), 'the resolution names the board and the promotion lane');
+  assert(String(data.message).includes('3 outcomes under Work have never been made a requirement (advisory)'), data.message);
+  const call = sb.callsTo('requirement_candidates', 'select')[0];
+  assert(call.filters.some((f) => f.method === 'eq' && f.args[0] === 'status' && f.args[1] === 'pending'), 'only pending candidates count');
+  assert(call.filters.some((f) => f.method === 'eq' && f.args[0] === 'branch_id' && f.args[1] === BRANCH), 'scoped to the branch');
+  // no node gained a blocker for it
+  for (const n of data.nodes) assert(!('candidates' in (n.blockerCounts ?? {})), 'never a blocker');
+
+  const none = new FakeSupabase();
+  script(none, benchGraph());
+  none.script('requirement_candidates', 'select', { count: 0, data: null, error: null });
+  const r2 = await handleGetBuildReadiness(none as never, READ_AUTH, { project_id: PROJECT.id, branch_id: BRANCH });
+  // deno-lint-ignore no-explicit-any
+  const d2 = r2.data as any;
+  assertEquals(d2.candidatesOpen, 0);
+  assertEquals(d2.projectAdvisories, []);
+  assert(!('candidates' in d2.remediations), 'no row, no remediation');
+});
+
+// R.2b/R.2c (owner 2026-09-24): a check the architecture breaks now is a
+// constraint ADVISORY on the nodes it touches (never a blocker: a refusing
+// check stops only the proposal that adds a break); a whole-project read
+// carries constraintSignals, evidence from this project with an ask.
+Deno.test('get_build_readiness (R.2b): a standing break of a check is an advisory on both nodes; a check waived again and again is a signal', async () => {
+  const C = '88888888-8888-4888-8888-888888888888';
+  const check = {
+    id: C, ctype: 'architecture', title: 'Services talk through the queue', description: 'No service calls another directly', rationale: null, workflow_id: null, mark: null,
+    kind: 'check', scope_kind: 'project', scope_value: null, check_spec: { predicate: 'no_calls_between_roles', severity: 'refuse', params: { from: 'backend-service', to: 'backend-service' } },
+    waivers: [], stats: { fired: 7, violated: 4, waived: 3, lastFiredAt: new Date().toISOString() }, created_at: new Date().toISOString(),
+  };
+  const sb = new FakeSupabase();
+  script(sb, benchGraph());
+  scriptOwnerPlan(sb); // AC: the owner's plan carries constraints
+  sb.script('project_constraints', 'select', { data: [check], error: null }); // one read: the packets' constraints and the checks
+  const r = await handleGetBuildReadiness(sb as never, READ_AUTH, { project_id: PROJECT.id, branch_id: BRANCH, detail: 'full' });
+  assertEquals(r.success, true, JSON.stringify(r.error));
+  const worker = entry(r.data, 'Heavy Job Worker');
+  const gap = worker.advisories.find((g: { kind: string }) => g.kind === 'constraint');
+  assertEquals(gap.detail, 'Breaks c:88888888 "Services talk through the queue" (refuses): Heavy Job Worker connects to Primary Database directly.');
+  assertEquals(gap.relatedNodeIds, [N_DB]);
+  assert(entry(r.data, 'Primary Database').advisories.some((g: { kind: string }) => g.kind === 'constraint'), 'both ends carry it');
+  assert(!worker.blockers.some((g: { kind: string }) => g.kind === 'constraint'), 'never a blocker');
+  assert(String(r.data.remediations.constraint).includes('addWaiver'), 'the remediation names the waiver');
+  const sig = r.data.constraintSignals.find((s: { signal: string }) => s.signal === 'often_waived');
+  assertEquals([sig.ref, sig.title, sig.evidence], ['c:88888888', 'Services talk through the queue', 'Waived 3 times.']);
+  assert(/Ask the user/.test(sig.ask), sig.ask);
+  assertEquals(sb.callsTo('project_constraints', 'select').length, 1);
+
+  // AC: the owner back on Community: the same rows are not read, and nothing names a constraint
+  const down = new FakeSupabase();
+  script(down, benchGraph());
+  scriptOwnerPlan(down, 'community');
+  down.script('project_constraints', 'select', { data: [check], error: null });
+  const d = await handleGetBuildReadiness(down as never, READ_AUTH, { project_id: PROJECT.id, branch_id: BRANCH, detail: 'full' });
+  assertEquals(d.success, true, JSON.stringify(d.error));
+  assertEquals(down.callsTo('project_constraints').length, 0);
+  assert(!('constraintSignals' in d.data) || d.data.constraintSignals.length === 0, 'no signal');
+  assert(!JSON.stringify(d.data).toLowerCase().includes('constraint'), 'nothing names a constraint after a downgrade');
 });

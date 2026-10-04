@@ -1,10 +1,9 @@
 import { memo, useState } from 'react';
-import { Handle, Position } from '@xyflow/react';
 import type { RFNodeData } from '../../adapters/graph-to-reactflow.js';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { NodeIcon } from '../common/index.js';
 import { getTechnologyLogo, getTechnologyColors, getTechnologyDisplayName } from '../../utils/technology-logo-map.js';
-import { FallbackHandles } from './FallbackHandles.js';
+import { LeafHandles } from './LeafHandles.js';
 import { NodeActionToolbar, useNodeToolbarHover } from './NodeActionToolbar.js';
 import { CatalogService } from '../../services/CatalogService.js';
 
@@ -27,9 +26,6 @@ function CompactIconNodeComponent({ data, selected }: CompactIconNodeProps) {
   const artifactCount = data.artifactCount || 0;
   const hasArtifacts = artifactCount > 0;
   const HIGHLIGHT_COLOR = '#22c55e';
-
-  const inputPorts = data.ports.filter(p => p.direction === 'in');
-  const outputPorts = data.ports.filter(p => p.direction === 'out');
 
   const tooltipLabel = techName ? `${data.label} (${techName})` : data.label;
 
@@ -69,44 +65,18 @@ function CompactIconNodeComponent({ data, selected }: CompactIconNodeProps) {
         }}
         title={tooltipLabel}
       >
-        <FallbackHandles showTarget={inputPorts.length === 0} showSource={outputPorts.length === 0} />
-        {inputPorts.map((port) => (
-          <Handle
-            key={port.id}
-            type="target"
-            position={Position.Left}
-            id={port.id}
-            style={{
-              width: '8px',
-              height: '8px',
-              backgroundColor: c.surface,
-              border: `2px solid ${colors.primary}`,
-              top: '50%',
-              left: '-4px',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-            }}
-            title={port.name}
-          />
-        ))}
-
-        {outputPorts.map((port) => (
-          <Handle
-            key={port.id}
-            type="source"
-            position={Position.Right}
-            id={port.id}
-            style={{
-              width: '8px',
-              height: '8px',
-              backgroundColor: c.surface,
-              border: `2px solid ${colors.primary}`,
-              top: '50%',
-              right: '-4px',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-            }}
-            title={port.name}
-          />
-        ))}
+        <LeafHandles
+          style={{
+            width: '8px',
+            height: '8px',
+            backgroundColor: c.surface,
+            border: `2px solid ${colors.primary}`,
+            top: '50%',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+          }}
+          targetStyle={{ left: '-4px' }}
+          sourceStyle={{ right: '-4px' }}
+        />
 
         {iconSrc ? (
           <img

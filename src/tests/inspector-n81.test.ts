@@ -18,9 +18,9 @@ describe('N8.1 inspector minimal', () => {
     expect(src).not.toContain("updates: { technology:");
   });
 
-  it('still renders the bound technology read-only with the nature line', () => {
-    expect(src).toContain('deriveNodeNature(roleForTech, boundTech).line');
+  it('still renders the bound technology read-only; AG.3 took the nature line out', () => {
     expect(src).toContain('(custom)');
+    expect(src).not.toContain('deriveNodeNature');
   });
 
   it('configuration is a per-node CHOICE: AI decides vs I’ll specify (N8.1b, owner-corrected)', () => {

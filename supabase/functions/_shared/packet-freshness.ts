@@ -23,7 +23,10 @@
 
 import { loadCatalogs } from "./catalog-loader.ts";
 import { liveNodeIdSet, filterMappingsToLiveNodes } from "./mapping-liveness.ts";
-import { loadTaskStateByNode, reconcileTaskItemOrphans } from "./task-deltas.ts";
+import { loadTaskStateByNode, preserveAddedTasksSection, reconcileTaskItemOrphans } from "./task-deltas.ts";
+import { loadNodeConstraints, type NodeConstraint } from "./node-constraints.ts";
+import { loadServedVision, servedVisionText, type ServedVision } from "./served-vision.ts";
+import { recordFingerprint } from "./node-memory.ts";
 import {
   generateTaskDocument,
   computeTaskContextFingerprint,
@@ -58,6 +61,9 @@ export interface PacketRefreshResult {
   testPlansRefreshedPaths: string[];
   /** Test-plan artifacts without a generator fingerprint (user-authored) — never touched. */
   testPlansSkippedUnmanaged: number;
+  /** R.1b: with `checkOnly`, the managed task docs whose fingerprint moved
+   *  (the next push regenerates them); nothing is regenerated or written. */
+  stalePaths?: string[];
   error?: string;
 }
 
@@ -73,15 +79,21 @@ const EMPTY: PacketRefreshResult = {
  * strictly no worse than before C1).
  */
 // deno-lint-ignore no-explicit-any
-export async function refreshTaskPackets(supabase: any, projectId: string, graph: AnyRecord): Promise<PacketRefreshResult> {
+export async function refreshTaskPackets(
+  supabase: any, projectId: string, graph: AnyRecord, branchId: string | null = null,
+  opts?: { checkOnly?: boolean; nodeIds?: string[] },
+): Promise<PacketRefreshResult> {
   try {
     const artifacts = (graph?.artifacts ?? {}) as Record<string, AnyRecord>;
     const taskArtifacts = Object.values(artifacts).filter((a) => a?.kind === "task");
     const testPlanArtifacts = Object.values(artifacts).filter((a) => a?.kind === "test-plan");
     if (taskArtifacts.length === 0 && testPlanArtifacts.length === 0) return { ...EMPTY };
 
-    const managed = taskArtifacts.filter((a) => a?.metadata?.taskContextFingerprint?.fingerprint);
-    const skippedUnmanaged = taskArtifacts.length - managed.length;
+    // R.1b: a check reads only the nodes it names and writes nothing.
+    const onlyNodes = opts?.nodeIds ? new Set(opts.nodeIds) : null;
+    const fingerprinted = taskArtifacts.filter((a) => a?.metadata?.taskContextFingerprint?.fingerprint);
+    const skippedUnmanaged = taskArtifacts.length - fingerprinted.length;
+    const managed = onlyNodes ? fingerprinted.filter((a) => onlyNodes.has(String(a.nodeId))) : fingerprinted;
     // C4 step 2: same provenance guard for plans — only fingerprint-managed ones refresh.
     const managedPlans = testPlanArtifacts.filter((a) => a?.metadata?.testContextFingerprint?.fingerprint);
     const testPlansSkippedUnmanaged = testPlanArtifacts.length - managedPlans.length;
@@ -89,7 +101,7 @@ export async function refreshTaskPackets(supabase: any, projectId: string, graph
       return { ...EMPTY, skippedUnmanaged, testPlansSkippedUnmanaged };
     }
 
-    const catalogs = await loadCatalogs(supabase);
+    const catalogs = await loadCatalogs(supabase, { projectIds: [projectId] });
 
     // Spec plane: same load shape the generator's original caller used — requirements grouped
     // per node plus the REQ -> all-mapped-nodes map for cross-node attribution. C4 also keeps
@@ -99,6 +111,8 @@ export async function refreshTaskPackets(supabase: any, projectId: string, graph
     const requirementsByNode: Record<string, AnyRecord[]> = {};
     const requirementNodeMap: Record<string, string[]> = {};
     const requirementsByHumanId: Record<string, AnyRecord> = {};
+    // AA.6: node id → requirement ROW uuids, for the served vision.
+    const requirementRowsByNode = new Map<string, string[]>();
     const { data: spec } = await supabase
       .from("project_specifications")
       .select("id, vision")
@@ -132,6 +146,7 @@ export async function refreshTaskPackets(supabase: any, projectId: string, graph
           if (!requirementNodeMap[humanId]) requirementNodeMap[humanId] = [];
           if (!requirementNodeMap[humanId].includes(m.node_id)) requirementNodeMap[humanId].push(m.node_id);
           if (!requirementsByNode[m.node_id]) requirementsByNode[m.node_id] = [];
+          requirementRowsByNode.set(m.node_id, [...(requirementRowsByNode.get(m.node_id) ?? []), String(req.id)]);
           const reqForGen = {
             requirementId: humanId,
             name: String(req.name ?? ""),
@@ -160,14 +175,30 @@ export async function refreshTaskPackets(supabase: any, projectId: string, graph
       taskStateByNode = await loadTaskStateByNode(supabase, projectId);
     } catch { /* refresh proceeds stateless */ }
 
-    for (const artifact of managed) {
+    // AA.0 (R.2a): the constraints each packet carries, in one batch. When they
+    // cannot be read the task-doc pass is skipped rather than run without
+    // them: a refresh would drop the block and tell the agent there are none.
+    let constraintsByNode: Map<string, NodeConstraint[]> | null = null;
+    try {
+      constraintsByNode = await loadNodeConstraints(supabase, projectId, managed.map((a) => String(a.nodeId)), undefined, graph);
+    } catch { constraintsByNode = null; }
+    // AA.6: and the vision sentences each packet carries, the same way.
+    let servedByNode: Map<string, ServedVision> | null = null;
+    if (constraintsByNode) {
+      try {
+        const rows = new Map(managed.map((a) => [String(a.nodeId), requirementRowsByNode.get(String(a.nodeId)) ?? []]));
+        servedByNode = await loadServedVision(supabase, projectId, branchId, vision, rows);
+      } catch { servedByNode = null; }
+    }
+
+    for (const artifact of constraintsByNode && servedByNode ? managed : []) {
       const node = graph.nodes?.[artifact.nodeId];
       if (!node) continue; // orphaned doc; mapping-liveness rules own that cleanup
 
       const nodeForGen = {
         id: node.id, label: node.label, type: node.type,
         technology: node.technology, parentId: node.parentId,
-        ports: node.ports, metadata: node.metadata,
+        metadata: node.metadata,
       };
       const reqs = requirementsByNode[node.id] ?? [];
 
@@ -175,29 +206,41 @@ export async function refreshTaskPackets(supabase: any, projectId: string, graph
       // criteria (incl. met), so editing a requirement — or accepting a completion tick —
       // marks the packet stale. Ids alone were blind to content edits (fixed 2026-07-21).
       // deno-lint-ignore no-explicit-any
-      const fp = computeTaskContextFingerprint(nodeForGen as any, graph as any, reqs as any, vision, catalogs as any);
+      const constraints = constraintsByNode!.get(String(node.id));
+      const served = servedByNode!.get(String(node.id));
+      const fp = computeTaskContextFingerprint(nodeForGen as any, graph as any, reqs as any, servedVisionText(served), catalogs as any, constraints);
       result.checked++;
       if (fp.fingerprint === artifact.metadata.taskContextFingerprint.fingerprint) continue;
+      if (opts?.checkOnly) {
+        result.stalePaths = [...(result.stalePaths ?? []), String(artifact.path ?? "")];
+        continue;
+      }
 
       // deno-lint-ignore no-explicit-any
       const regeneratedDoc = generateTaskDocument({
         node: nodeForGen, graph, catalogs, requirements: reqs,
-        projectVision: vision, requirementNodeMap,
+        servedVision: served, requirementNodeMap,
         taskState: taskStateByNode.get(node.id),
+        constraints,
         // deno-lint-ignore no-explicit-any
       } as any);
-      // A4: orphan-reconcile against the keys this refresh emits (flag, never
-      // delete). Best-effort — must never fail the refresh.
-      try {
-        await reconcileTaskItemOrphans(supabase, projectId, node.id, regeneratedDoc);
-      } catch { /* non-fatal */ }
       // N5.17: the AI-authored Implementation Context section survives regeneration
       // verbatim; the fingerprint flip that got us here flags it REVIEW NEEDED (once).
-      const content = preserveImplementationContextSection(
-        regeneratedDoc, String(artifact.content ?? ""), { flagReview: true },
+      // Y: the person's Added Tasks section survives the same way.
+      const content = preserveAddedTasksSection(
+        preserveImplementationContextSection(
+          regeneratedDoc, String(artifact.content ?? ""), { flagReview: true },
+        ),
+        String(artifact.content ?? ""),
       );
+      // A4: orphan-reconcile against the keys this refresh emits (flag, never
+      // delete), Added Tasks included. Best-effort — must never fail the refresh.
+      try {
+        await reconcileTaskItemOrphans(supabase, projectId, node.id, content);
+      } catch { /* non-fatal */ }
 
-      artifact.metadata = { ...artifact.metadata, taskContextFingerprint: fp, stale: false };
+      // AA.7: the history grows by the flip that got us here.
+      artifact.metadata = { ...recordFingerprint(artifact.metadata, fp), stale: false };
       if (content !== artifact.content) {
         artifact.content = content;
         artifact.updatedAt = now;
@@ -205,6 +248,8 @@ export async function refreshTaskPackets(supabase: any, projectId: string, graph
         result.refreshedPaths.push(String(artifact.path ?? ""));
       }
     }
+
+    if (opts?.checkOnly) return result;
 
     // ── C4 step 2: the test-plan pass ─────────────────────────────────────────────
     // Requirement-scoped (implementation is node-scoped, acceptance is requirement-

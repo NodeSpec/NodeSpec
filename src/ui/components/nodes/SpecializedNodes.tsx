@@ -7,13 +7,13 @@ import { EnhancedDatabaseNode } from './EnhancedDatabaseNode.js';
 import { EventBusNode } from './EventBusNode.js';
 import { IconNode } from './IconNode.js';
 import { CompactIconNode } from './CompactIconNode.js';
-import { ClassNode, FunctionNode, MethodNode, InterfaceNode, ModuleNode } from './CodeEntityNodes.js';
 import { RequirementNode } from './RequirementNode.js';
 import { AddSectionButtonNode } from './AddSectionButtonNode.js';
 import { LogicalBoundaryNode } from './LogicalBoundaryNode.js';
 import { LibraryNode } from './LibraryNode.js';
 import { ArchitectureExplanationNode } from './ArchitectureExplanationNode.js';
 import { TestNode } from './TestNode.js';
+import { TableGroupNode } from './TableGroupNode.js';
 import { DeploymentWrapperNode } from './DeploymentWrapperNode.js';
 
 interface SpecializedNodeProps {
@@ -88,11 +88,6 @@ export const nodeTypes = {
   library: LibraryNode,
   icon: SpecializedIconNode,
   compactIcon: CompactIconNode,
-  classNode: ClassNode,
-  functionNode: FunctionNode,
-  methodNode: MethodNode,
-  interfaceNode: InterfaceNode,
-  moduleNode: ModuleNode,
   requirement: RequirementNode,
   'requirements.functional': RequirementNode,
   'requirements.non-functional': RequirementNode,
@@ -103,4 +98,6 @@ export const nodeTypes = {
   architectureExplanation: ArchitectureExplanationNode,
   deploymentWrapper: DeploymentWrapperNode,
   testCase: TestNode,
+  // AA.3b: a group of an exploded database.
+  tableGroup: TableGroupNode,
 } as const;

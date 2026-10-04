@@ -1,6 +1,6 @@
 import type { Graph } from '@nodespec/core/types.js';
 import type { CatalogResolver } from '../../persistence/supabase/catalog-repository.js';
-import type { SpecGraphRFNode, SpecGraphRFEdge, ArchitectureLayerMode } from '../adapters/graph-to-reactflow.js';
+import { isExplodedNode, isPartNode, layoutParts, partsAreShown, type SpecGraphRFNode, type SpecGraphRFEdge, type ArchitectureLayerMode } from '../adapters/graph-to-reactflow.js';
 import { isContainerType, isLogicalBoundaryType } from '../adapters/rf-visual-type-resolver.js';
 import { computeAllContainerLayouts, layoutContainerChildren } from './container-child-layout.js';
 import { calculateAutoLayout } from './auto-layout.js';
@@ -106,6 +106,20 @@ function applyLogicalBoundaryChildLayouts(
   }
 }
 
+/** AB.7: the parts of a node opened in the functional view sit inside it. */
+function applyOpenedPartLayouts(
+  graph: Graph,
+  catalog: CatalogResolver | null,
+  positions: Map<string, CachedPosition>,
+): void {
+  for (const node of Object.values(graph.nodes)) {
+    if (!partsAreShown(node) || !isExplodedNode(node, graph, catalog)) continue;
+    for (const pos of layoutParts(node.id, graph, catalog).positions) {
+      positions.set(pos.id, { x: pos.x, y: pos.y });
+    }
+  }
+}
+
 export function planNestedToFlat(
   graph: Graph,
   catalog: CatalogResolver | null,
@@ -132,6 +146,8 @@ export function planNestedToFlat(
     }
   } else {
     const visibleFlatNodes = currentNodes.filter(n => {
+      // AB.7: a part sits inside its node, never on its own.
+      if (graph.nodes[n.id] && isPartNode(graph.nodes[n.id], graph, catalog)) return false;
       if (isLogicalBoundaryType(n.data.nodeType, catalog)) return true;
       return !isContainerType(n.data.nodeType, catalog);
     });
@@ -156,6 +172,7 @@ export function planNestedToFlat(
   }
 
   applyLogicalBoundaryChildLayouts(graph, catalog, targetPositions);
+  applyOpenedPartLayouts(graph, catalog, targetPositions);
 
   return {
     targetMode: 'flat',

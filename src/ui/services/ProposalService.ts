@@ -2,6 +2,9 @@ import type { AIProposal, ProposalStatus, ProposalPatch } from '@nodespec/core/a
 import type { PersistenceService } from './PersistenceService.js';
 import { getContainerTypeById } from '@nodespec/core/container-types.js';
 import { normalizePatch } from '@nodespec/core/patch-engine.js';
+import { withoutPorts } from '@nodespec/core/without-ports.js';
+import { conflictsSince, describeConflicts } from '@nodespec/core/patch-targets.js';
+import { acceptLeaseRefusal, leasesFromRows, type LeaseRowLite } from '../components/ideation/node-leases.js';
 import { resolveContractFields } from '@nodespec/core/interaction-resolution.js';
 
 const STOP_WORDS = new Set([
@@ -139,6 +142,25 @@ export class ProposalService {
       throw new Error(result.error.message);
     }
     return result.data;
+  }
+
+  /** AE.12: a rejection in the canvas carries the person's reason. Stored as
+   *  metadata.resolveNote, the key the server's resolve_proposal writes and
+   *  get_proposal_status serves as reviewNote, with who decided (app). */
+  async rejectProposal(proposalId: string, reason: string): Promise<AIProposal> {
+    const note = reason.trim();
+    if (!note) throw new Error('A rejection needs a reason: the agent reads it.');
+    const client = this.persistence.getSupabaseClient();
+    const { data } = await client
+      .from('ai_proposals')
+      .select('metadata')
+      .eq('id', proposalId)
+      .maybeSingle();
+    await client
+      .from('ai_proposals')
+      .update({ metadata: { ...((data?.metadata as Record<string, unknown>) ?? {}), resolveNote: note, resolvedBy: 'app' } })
+      .eq('id', proposalId);
+    return this.updateProposalStatus(proposalId, 'rejected');
   }
 
   /** UX-1.1a: audit stamp for auto-approved proposals — merged into metadata
@@ -403,7 +425,6 @@ export class ProposalService {
             generatedByAI: true,
             specificationId,
           },
-          ports: node.ports || [],
         },
       });
 
@@ -554,8 +575,6 @@ export class ProposalService {
             source: edge.source,
             target: edge.target,
             contractId: edge.contractId,
-            sourcePortId: edge.sourcePortId,
-            targetPortId: edge.targetPortId,
             metadata: edge.metadata || {},
           },
         });
@@ -749,6 +768,76 @@ export class ProposalService {
       throw new Error('No patches to apply');
     }
 
+    // V3 2.1 (2026-09-19): the second check of base_sequence. A patch already
+    // marked conflicted blocks the accept until the person rejects it (edits
+    // it out) or the agent re-proposes; and the read is checked again now,
+    // because the branch may have moved since the proposal was filed. Never
+    // partial: one conflict and nothing is applied.
+    const alreadyConflicted = proposal.patches.filter(p => p.status === 'conflicted');
+    if (alreadyConflicted.length > 0) {
+      throw new Error(`${alreadyConflicted.length} patch(es) in this proposal conflict with later changes on the branch. Reject those patches to edit them out, or ask the agent to re-propose against the current head.`);
+    }
+    const baseSequence = typeof proposal.metadata?.baseSequence === 'number' ? proposal.metadata.baseSequence : null;
+    if (baseSequence !== null) {
+      const { PatchService: PatchServiceForCheck } = await import('./PatchService.js');
+      const later = await new PatchServiceForCheck(this.persistence).loadPatches(proposal.sourceBranchId, { sinceSequence: baseSequence });
+      const conflicts = conflictsSince(approvedPatches, later.map(l => ({
+        sequence: l.sequence,
+        type: l.payload.type,
+        payload: l.payload.payload,
+        actorType: l.payload.metadata?.actorType ?? l.actorType ?? null,
+        summary: l.payload.metadata?.summary ?? l.summary ?? null,
+      })));
+      if (conflicts.length > 0) {
+        const conflictedIds = new Set(conflicts.map(c => c.patchId).filter((x): x is string => x !== null));
+        const marked = proposal.patches.map(p => conflictedIds.has(p.patch.metadata.id)
+          ? { ...p, status: 'conflicted' as const, conflictReason: describeConflicts(conflicts.filter(c => c.patchId === p.patch.metadata.id)) }
+          : p);
+        const repo = this.persistence.getProposalRepository();
+        await repo.updatePatches(proposalId, marked);
+        try {
+          const client = this.persistence.getSupabaseClient();
+          await client.from('ai_proposals').update({ metadata: { ...(proposal.metadata ?? {}), conflicts, headSequence: later.length > 0 ? later[later.length - 1].sequence : baseSequence } }).eq('id', proposalId);
+        } catch { /* the patch statuses carry the verdict; the metadata copy is for get_proposal_status */ }
+        throw new Error(`Stale read: ${describeConflicts(conflicts)} Nothing was applied. Reject the conflicted patch(es) to edit them out, or ask the agent to re-propose against the current head.`);
+      }
+    }
+
+    // AA.5 (owner 2026-09-23): a leased node is locked. A proposal that changes
+    // a node someone other than its author (or the person accepting) holds a
+    // fresh lease on is refused here, before anything is applied. The author
+    // is the credential propose_patches recorded on the proposal.
+    {
+      let refusal: string | null = null;
+      try {
+        const client = this.persistence.getSupabaseClient();
+        const { data: leaseRows } = await client
+          .from('agent_checkouts')
+          .select('level, node_id, holder_label, holder_delegate, holder_key_id, since, heartbeat_at')
+          .eq('project_id', branch.projectId)
+          .in('level', ['node', 'task', 'code'])
+          .is('released_at', null);
+        if (Array.isArray(leaseRows) && leaseRows.length > 0) {
+          const { data: who } = await client.auth.getUser();
+          const author = typeof proposal.metadata?.credential === 'string' ? proposal.metadata.credential : null;
+          const exempt = [author, who?.user?.id ? `user:${who.user.id}` : null];
+          // AL.11: a file or an edge is checked as its node, so the graph is
+          // read whenever someone else holds something; AA.3: a box's node
+          // lease covers its parts.
+          if ([...leasesFromRows(leaseRows as LeaseRowLite[], exempt).values()].some((l) => !l.mine)) {
+            const snap = await this.persistence.getGraphRepository().loadSnapshot(proposal.sourceBranchId);
+            const g = snap.success ? snap.data?.graphData ?? null : null;
+            const { isExplodedNode } = await import('../adapters/graph-to-reactflow.js');
+            refusal = acceptLeaseRefusal(approvedPatches, leaseRows as LeaseRowLite[], exempt, g,
+              g ? (nodeId) => !!g.nodes[nodeId] && isExplodedNode(g.nodes[nodeId], g) : undefined);
+          }
+        }
+      } catch {
+        refusal = null; // the lease read failing never blocks an accept; propose_patches checked at filing
+      }
+      if (refusal) throw new Error(`${refusal} Nothing was applied.`);
+    }
+
     // Restore externally-stored artifact content before applying
     const hasExternalContent = approvedPatches.some(
       p => p.type === 'add_artifact' && p.payload?.content === '__stored_externally__'
@@ -824,8 +913,16 @@ export class ProposalService {
       }
     }
 
+    // AG.13: what lands carries no ports, whenever the proposal was filed.
+    approvedPatches = withoutPorts(approvedPatches);
+
     // DEFENSIVE CHECK: Filter out any patches that try to remove locked nodes or their edges
     // This prevents issues when old proposals were created before locked node logic was fixed
+    // V3 2.4 (2026-09-19): the server now refuses a batch against a locked
+    // node when it is filed (propose_patches, refuseLockedNodeTargets), so a
+    // proposal reaching this point was filed before the lock or before that
+    // release. This filter stays one release as belt and braces; delete it
+    // with the next accept-path change once no pre-2.4 proposals remain.
     const originalCount = approvedPatches.length;
 
     // First pass: identify nodes being removed (for edge filtering)
@@ -881,6 +978,8 @@ export class ProposalService {
 
     // Load existing graph nodes so edge validation includes them
     let existingNodeIds = new Set<string>();
+    // AD.3 (D22): the files as they were, to tell which ones this accept changes.
+    let artifactsBefore: Record<string, { nodeId?: string | null; content?: string; contentHash?: string }> = {};
     try {
       const graphRepo = this.persistence.getGraphRepository();
       const snapshotResult = await graphRepo.loadSnapshot(proposal.sourceBranchId);
@@ -889,6 +988,7 @@ export class ProposalService {
         if (currentGraph.nodes) {
           existingNodeIds = new Set(Object.keys(currentGraph.nodes));
         }
+        if (currentGraph.artifacts) artifactsBefore = currentGraph.artifacts;
       }
     } catch (err) {
       console.warn('[ProposalService] Could not load snapshot for node validation:', err);
@@ -1027,6 +1127,64 @@ export class ProposalService {
 
     // Mark as merged
     await this.updateProposalStatus(proposalId, 'merged');
+
+    // V3 AD.1 (D5, D8): a baseline riding on this proposal moves now that
+    // its design is on the canvas: an adopt at connect sets the branch's
+    // first baseline, an agent's reconcile resolves the change card it
+    // answered, and (AD.2b) a load of git's model moves the last sync to the
+    // commit it read and answers the cards it answers. Best-effort: otherwise
+    // nothing moves, and the push guard or the card keeps asking.
+    if (proposal.metadata?.source === 'git-adopt' || proposal.metadata?.source === 'git-load' || proposal.metadata?.reconcilesChange) {
+      try {
+        const client = this.persistence.getSupabaseClient();
+        const { data: integration } = await client
+          .from('git_integrations').select('id').eq('project_id', branch.projectId).maybeSingle();
+        if (integration?.id) {
+          const { GitService } = await import('./GitService.js');
+          await new GitService(client).proposalBaseline(integration.id, proposalId);
+        }
+      } catch (err) {
+        console.warn('[ProposalService] proposal baseline not moved (the card or the push guard keeps asking):', err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    // V3 AD.3 (D22): a file this accept changed on the canvas makes the
+    // evidence its node's git-ticked criteria gave go stale ("re-verify"),
+    // exactly as the Git panel's file accept does: every lane that brings a
+    // file change onto the canvas, not only the buttons. Best-effort.
+    {
+      const { nodesWithChangedFiles, flagNodeEvidenceStale } = await import('./evidenceStale.js');
+      const changedNodes = nodesWithChangedFiles(approvedPatches, artifactsBefore);
+      if (changedNodes.length > 0) {
+        const meta = (proposal.metadata ?? {}) as { reconcilesChange?: { commitSha?: string }; loadsModel?: { headSha?: string } };
+        const sourceCommit = meta.reconcilesChange?.commitSha ?? meta.loadsModel?.headSha ?? undefined;
+        const client = this.persistence.getSupabaseClient();
+        for (const nodeId of changedNodes) {
+          try {
+            await flagNodeEvidenceStale(client, branch.projectId, nodeId, sourceCommit);
+          } catch (err) {
+            console.warn('[ProposalService] Evidence staleness was not recorded for', nodeId, err);
+          }
+        }
+      }
+    }
+
+    // RI-12 (2026-09-05): for a repo-import proposal the accept trigger only
+    // RECORDS the repo-index promotion (a one-statement write of a large
+    // repository's rows outran the statement timeout on Twenty); the
+    // repo-import chain writes the index in pages. Kick it now so the index
+    // lands right behind the canvas — best-effort: run_repo_import re-kicks
+    // a stalled promotion on its next poll, so a failed kick costs latency,
+    // never the index.
+    const jobId = proposal.metadata?.jobId;
+    if (typeof jobId === 'string' && jobId) {
+      try {
+        const { ImportJobService } = await import('./ImportJobService.js');
+        await new ImportJobService(this.persistence.getSupabaseClient()).startChain(jobId, 'promote');
+      } catch (err) {
+        console.warn('[ProposalService] repo index promotion kick failed (run_repo_import re-kicks it):', err instanceof Error ? err.message : String(err));
+      }
+    }
 
     console.log('[ProposalService] ✅ Proposal accepted successfully');
   }
@@ -1193,26 +1351,46 @@ export class ProposalService {
     const patchRepo = this.persistence.getPatchRepository();
 
     const BATCH_SIZE = 50;
-    const MAX_ALLOWED_DROP_RATIO = 0.2;
-    const MAX_ALLOWED_DROP_COUNT = 10;
 
-    const applyInBatches = async (baseGraph: any, patches: any[]): Promise<{ graph: any; patchCount: number; droppedCount: number } | null> => {
+    const applyInBatches = async (baseGraph: any, patches: any[]): Promise<{ graph: any; patchCount: number } | null> => {
       if (patches.length === 0) return null;
 
       let currentGraph = baseGraph;
-      let droppedCount = 0;
       for (let i = 0; i < patches.length; i += BATCH_SIZE) {
         const batch = patches.slice(i, i + BATCH_SIZE);
         const result = applyPatches(currentGraph, batch);
         if (!result.success || !result.graph) {
-          console.warn(`[ProposalService] Batch ${i}-${i + batch.length} failed, trying one-by-one`);
+          // One patch in the batch failed; re-apply one at a time so the
+          // offender is named instead of the whole batch being blamed.
+          console.warn(`[ProposalService] Batch ${i}-${i + batch.length} failed, isolating the failing patch`);
           for (const patch of batch) {
             const singleResult = applyPatches(currentGraph, [patch]);
             if (singleResult.success && singleResult.graph) {
               currentGraph = singleResult.graph;
-            } else {
-              droppedCount++;
+              continue;
             }
+            // Hard fail (2026-09-18). A patch that would not apply used to be
+            // counted into droppedCount and tolerated beneath a ratio/count
+            // threshold, reported only to the console. That is how an explode
+            // silently lost seven edges on a production project: the seven
+            // remove_edge patches retiring the old container applied, the
+            // seven add_edge patches meant to replace them failed
+            // CONTRACT_NOT_FOUND (they referenced contracts no add_contract
+            // ever created), and the approval reported success with the edges
+            // gone from the canvas and still sitting in graph_patches. Seven
+            // out of ~135 was 5.2%, under both thresholds, so nothing
+            // surfaced. Nothing is discarded now: the accept fails, names the
+            // patch and the reason, and the snapshot is left alone so it can
+            // never disagree with the patch log.
+            const err = singleResult.error;
+            throw new Error(
+              `Patch application failed — no patch was discarded and the snapshot was NOT saved. ` +
+              `Offending patch: ${patch?.type ?? 'unknown type'}` +
+              (patch?.payload?.id ? ` ${patch.payload.id}` : '') +
+              ` — ${err?.code ?? 'UNKNOWN'}: ${err?.message ?? 'no error reported'}` +
+              (err?.path ? ` (at ${err.path})` : '') +
+              `. Resolve what the patch references (a contract, node or artifact that does not exist in the graph) and re-accept.`
+            );
           }
         } else {
           currentGraph = result.graph;
@@ -1225,12 +1403,7 @@ export class ProposalService {
         }
       }
 
-      if (droppedCount > 0) {
-        const dropRatio = droppedCount / patches.length;
-        console.warn(`[ProposalService] Dropped ${droppedCount}/${patches.length} patches (${(dropRatio * 100).toFixed(1)}%)`);
-      }
-
-      return { graph: currentGraph, patchCount: patches.length, droppedCount };
+      return { graph: currentGraph, patchCount: patches.length };
     };
 
     try {
@@ -1270,16 +1443,17 @@ export class ProposalService {
             const recentPatches = await patchRepo.loadPatches(branchId, { sinceSequence: Math.max(0, actualMaxSeq - 50) });
             if (recentPatches.success && recentPatches.data.length > 0) {
               const patchPayloads = recentPatches.data.map((p: any) => p.payload);
+              // applyInBatches throws on a patch that will not apply, so
+              // reaching here means every recent patch landed.
               const patchResult = await applyInBatches(baseGraph, patchPayloads);
-              if (patchResult && patchResult.droppedCount <= MAX_ALLOWED_DROP_COUNT) {
+              if (patchResult) {
                 finalGraph = patchResult.graph;
                 totalPatchCount = actualMaxSeq;
                 console.log('[ProposalService] Mismatch recovery: applied recent patches on existing snapshot');
               } else {
-                // Too many drops applying on top of snapshot - just keep existing snapshot with corrected sequence
                 finalGraph = baseGraph;
                 totalPatchCount = actualMaxSeq;
-                console.warn('[ProposalService] Mismatch recovery: keeping existing snapshot graph, correcting sequence');
+                console.log('[ProposalService] Mismatch recovery: no recent patches, correcting sequence only');
               }
             } else {
               // No patches to apply - just re-save with correct sequence
@@ -1305,17 +1479,13 @@ export class ProposalService {
         const patchesResult = await patchRepo.loadPatches(branchId, { sinceSequence: 0 });
         if (patchesResult.success && patchesResult.data.length > 0) {
           const patchPayloads = patchesResult.data.map((p: any) => p.payload);
+          // A full replay only runs when there is no snapshot to build on, so
+          // it replays the branch's whole history. applyInBatches throws on
+          // the first patch that will not apply: a log carrying history that
+          // no longer replays cleanly is a real defect and is reported, never
+          // absorbed into a quietly degraded snapshot.
           const fullResult = await applyInBatches(emptyGraph, patchPayloads);
           if (fullResult) {
-            // Check if too many patches were dropped during full replay
-            const dropRatio = fullResult.droppedCount / patchPayloads.length;
-            if (fullResult.droppedCount > MAX_ALLOWED_DROP_COUNT && dropRatio > MAX_ALLOWED_DROP_RATIO) {
-              console.error(`[ProposalService] Full replay dropped too many patches: ${fullResult.droppedCount}/${patchPayloads.length} (${(dropRatio * 100).toFixed(1)}%). Aborting to preserve existing snapshot.`);
-              if (existingSnapshot && existingNodeCount > 0) {
-                console.warn('[ProposalService] Preserving existing snapshot with', existingNodeCount, 'nodes instead of saving degraded graph');
-                return;
-              }
-            }
             finalGraph = fullResult.graph;
             totalPatchCount = fullResult.patchCount;
             console.log('[ProposalService] Full replay succeeded');

@@ -180,36 +180,16 @@ describe('Draft Semantics', () => {
   });
 
   describe('scaffoldNodeFromTemplate', () => {
-    it('should create a node with all template defaults', () => {
+    // AG.13: a scaffolded node is the node alone: no ports, no stub contracts.
+    it('creates a draft node of the template type with no ports and no contracts', () => {
       const template = NODE_TEMPLATES.find(t => t.id === 'web.rest-api')!;
-      const nodeId = NODE_ID;
+      const result = scaffoldNodeFromTemplate(template, NODE_ID);
 
-      const result = scaffoldNodeFromTemplate(template, nodeId);
-
-      expect(result.node.id).toBe(nodeId);
+      expect(result.node.id).toBe(NODE_ID);
       expect(result.node.type).toBe('web.rest-api');
       expect(result.node.status).toBe('draft');
-      expect(result.node.ports?.length).toBe(2);
-      expect(result.contracts.length).toBe(1);
-    });
-
-    it('should create draft ports', () => {
-      const template = NODE_TEMPLATES[0];
-      const result = scaffoldNodeFromTemplate(template, NODE_ID);
-
-      for (const port of result.node.ports ?? []) {
-        expect(port.status).toBe('draft');
-      }
-    });
-
-    it('should create draft contracts', () => {
-      const template = NODE_TEMPLATES[0];
-      const result = scaffoldNodeFromTemplate(template, NODE_ID);
-
-      for (const contract of result.contracts) {
-        expect(contract.status).toBe('draft');
-        expect(contract.name.startsWith('Stub:')).toBe(true);
-      }
+      expect(result.node).not.toHaveProperty('ports');
+      expect(result).not.toHaveProperty('contracts');
     });
   });
 
@@ -255,7 +235,7 @@ describe('Scaffolding Patch Operations', () => {
           templateId: 'web.rest-api',
           nodeId: NODE_ID,
           node: scaffolded.node,
-          contracts: scaffolded.contracts,
+          contracts: [],
         },
       };
 
@@ -264,10 +244,8 @@ describe('Scaffolding Patch Operations', () => {
       expect(result.success).toBe(true);
       expect(result.graph!.nodes[NODE_ID]).toBeDefined();
       expect(result.graph!.nodes[NODE_ID].status).toBe('draft');
-      for (const contract of scaffolded.contracts) {
-        expect(result.graph!.contracts[contract.id]).toBeDefined();
-        expect(result.graph!.contracts[contract.id].status).toBe('draft');
-      }
+      expect(result.graph!.nodes[NODE_ID].ports).toBeUndefined();
+      expect(Object.keys(result.graph!.contracts)).toHaveLength(0);
     });
 
     it('should fail if node already exists', () => {
@@ -283,7 +261,7 @@ describe('Scaffolding Patch Operations', () => {
           templateId: template.id,
           nodeId: NODE_ID,
           node: scaffolded.node,
-          contracts: scaffolded.contracts,
+          contracts: [],
         },
       };
 
@@ -462,7 +440,7 @@ describe('Draft to Complete Transitions via Branch Replay', () => {
         templateId: template.id,
         nodeId: NODE_ID,
         node: scaffolded.node,
-        contracts: scaffolded.contracts,
+        contracts: [],
       },
     };
 
@@ -513,8 +491,7 @@ describe('Template Registry', () => {
       expect(template.id).toBeTruthy();
       expect(template.name).toBeTruthy();
       expect(template.nodeType).toBeTruthy();
-      // Not all node types have default ports (e.g., databases, caches)
-      expect(template.defaultPorts).toBeDefined();
+      expect(template).not.toHaveProperty('defaultPorts');
       expect(template.artifactPlaceholders.length).toBeGreaterThan(0);
     }
   });

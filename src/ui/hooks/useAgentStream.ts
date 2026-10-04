@@ -128,7 +128,6 @@ export function useAgentStream() {
       onEvent: extraCallbacks?.onEvent,
       onToolResult: extraCallbacks?.onToolResult,
       onContractCreated: extraCallbacks?.onContractCreated,
-      onPortAdded: extraCallbacks?.onPortAdded,
       onNodeRemoved: extraCallbacks?.onNodeRemoved,
       onEdgeRemoved: extraCallbacks?.onEdgeRemoved,
       onPatchGenerated: extraCallbacks?.onPatchGenerated,

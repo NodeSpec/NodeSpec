@@ -25,7 +25,6 @@ export interface NodeRole {
   containerStyle: 'hosting' | 'logical-boundary' | null;
   canContain: string[] | CanContainRule;
   metadataSchema: Record<string, unknown> | null;
-  defaultPorts: unknown[];
   suggestedContracts: unknown[];
   sortOrder: number;
   deprecated: boolean;
@@ -106,7 +105,6 @@ function mapRole(row: Record<string, unknown>): NodeRole {
     containerStyle: (row.container_style as 'hosting' | 'logical-boundary' | null) ?? null,
     canContain: (row.can_contain as string[] | CanContainRule) ?? [],
     metadataSchema: row.metadata_schema as Record<string, unknown> | null,
-    defaultPorts: (row.default_ports as unknown[]) ?? [],
     suggestedContracts: (row.suggested_contracts as unknown[]) ?? [],
     sortOrder: row.sort_order as number,
     deprecated: (row.deprecated as boolean) ?? false,

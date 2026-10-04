@@ -2,14 +2,34 @@ import { describe, it, expect } from 'vitest';
 import { createEmptyGraph, generateUUID } from '@nodespec/core/utils.js';
 import {
   createAddNodePatch,
-  createAddPortPatch,
-  createUpdatePortPatch,
-  createDeletePortPatch,
-  createConnectPortsPatch,
   createAddContractPatch,
+  createPatchMetadata,
 } from '@nodespec/core/patch-factory.js';
 import { applyPatches } from '@nodespec/core/patch-engine.js';
-import type { Node, Port, Contract } from '@nodespec/core/types.js';
+import type {
+  Node, Port, Contract, AddPortPatch, UpdatePortPatch, DeletePortPatch, ConnectPortsPatch, ActorType,
+} from '@nodespec/core/types.js';
+
+// AG.13 (owner 2026-09-28): ports came out of the model and nothing in the app
+// writes these patches any more. Stored histories still carry them, and the
+// patch engine must replay them exactly as before, so these tests stay: they
+// pin replay. The factories that built the patches were removed with the ports;
+// the patches are built here, in the shape the schema still accepts.
+type Opts = { actorType: ActorType; summary: string };
+const createAddPortPatch = (nodeId: string, port: Port, o: Opts): AddPortPatch =>
+  ({ type: 'add_port', metadata: createPatchMetadata(o), payload: { nodeId, port } });
+const createUpdatePortPatch = (nodeId: string, portId: string, changes: Partial<Omit<Port, 'id'>>, o: Opts): UpdatePortPatch =>
+  ({ type: 'update_port', metadata: createPatchMetadata(o), payload: { nodeId, portId, changes } });
+const createDeletePortPatch = (nodeId: string, portId: string, o: Opts): DeletePortPatch =>
+  ({ type: 'delete_port', metadata: createPatchMetadata(o), payload: { nodeId, portId } });
+const createConnectPortsPatch = (
+  sourceNodeId: string, sourcePortId: string, targetNodeId: string, targetPortId: string,
+  edgeId: string, contractId: string, o: Opts, contract?: Contract, label?: string,
+): ConnectPortsPatch => ({
+  type: 'connect_ports',
+  metadata: createPatchMetadata(o),
+  payload: { sourceNodeId, sourcePortId, targetNodeId, targetPortId, edgeId, contractId, contract, label },
+});
 
 function createTestNode(id: string): Node {
   return {

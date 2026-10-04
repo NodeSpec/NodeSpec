@@ -63,7 +63,9 @@ docker compose up -d --build
 ```
 
 The database volume survives updates; `db-init` never touches an
-initialized database.
+initialized database's schema. It does mark it self-hosted on every start
+(one row in `public.deployment_settings`), which is what tells the
+database's plan checks that this is your container, not the hosted service.
 
 ## First admin
 

@@ -1,119 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {
+  BASE_URL, LOGO, SITE_NAME, BLOG_POST_SELECT, applyHead, blogPostRoute, noIndexShell, type BlogPostRow, type RouteMeta,
+} from '../src/seo/page-head.ts';
+import { HOME_SEO, homeJsonLd } from '../src/seo/site-meta.ts';
 
-const BASE_URL = 'https://nodespec.io';
-const SITE_NAME = 'NodeSpec';
-const DEFAULT_IMAGE = `${BASE_URL}/og-card.png`;
 const DIST_DIR = path.resolve(import.meta.dirname, '..', 'dist');
-
-interface RouteMeta {
-  path: string;
-  title: string;
-  description: string;
-  keywords?: string;
-  ogType?: string;
-  image?: string;
-  noIndex?: boolean;
-  jsonLd?: object[];
-}
 
 const STATIC_ROUTES: RouteMeta[] = [
   {
     path: '/',
-    title: 'NodeSpec - AI Architecture, Governance & Design for AI-Built Software',
-    description:
-      'Design your architecture visually, govern what your AI builds. NodeSpec gives Claude, Cursor, and any MCP agent scoped task context with git provenance, requirements traceability, and verified tests.',
-    keywords:
-      'AI governance, AI architecture governance, software architecture for AI agents, AI software design, spec-driven development, MCP context server, Model Context Protocol architecture, AI development governance, architecture provenance, AI coding context, Cursor architecture context, Claude code context, system design for AI, software architecture tool, prevent AI hallucination',
-    jsonLd: [
-      {
-        '@context': 'https://schema.org',
-        '@type': 'SoftwareApplication',
-        name: 'NodeSpec',
-        applicationCategory: 'DeveloperApplication',
-        applicationSubCategory: 'Software Architecture Tool',
-        operatingSystem: 'Web',
-        offers: {
-          '@type': 'Offer',
-          price: '0',
-          priceCurrency: 'USD',
-          description: 'Community tier: every feature free on the web for up to 3 projects. Enterprise and Government run self-hosted.',
-        },
-        description:
-          'Architecture, governance and design platform for AI-built software. Your AI connects over MCP and builds from scoped, provenance-tracked task context instead of guessing.',
-        url: BASE_URL,
-        featureList: [
-          'Visual architecture canvas with 85+ architectural roles',
-          'Technology catalog: 300+ entries with curated AI context',
-          'Requirements, acceptance criteria and traceability',
-          'Deterministic task packets and criteria-linked test plans',
-          'MCP server for Claude, Cursor, and any AI agent or IDE',
-          'Git-native provenance: model and packets commit to your repo',
-          'Deterministic repo import with review-first proposals',
-          'Self-hosted Team and Enterprise deployments',
-        ],
-        author: {
-          '@type': 'Organization',
-          name: 'NodeSpec',
-          url: BASE_URL,
-          logo: DEFAULT_IMAGE,
-        },
-      },
-      {
-        '@context': 'https://schema.org',
-        '@type': 'FAQPage',
-        mainEntity: [
-          {
-            '@type': 'Question',
-            name: 'What is NodeSpec?',
-            acceptedAnswer: {
-              '@type': 'Answer',
-              text: 'NodeSpec is an architecture, governance and design platform for AI-built software. You map your system on a visual canvas with requirements and acceptance criteria; your AI assistant (Claude, Cursor, or any MCP agent) connects over MCP and builds from scoped task packets — with every change tracked as git provenance and every criterion verified by test results.',
-            },
-          },
-          {
-            '@type': 'Question',
-            name: 'How does NodeSpec work with Cursor and Claude Code?',
-            acceptedAnswer: {
-              '@type': 'Answer',
-              text: 'NodeSpec is MCP-first: Claude, Cursor, and any Model Context Protocol agent connect directly to the NodeSpec MCP server, pulling architecture topology, requirements, scoped task packets and test plans on demand — and proposing changes you review. Task packets and the architecture model also commit to your GitHub repo, so they travel with the code.',
-            },
-          },
-          {
-            '@type': 'Question',
-            name: 'What is spec-driven development?',
-            acceptedAnswer: {
-              '@type': 'Answer',
-              text: 'Spec-driven development is a methodology where you define requirements, acceptance criteria, and architecture before writing code. NodeSpec enforces this workflow: you design the system visually, specify what each component must do, then generate or write code that satisfies those specifications. AI agents use this context to produce correct, architecturally-aligned code.',
-            },
-          },
-          {
-            '@type': 'Question',
-            name: 'Is there a free tier?',
-            acceptedAnswer: {
-              '@type': 'Answer',
-              text: 'Yes — the Community tier is the full product, free on the web at nodespec.io: every feature, up to 3 projects, no credit card. Your own AI assistant does the building through MCP, so there are no platform token meters. Team (web app for up to 5 users) is coming soon; Enterprise and Government are self-hosted by contact.',
-            },
-          },
-          {
-            '@type': 'Question',
-            name: 'What is AI architecture governance?',
-            acceptedAnswer: {
-              '@type': 'Answer',
-              text: 'AI architecture governance means your AI coding agents work inside an explicit, versioned system design instead of improvising one. In NodeSpec that takes four forms: scoped context (each task packet carries exactly one node\u2019s slice of the architecture), git provenance (every model change is a reviewable commit in your repo), traceability (requirements map to nodes and to criteria-linked tests), and verified completion (a criterion is only met through reported test results).',
-            },
-          },
-        ],
-      },
-    ],
-  },
-  {
-    path: '/pricing',
-    title: 'Pricing - NodeSpec',
-    description:
-      'NodeSpec tiers: Community is the free web app with every feature for up to 3 projects. Team (coming soon) is the web app for teams of up to 5. Enterprise and Government run self-hosted.',
-    keywords:
-      'NodeSpec pricing, AI architecture tool pricing, self-hosted architecture tool, AI governance platform pricing, free architecture tool, MCP architecture context',
+    ...HOME_SEO,
+    jsonLd: homeJsonLd(),
   },
   {
     path: '/templates',
@@ -190,7 +88,7 @@ const STATIC_ROUTES: RouteMeta[] = [
         publisher: {
           '@type': 'Organization',
           name: SITE_NAME,
-          logo: { '@type': 'ImageObject', url: DEFAULT_IMAGE },
+          logo: { '@type': 'ImageObject', url: LOGO },
         },
       },
     ],
@@ -244,17 +142,6 @@ const STATIC_ROUTES: RouteMeta[] = [
   },
 ];
 
-interface BlogPost {
-  slug: string;
-  title: string;
-  excerpt: string;
-  published_at: string;
-  cover_image_url?: string;
-  keywords?: string[];
-  meta_title?: string;
-  meta_description?: string;
-}
-
 interface Template {
   slug: string;
   name: string;
@@ -277,7 +164,7 @@ async function fetchDynamicRoutes(): Promise<RouteMeta[]> {
 
   try {
     const blogRes = await fetch(
-      `${supabaseUrl}/rest/v1/blog_posts?status=eq.published&select=slug,title,excerpt,published_at,cover_image_url,keywords,meta_title,meta_description`,
+      `${supabaseUrl}/rest/v1/blog_posts?status=eq.published&select=${BLOG_POST_SELECT}`,
       {
         headers: {
           apikey: supabaseKey,
@@ -287,36 +174,8 @@ async function fetchDynamicRoutes(): Promise<RouteMeta[]> {
     );
 
     if (blogRes.ok) {
-      const posts: BlogPost[] = await blogRes.json();
-      for (const post of posts) {
-        const pageTitle = post.meta_title || `${post.title} | ${SITE_NAME} Blog`;
-        const pageDescription = post.meta_description || post.excerpt || post.title;
-        routes.push({
-          path: `/blog/${post.slug}`,
-          title: pageTitle,
-          description: pageDescription.slice(0, 160),
-          keywords: post.keywords?.join(', '),
-          ogType: 'article',
-          image: post.cover_image_url || undefined,
-          jsonLd: [
-            {
-              '@context': 'https://schema.org',
-              '@type': 'BlogPosting',
-              headline: post.title,
-              description: pageDescription,
-              image: post.cover_image_url || DEFAULT_IMAGE,
-              url: `${BASE_URL}/blog/${post.slug}`,
-              datePublished: new Date(post.published_at).toISOString(),
-              author: { '@type': 'Organization', name: SITE_NAME, url: BASE_URL },
-              publisher: {
-                '@type': 'Organization',
-                name: SITE_NAME,
-                logo: { '@type': 'ImageObject', url: DEFAULT_IMAGE },
-              },
-            },
-          ],
-        });
-      }
+      const posts: BlogPostRow[] = await blogRes.json();
+      for (const post of posts) routes.push(blogPostRoute(post));
       console.log(`[prerender] Found ${posts.length} blog posts`);
     }
   } catch (e) {
@@ -385,114 +244,6 @@ async function fetchDynamicRoutes(): Promise<RouteMeta[]> {
   return routes;
 }
 
-function buildHead(route: RouteMeta): string {
-  const canonicalUrl = `${BASE_URL}${route.path}`;
-  const image = route.image || DEFAULT_IMAGE;
-  const ogType = route.ogType || 'website';
-
-  const lines: string[] = [
-    `<title>${escapeHtml(route.title)}</title>`,
-    `<meta name="description" content="${escapeAttr(route.description)}" />`,
-    `<link rel="canonical" href="${canonicalUrl}" />`,
-    route.noIndex
-      ? `<meta name="robots" content="noindex, nofollow" />`
-      : `<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />`,
-  ];
-
-  if (route.keywords) {
-    lines.push(`<meta name="keywords" content="${escapeAttr(route.keywords)}" />`);
-  }
-
-  // Open Graph
-  lines.push(
-    `<meta property="og:type" content="${ogType}" />`,
-    `<meta property="og:title" content="${escapeAttr(route.title)}" />`,
-    `<meta property="og:description" content="${escapeAttr(route.description)}" />`,
-    `<meta property="og:url" content="${canonicalUrl}" />`,
-    `<meta property="og:image" content="${image}" />`,
-    `<meta property="og:image:alt" content="${escapeAttr(route.title)}" />`,
-    `<meta property="og:image:width" content="1200" />`,
-    `<meta property="og:image:height" content="630" />`,
-    `<meta property="og:site_name" content="${SITE_NAME}" />`,
-    `<meta property="og:locale" content="en_US" />`,
-  );
-
-  // Twitter
-  lines.push(
-    `<meta name="twitter:card" content="summary_large_image" />`,
-    `<meta name="twitter:title" content="${escapeAttr(route.title)}" />`,
-    `<meta name="twitter:description" content="${escapeAttr(route.description)}" />`,
-    `<meta name="twitter:image" content="${image}" />`,
-    `<meta name="twitter:site" content="@nodespec" />`,
-  );
-
-  // JSON-LD
-  if (route.jsonLd) {
-    for (const data of route.jsonLd) {
-      lines.push(
-        `<script type="application/ld+json">${JSON.stringify(data)}</script>`,
-      );
-    }
-  }
-
-  return lines.join('\n    ');
-}
-
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-function escapeAttr(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-function generateHtml(template: string, route: RouteMeta): string {
-  const headContent = buildHead(route);
-
-  // Replace the existing <title> and meta tags in the template head
-  // We insert our route-specific meta right after <meta charset="UTF-8" />
-  let html = template;
-
-  // Remove existing title tag
-  html = html.replace(/<title>[^<]*<\/title>/, '');
-
-  // Remove existing meta description
-  html = html.replace(/<meta name="description"[^>]*\/>/, '');
-
-  // Remove existing meta keywords
-  html = html.replace(/<meta name="keywords"[^>]*\/>/, '');
-
-  // Remove existing meta robots
-  html = html.replace(/<meta name="robots"[^>]*\/>/, '');
-
-  // Remove existing canonical
-  html = html.replace(/<link rel="canonical"[^>]*\/>/, '');
-
-  // Remove existing OG tags
-  html = html.replace(/<meta property="og:[^"]*"[^>]*\/>/g, '');
-
-  // Remove existing Twitter tags
-  html = html.replace(/<meta name="twitter:[^"]*"[^>]*\/>/g, '');
-
-  // Remove existing JSON-LD (we'll add route-specific ones)
-  html = html.replace(/<script type="application\/ld\+json">[\s\S]*?<\/script>/g, '');
-
-  // Insert our meta tags after the viewport meta
-  html = html.replace(
-    '<meta name="viewport" content="width=device-width, initial-scale=1.0" />',
-    `<meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    ${headContent}`,
-  );
-
-  return html;
-}
-
 async function main() {
   const templatePath = path.join(DIST_DIR, 'index.html');
 
@@ -502,12 +253,22 @@ async function main() {
   }
 
   const template = fs.readFileSync(templatePath, 'utf-8');
+
+  // Only the managed site is for search engines. A self-hosted, Enterprise or
+  // Government build, or a deploy preview, keeps nodespec.io's canonical and indexing
+  // out of its pages and prerenders none of the marketing routes (AJ.2).
+  if (process.env.VITE_NODESPEC_EDITION !== 'hosted') {
+    fs.writeFileSync(templatePath, noIndexShell(template));
+    console.log('[prerender] Not the hosted edition: the shell says noindex and no routes are prerendered');
+    return;
+  }
+
   const dynamicRoutes = await fetchDynamicRoutes();
   const allRoutes = [...STATIC_ROUTES, ...dynamicRoutes];
 
   let count = 0;
   for (const route of allRoutes) {
-    const html = generateHtml(template, route);
+    const html = applyHead(template, route);
     const routePath = route.path === '/' ? '/index.html' : `${route.path}/index.html`;
     const filePath = path.join(DIST_DIR, routePath);
     const dir = path.dirname(filePath);

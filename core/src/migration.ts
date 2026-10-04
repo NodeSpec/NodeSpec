@@ -1,7 +1,6 @@
-import type { Graph, Port } from './types.js';
+import type { Graph } from './types.js';
 import { CURRENT_GRAPH_SCHEMA_VERSION, GraphSchema } from './schemas.js';
 import { computeHash, updateGraphHash } from './utils.js';
-import { getNodeTypeById } from './node-types.js';
 import { KIND_TO_INTERACTION_FIELDS, compressInteractionKind, LEGACY_INTERACTION_KIND_MAP, LEGACY_CONTRACT_KIND_MAP } from './shared/legacy-mappings.js';
 import type { ContractKind } from './shared/enums.js';
 import type { LegacyContractKind } from './shared/legacy-mappings.js';
@@ -21,68 +20,6 @@ export class MigrationError extends Error {
     super(message);
     this.name = 'MigrationError';
   }
-}
-
-function generateDeterministicPortId(nodeId: string, direction: 'in' | 'out'): string {
-  const seed = `${nodeId}:${direction}:default`;
-  let hash = 0;
-  for (let i = 0; i < seed.length; i++) {
-    const char = seed.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
-  const hex = Math.abs(hash).toString(16).padStart(8, '0');
-  return `${hex.slice(0, 8)}-${hex.slice(0, 4)}-4${hex.slice(1, 4)}-8${hex.slice(1, 4)}-${hex.slice(0, 12).padEnd(12, '0')}`;
-}
-
-function generateDeterministicPortIdIndexed(nodeId: string, direction: 'in' | 'out', index: number): string {
-  const seed = `${nodeId}:${direction}:${index}`;
-  let hash = 0;
-  for (let i = 0; i < seed.length; i++) {
-    const char = seed.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
-  const hex = Math.abs(hash).toString(16).padStart(8, '0');
-  return `${hex.slice(0, 8)}-${hex.slice(0, 4)}-4${hex.slice(1, 4)}-8${hex.slice(1, 4)}-${hex.slice(0, 12).padEnd(12, '0')}`;
-}
-
-function createDefaultPorts(nodeId: string): Port[] {
-  return [
-    {
-      id: generateDeterministicPortId(nodeId, 'in'),
-      name: 'default-in',
-      direction: 'in',
-    },
-    {
-      id: generateDeterministicPortId(nodeId, 'out'),
-      name: 'default-out',
-      direction: 'out',
-    },
-  ];
-}
-
-export function createTypeAwarePorts(nodeId: string, nodeType: string): Port[] {
-  const typeDef = getNodeTypeById(nodeType);
-  if (!typeDef?.defaultPorts || typeDef.defaultPorts.length === 0) {
-    return createDefaultPorts(nodeId);
-  }
-
-  const inCount = { current: 0 };
-  const outCount = { current: 0 };
-
-  return typeDef.defaultPorts.map((template) => {
-    const counter = template.direction === 'in' ? inCount : outCount;
-    const id = generateDeterministicPortIdIndexed(nodeId, template.direction, counter.current);
-    counter.current++;
-    return {
-      id,
-      name: template.name,
-      direction: template.direction,
-      required: template.required,
-      schemaRef: template.schemaRef,
-    };
-  });
 }
 
 export function isGraphV1(graphLike: unknown): boolean {
@@ -164,53 +101,9 @@ function migrateV1ToV2(graphLike: Record<string, unknown>): { graph: Record<stri
   graph.schemaVersion = 2;
   changes.push('Set schemaVersion to 2');
 
-  const nodes = graph.nodes as Record<string, Record<string, unknown>> | undefined;
-  const edges = graph.edges as Record<string, Record<string, unknown>> | undefined;
+  // AG.13 (owner 2026-09-28): this step used to invent ports for every node and
+  // port ids for every edge. Ports came out of the model, so it no longer does.
   const contracts = graph.contracts as Record<string, Record<string, unknown>> | undefined;
-
-  const nodeDefaultPorts: Record<string, { inPort: string; outPort: string }> = {};
-
-  if (nodes) {
-    for (const [nodeId, node] of Object.entries(nodes)) {
-      if (!node.ports || (Array.isArray(node.ports) && node.ports.length === 0)) {
-        const nodeType = (node.type as string) || '';
-        const generatedPorts = createTypeAwarePorts(nodeId, nodeType);
-        node.ports = generatedPorts;
-        const firstIn = generatedPorts.find(p => p.direction === 'in');
-        const firstOut = generatedPorts.find(p => p.direction === 'out');
-        nodeDefaultPorts[nodeId] = {
-          inPort: firstIn?.id ?? generateDeterministicPortId(nodeId, 'in'),
-          outPort: firstOut?.id ?? generateDeterministicPortId(nodeId, 'out'),
-        };
-        changes.push(`Added type-aware ports to node ${nodeId} (type: ${nodeType || 'unknown'})`);
-      } else {
-        const ports = node.ports as Port[];
-        const inPort = ports.find(p => p.direction === 'in');
-        const outPort = ports.find(p => p.direction === 'out');
-        nodeDefaultPorts[nodeId] = {
-          inPort: inPort?.id ?? generateDeterministicPortId(nodeId, 'in'),
-          outPort: outPort?.id ?? generateDeterministicPortId(nodeId, 'out'),
-        };
-      }
-    }
-  }
-
-  if (edges) {
-    for (const [edgeId, edge] of Object.entries(edges)) {
-      const sourceNodeId = edge.source as string;
-      const targetNodeId = edge.target as string;
-
-      if (!edge.sourcePortId && nodeDefaultPorts[sourceNodeId]) {
-        edge.sourcePortId = nodeDefaultPorts[sourceNodeId].outPort;
-        changes.push(`Added sourcePortId to edge ${edgeId}`);
-      }
-
-      if (!edge.targetPortId && nodeDefaultPorts[targetNodeId]) {
-        edge.targetPortId = nodeDefaultPorts[targetNodeId].inPort;
-        changes.push(`Added targetPortId to edge ${edgeId}`);
-      }
-    }
-  }
 
   if (contracts) {
     for (const [contractId, contract] of Object.entries(contracts)) {

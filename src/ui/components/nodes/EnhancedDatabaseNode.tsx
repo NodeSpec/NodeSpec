@@ -1,10 +1,10 @@
 import { memo, useState, useCallback } from 'react';
-import { FallbackHandles } from './FallbackHandles.js';
+import { LeafHandles } from './LeafHandles.js';
 import { NodeActionToolbar, useNodeToolbarHover } from './NodeActionToolbar.js';
-import { Handle, Position } from '@xyflow/react';
 import type { RFNodeData } from '../../adapters/graph-to-reactflow.js';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { ContainerBadge } from './ContainerBadge.js';
+import { NodeIcon } from '../common/index.js';
 import { getTechnologyLogo, getTechnologyDisplayName } from '../../utils/technology-logo-map.js';
 import mongodbIcon from '../../assets/mongodb.png';
 import redisIcon from '../../assets/redis.png';
@@ -144,49 +144,20 @@ function EnhancedDatabaseNodeComponent({ data, selected }: DatabaseNodeProps) {
     backgroundColor: theme.mode === 'dark' ? 'rgba(0,0,0,0.15)' : 'rgba(0,0,0,0.02)',
   };
 
-  const inputPorts = data.ports.filter(p => p.direction === 'in');
-  const outputPorts = data.ports.filter(p => p.direction === 'out');
-
   return (
     <div style={containerStyles} className="database-node" {...toolbarHover.nodeHoverProps}>
       <NodeActionToolbar visible={!!selected || toolbarHover.hoverVisible} data={data} bridgeProps={toolbarHover.bridgeProps} />
 
-      <FallbackHandles showTarget={inputPorts.length === 0} showSource={outputPorts.length === 0} />
-      {inputPorts.map((port, index) => (
-        <Handle
-          key={port.id}
-          type="target"
-          position={Position.Left}
-          id={port.id}
-          style={{
-            width: '12px',
-            height: '12px',
-            backgroundColor: accentColor,
-            border: `3px solid ${c.surface}`,
-            top: `${30 + index * 30}px`,
-            boxShadow: '0 2px 4px rgba(0,0,0,0.15)',
-          }}
-          title={port.name}
-        />
-      ))}
-
-      {outputPorts.map((port, index) => (
-        <Handle
-          key={port.id}
-          type="source"
-          position={Position.Right}
-          id={port.id}
-          style={{
-            width: '12px',
-            height: '12px',
-            backgroundColor: accentColor,
-            border: `3px solid ${c.surface}`,
-            top: `${30 + index * 30}px`,
-            boxShadow: '0 2px 4px rgba(0,0,0,0.15)',
-          }}
-          title={port.name}
-        />
-      ))}
+      <LeafHandles
+        style={{
+          width: '12px',
+          height: '12px',
+          backgroundColor: accentColor,
+          border: `3px solid ${c.surface}`,
+          top: '30px',
+          boxShadow: '0 2px 4px rgba(0,0,0,0.15)',
+        }}
+      />
 
       <div style={headerStyles}>
         <div style={iconContainerStyles}>
@@ -197,7 +168,8 @@ function EnhancedDatabaseNodeComponent({ data, selected }: DatabaseNodeProps) {
               style={{ width: '28px', height: '28px', objectFit: 'contain' }}
             />
           ) : (
-            <span style={{ fontSize: '24px' }}>🗄️</span>
+            // No logo: the role icon, then the palette category icon (N4.8), never emoji.
+            <NodeIcon nodeType={data.nodeType} technology={data.technology} emojiIcon={data.icon} size={28} />
           )}
         </div>
         <div style={{ flex: 1 }}>

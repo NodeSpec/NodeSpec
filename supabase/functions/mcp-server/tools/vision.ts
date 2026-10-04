@@ -76,7 +76,7 @@ export async function handleUpdateVision(
       // R6: this claim is now TRUE — the vision is part of both context
       // fingerprints, so the push-time freshness gate regenerates every
       // packet/test-plan that embeds it.
-      nextAction: "Vision recorded. The next git push regenerates every task packet and test plan that embeds it (the freshness gate fingerprints the vision); generate_task_docs refreshes packets on demand. Continue: create_requirement (criteria start unmet) + map_requirement — brownfield, until run_repo_import reports empty coverage; greenfield, draft requirements with the user.",
+      nextAction: "Vision recorded. The next git push regenerates every test plan and each task packet whose node serves a sentence that changed (a packet carries only the sentences its node's outcomes cite); generate_task_docs refreshes packets on demand. Continue: create_requirement (criteria start unmet) + map_requirement: brownfield, until run_repo_import reports empty coverage; greenfield, draft requirements with the user.",
     },
   };
 }

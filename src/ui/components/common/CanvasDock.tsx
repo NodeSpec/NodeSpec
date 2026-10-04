@@ -128,6 +128,7 @@ function CanvasDockComponent({
 
   return (
     <div
+      data-tour="canvas-dock"
       style={{
         position: 'absolute',
         left: '50%',

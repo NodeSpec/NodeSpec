@@ -44,7 +44,7 @@ Deno.test('resume trampoline: static, validated, and hands the fragment back to 
 });
 
 Deno.test('resume trampoline: routed at /authorize/resume without touching the /authorize contract', async () => {
-  const router = await Deno.readTextFile(new URL('../mcp-server/index.ts', import.meta.url));
+  const router = await Deno.readTextFile(new URL('../mcp-server/server.ts', import.meta.url));
   assert(router.includes("subPath === '/authorize/resume'"), 'route registered');
   assert(router.includes('handleOAuthResume(req)'), 'route dispatches to the trampoline');
   // The original /authorize dispatch is byte-identical in shape.
@@ -78,8 +78,8 @@ Deno.test('google lane: hidden required inputs cannot block the MFA submit', () 
   assert(src.includes("document.getElementById('password').required = false"), 'password required cleared');
 });
 
-Deno.test('google button is HOSTED-only: gated on !isSelfHosted, hidden markup by default', () => {
-  assert(src.includes('googleEnabled: !isSelfHosted()'), 'render flag from deployment module');
+Deno.test('google button is hosted by default, self-hosted by explicit opt-in (4b.4), hidden markup by default', () => {
+  assert(src.includes('googleEnabled: !isSelfHosted() || consentGoogleOptIn()'), 'render flag: hosted always, self-hosted opts in with MCP_CONSENT_GOOGLE=true');
   assert(src.includes('if (__params.googleEnabled)'), 'client reveal is gated');
   assert(src.includes('.btn-google { display: none;'), 'markup ships hidden');
 });

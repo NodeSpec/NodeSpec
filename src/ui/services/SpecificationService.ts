@@ -27,7 +27,8 @@ export interface ProjectSpecification {
   rawInput?: string;
   createdAt: string;
   updatedAt: string;
-  createdBy: string;
+  /** Null once the account that wrote it is deleted (owner 2026-09-27). */
+  createdBy: string | null;
   metadata: Record<string, any>;
   lockedNodes?: string[];
   phaseStatus?: PhaseStatus;
@@ -62,6 +63,8 @@ export interface Requirement {
   status: 'pending' | 'in-progress' | 'implemented' | 'validated' | 'blocked';
   confirmed: boolean;
   locked: boolean;
+  /** 9.8 (v3y): the explicit archive — a human act; the lineage archive is derived beside it. */
+  archivedAt?: string | null;
   sectionId: string | null;
   source: 'manual' | 'ai-generated' | 'imported';
   acceptanceCriteria: AcceptanceCriterionRecord[];
@@ -126,8 +129,11 @@ export interface UpdateRequirementInput {
   description?: string;
   category?: Requirement['category'];
   priority?: string | null;
+  /** LEGACY (9.8): no app surface writes it; the derived ladder is the status. */
   status?: Requirement['status'];
   locked?: boolean;
+  /** 9.8: the explicit archive — true sets archived_at, false clears it. */
+  archived?: boolean;
   confirmed?: boolean;
   acceptanceCriteria?: Requirement['acceptanceCriteria'];
   architectureTrace?: string[];
@@ -513,7 +519,8 @@ export class SpecificationService {
       return { updatedCount: 0, orphanedCount: 0 };
     }
 
-    const mainBranch = branchesResult.data.find((b: any) => b.name === 'main');
+    // AD.4 (D15): the primary branch by its flag; connect may have renamed it.
+    const mainBranch = branchesResult.data.find((b: any) => b.isPrimary);
     if (!mainBranch) {
       return { updatedCount: 0, orphanedCount: 0 };
     }

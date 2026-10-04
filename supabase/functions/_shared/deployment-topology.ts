@@ -10,7 +10,6 @@ export interface DeploymentPattern {
   services: string[];
   directories: string[];
   suggestedTarget: string;
-  suggestedRoles: string[];
 }
 
 export interface DeploymentTopology {
@@ -21,11 +20,6 @@ export interface DeploymentTopology {
 interface FileInput {
   path: string;
   content: string;
-}
-
-interface CatalogDeploymentTarget {
-  id: string;
-  compatible_roles: string[];
 }
 
 interface CatalogProviderPattern {
@@ -58,7 +52,6 @@ function detectServerless(files: FileInput[]): DeploymentPattern[] {
         services: resources.names,
         directories: resources.codePaths.length > 0 ? resources.codePaths : [dir],
         suggestedTarget: "serverless",
-        suggestedRoles: ["backend-service", "rest-api", "worker"],
       });
     }
 
@@ -73,7 +66,6 @@ function detectServerless(files: FileInput[]): DeploymentPattern[] {
         services: functions,
         directories: [dir],
         suggestedTarget: "serverless",
-        suggestedRoles: ["backend-service", "rest-api", "worker"],
       });
     }
 
@@ -87,7 +79,6 @@ function detectServerless(files: FileInput[]): DeploymentPattern[] {
         services: hasApi ? ["api-routes"] : ["static-site"],
         directories: [dir],
         suggestedTarget: hasApi ? "serverless" : "static-hosting",
-        suggestedRoles: hasApi ? ["frontend-app", "rest-api"] : ["frontend-app", "static-site"],
       });
     }
 
@@ -103,7 +94,6 @@ function detectServerless(files: FileInput[]): DeploymentPattern[] {
         services: [name, ...(hasDO ? ["durable-objects"] : []), ...(hasD1 ? ["d1-database"] : [])],
         directories: [dir],
         suggestedTarget: "edge",
-        suggestedRoles: ["backend-service", "rest-api"],
       });
     }
   }
@@ -129,7 +119,6 @@ function detectPaaS(files: FileInput[]): DeploymentPattern[] {
         services: [app],
         directories: [dir],
         suggestedTarget: "container",
-        suggestedRoles: hasHttp ? ["backend-service", "rest-api"] : ["worker"],
       });
     }
 
@@ -143,7 +132,6 @@ function detectPaaS(files: FileInput[]): DeploymentPattern[] {
         services: procs,
         directories: [dir],
         suggestedTarget: "container",
-        suggestedRoles: procs.includes("web") ? ["backend-service", "rest-api"] : ["worker"],
       });
     }
 
@@ -158,7 +146,6 @@ function detectPaaS(files: FileInput[]): DeploymentPattern[] {
           services: [`appengine-${runtime}`],
           directories: [dir],
           suggestedTarget: "managed-cloud",
-          suggestedRoles: ["backend-service", "rest-api"],
         });
       }
     }
@@ -172,7 +159,6 @@ function detectPaaS(files: FileInput[]): DeploymentPattern[] {
         services: ["railway-service"],
         directories: [dir],
         suggestedTarget: "container",
-        suggestedRoles: ["backend-service"],
       });
     }
 
@@ -186,7 +172,6 @@ function detectPaaS(files: FileInput[]): DeploymentPattern[] {
         services,
         directories: [dir],
         suggestedTarget: "container",
-        suggestedRoles: ["backend-service", "rest-api", "worker"],
       });
     }
   }
@@ -213,7 +198,6 @@ function detectKubernetes(files: FileInput[]): DeploymentPattern[] {
         services: [chartName],
         directories: [dir],
         suggestedTarget: "kubernetes-pod",
-        suggestedRoles: ["backend-service", "worker"],
       });
     }
 
@@ -228,7 +212,6 @@ function detectKubernetes(files: FileInput[]): DeploymentPattern[] {
       const namespace = f.content.match(/namespace:\s*(\S+)/)?.[1];
 
       if (kind === "Deployment" || kind === "StatefulSet" || kind === "DaemonSet" || kind === "Job" || kind === "CronJob") {
-        const image = f.content.match(/image:\s*['"]?([^\s'"]+)/)?.[1];
         patterns.push({
           type: "kubernetes",
           provider: "kubernetes",
@@ -236,7 +219,6 @@ function detectKubernetes(files: FileInput[]): DeploymentPattern[] {
           services: [namespace ? `${namespace}/${name}` : name],
           directories: [dir],
           suggestedTarget: "kubernetes-pod",
-          suggestedRoles: inferK8sRoles(kind, f.content, image),
         });
       }
     }
@@ -254,21 +236,6 @@ function isKubernetesManifest(content: string): boolean {
     /apiVersion:\s*(apps\/v1|batch\/v1|v1)/.test(content) &&
     /kind:\s*(Deployment|Service|StatefulSet|DaemonSet|Job|CronJob|Ingress|ConfigMap)/.test(content)
   );
-}
-
-function inferK8sRoles(kind: string, content: string, image?: string): string[] {
-  if (kind === "CronJob" || kind === "Job") return ["worker", "scheduler"];
-  if (kind === "DaemonSet") return ["worker", "monitoring"];
-  if (image) {
-    if (/postgres|mysql|mariadb|mongo/i.test(image)) return ["database"];
-    if (/redis|memcached/i.test(image)) return ["cache"];
-    if (/kafka|rabbitmq|nats/i.test(image)) return ["message-broker"];
-    if (/nginx|traefik|envoy|haproxy/i.test(image)) return ["backend-service", "rest-api"];
-  }
-  if (content.includes("containerPort") || content.includes("ports:")) {
-    return ["backend-service", "rest-api"];
-  }
-  return ["backend-service", "worker"];
 }
 
 function extractSAMFunctions(content: string): { names: string[]; codePaths: string[] } {
@@ -340,29 +307,6 @@ function deduplicateK8sPatterns(patterns: DeploymentPattern[]): DeploymentPatter
   return Array.from(seen.values());
 }
 
-// ---------------------------------------------------------------------------
-// Cross-reference with catalog
-// ---------------------------------------------------------------------------
-
-function crossReferenceRoles(
-  patterns: DeploymentPattern[],
-  deploymentTargets: CatalogDeploymentTarget[],
-): void {
-  const targetMap = new Map(deploymentTargets.map((t) => [t.id, t.compatible_roles]));
-
-  for (const pattern of patterns) {
-    const compatibleRoles = targetMap.get(pattern.suggestedTarget);
-    if (compatibleRoles) {
-      pattern.suggestedRoles = pattern.suggestedRoles.filter((r) =>
-        compatibleRoles.includes(r),
-      );
-      if (pattern.suggestedRoles.length === 0) {
-        pattern.suggestedRoles = compatibleRoles.slice(0, 3);
-      }
-    }
-  }
-}
-
 function selectProviderGuidance(
   patterns: DeploymentPattern[],
   providerPatterns: CatalogProviderPattern[],
@@ -389,7 +333,6 @@ function selectProviderGuidance(
 
 export function extractDeploymentTopology(
   files: FileInput[],
-  deploymentTargets?: CatalogDeploymentTarget[],
   providerPatterns?: CatalogProviderPattern[],
 ): DeploymentTopology {
   const infraFiles = files.filter((f) => {
@@ -424,10 +367,6 @@ export function extractDeploymentTopology(
   const kubernetes = detectKubernetes(infraFiles);
   const allPatterns = [...serverless, ...paas, ...kubernetes];
 
-  if (deploymentTargets && deploymentTargets.length > 0) {
-    crossReferenceRoles(allPatterns, deploymentTargets);
-  }
-
   const providerGuidance = providerPatterns
     ? selectProviderGuidance(allPatterns, providerPatterns)
     : [];
@@ -454,7 +393,7 @@ export function formatDeploymentTopologyForPrompt(topology: DeploymentTopology):
         `    ${p.provider}: ${p.services.join(", ")} (config: ${p.configFile})`,
       );
       lines.push(
-        `      target=${p.suggestedTarget}, roles=[${p.suggestedRoles.join(", ")}], dirs=[${p.directories.join(", ")}]`,
+        `      target=${p.suggestedTarget}, dirs=[${p.directories.join(", ")}]`,
       );
     }
   }

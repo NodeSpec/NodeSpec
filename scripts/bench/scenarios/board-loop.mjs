@@ -3,7 +3,7 @@
 // apply_ticks flips the database, and the next regeneration renders the
 // ticks back. An assistant that has never heard of NodeSpec can work the
 // project from this one file.
-import { callFn, rest, github, postSignedWebhook, mcpCall, uid, until, Scenario, boardDigest } from '../lib.mjs';
+import { callFn, rest, github, postSignedWebhook, mcpCall, uid, until, Scenario, boardDigest, parseMcp } from '../lib.mjs';
 import { createProject, connectRepo } from '../fixtures.mjs';
 
 const BOARD = '.nodespec/BOARD.md';
@@ -28,10 +28,6 @@ const anchoredDoc = () => [
   `- [ ] **T2 — ${T2_TITLE}** <!-- t:${anchorKey(T2_TITLE)} -->`, '',
 ].join('\n');
 
-const parseMcp = (r) => {
-  const text = r.data?.result?.content?.[0]?.text;
-  try { return JSON.parse(text); } catch { return { raw: text, isError: r.data?.result?.isError }; }
-};
 
 export const boardLoop = {
   name: 'board-loop',
@@ -108,7 +104,7 @@ export const boardLoop = {
 
     const cards = await until(async () => {
       const rows = await db.select('git_change_events',
-        `project_id=eq.${fx.ids.project}&status=eq.pending&select=id,metadata`);
+        `project_id=eq.${fx.ids.project}&status=eq.pending&select=id,commit_sha,metadata`);
       return rows.length > 0 ? rows : null;
     });
     const card = cards?.[0];
@@ -120,27 +116,46 @@ export const boardLoop = {
       JSON.stringify({ critDeltas, taskDeltas }).slice(0, 400));
     s.check('BOARD.md never reads as residue', !(card?.metadata?.residuePaths ?? []).includes(BOARD));
 
-    // Approve with apply_ticks — the SAME resolve the task-doc lane uses.
+    // Approve with apply_ticks, the SAME resolve the task-doc lane uses. AD.3
+    // (ruling 3): the agent marks the task done; the criterion tick is the
+    // person's, applied in the Git panel.
     const resolved = parseMcp(await mcpCall(env, 'resolve_change', {
-      change_event_id: card.id, resolution: 'accepted', apply_ticks: true,
+      change_event_id: card.id, commit_sha: card.commit_sha, resolution: 'accepted', apply_ticks: true,
     }));
-    s.check('apply_ticks flips the criterion AND creates the task_items row',
-      (resolved?.criteriaApplied ?? 0) >= 1 && (resolved?.tasksApplied ?? 0) >= 1,
+    s.check('apply_ticks creates the task_items row and leaves the criterion for the person',
+      // UAT hardening 2026-09-27: one box of each was ticked, so exactly one.
+      resolved?.tasksApplied === 1 && (resolved?.criteriaApplied ?? 0) === 0 && resolved?.waitingForPerson?.criteria === 1,
       JSON.stringify(resolved ?? {}).slice(0, 300));
+    const personApply = await callFn(env, session, 'git-pull', { integrationId, mode: 'apply-criteria', changeEventId: card.id });
+    s.check('the person applies the board\'s criterion tick', personApply.data.success && personApply.data.applied === 1,
+      JSON.stringify(personApply.data).slice(0, 200));
 
     const [req] = await db.select('specification_requirements', `id=eq.${fx.ids.req1}&select=acceptance_criteria`);
     const flipped = (req?.acceptance_criteria ?? []).find((c) => c.text === CRIT);
     const taskRows = await db.select('task_items',
       `project_id=eq.${fx.ids.project}&node_id=eq.${fx.ids.nodeApi}&task_key=eq.${anchorKey(T1_TITLE)}&select=done,provenance`);
-    s.check('database state: criterion met with git provenance, task done',
-      flipped?.met === true && taskRows?.[0]?.done === true,
+    s.check('database state: criterion met with git provenance applied by the person, task done from git',
+      flipped?.met === true && flipped?.provenance?.source === 'git' && !!flipped?.provenance?.commitSha &&
+      flipped?.provenance?.appliedBy === session.userId &&
+      taskRows.length === 1 && taskRows[0].done === true && taskRows[0].provenance?.source === 'git',
       JSON.stringify({ flipped, taskRow: taskRows?.[0] }).slice(0, 300));
 
-    // Regeneration renders the ticks back — the projection converges.
+    // AD.1 (ruling 4) with AD.3: the card holds the tick commit until it is
+    // accepted. With every tick applied the accept resolves it and the last
+    // sync moves past that commit; until then a push leaves BOARD.md as git
+    // has it (bench 2026-09-25: the scenario pushed with the card still open).
+    const settled = parseMcp(await mcpCall(env, 'resolve_change', {
+      change_event_id: card.id, commit_sha: card.commit_sha, resolution: 'accepted',
+    }));
+    s.check('with every tick applied, the accept resolves the card', settled?.resolution === 'accepted',
+      JSON.stringify(settled ?? {}).slice(0, 200));
+
+    // Regeneration renders the ticks back: the projection converges.
     const push2 = await callFn(env, session, 'git-push', {
       projectId: fx.ids.project, branchName: 'main', integrationId, confirmOverwrite: true,
     });
-    s.check('second push succeeds', push2.data.success, JSON.stringify(push2.data).slice(0, 200));
+    s.check('second push succeeds and writes the board', push2.data.success &&
+      !(push2.data.skipped ?? []).some((x) => x.path === BOARD), JSON.stringify(push2.data).slice(0, 200));
     const regen = await until(async () => {
       const f = await gh.getFile(BOARD, push2.data.commitSha);
       return f?.content.includes(`- [x] ${CRIT}`) ? f : null;

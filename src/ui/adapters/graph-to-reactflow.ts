@@ -14,14 +14,16 @@
  */
 
 import type { Node as RFNode, Edge as RFEdge } from '@xyflow/react';
-import type { Graph, Node, Edge, Contract, Port, EntityStatus, NodeGroup } from '@nodespec/core/types.js';
+import type { Graph, Node, Edge, Contract, EntityStatus, NodeGroup } from '@nodespec/core/types.js';
 import { deriveArchitecturalObligations } from '@nodespec/core/obligations.js';
 import { effectiveTreatmentForRole } from '@nodespec/core/ontology.js';
 import { dominantChildTechnologies } from '../utils/semantic-zoom.js';
 import { getNodeTypeById } from '@nodespec/core/node-types.js';
 import type { CatalogResolver } from '../../persistence/supabase/catalog-repository.js';
 import { resolveRFVisualType, isContainerType, isLogicalBoundaryType } from './rf-visual-type-resolver.js';
+import { ROWS_SHOWN, asAccess, asDataModel, asReference, type Access, type DataModel, type DataShape, type GroupEntry, type Reference } from './data-shape.js';
 import { calculateFlowAwareContainerSize } from '../utils/container-child-layout.js';
+import { hasRepoImportCanvas } from '../config/edition.js';
 
 export interface RFNodeData extends Record<string, unknown> {
   label: string;
@@ -33,7 +35,6 @@ export interface RFNodeData extends Record<string, unknown> {
   icon?: string;
   color?: string;
   artifacts: string[];
-  ports: Port[];
   metadata: Record<string, unknown>;
   hasError: boolean;
   errorMessage?: string;
@@ -41,6 +42,10 @@ export interface RFNodeData extends Record<string, unknown> {
   isDraft: boolean;
   highlighted?: boolean;
   isLocked?: boolean;
+  /** AA.5: a fresh lease on the node (its holder, the level, since when); the node is locked for everyone else. */
+  lease?: { holder: string; level: 'node' | 'work'; since: string; count: number; mine: boolean } | null;
+  /** AA.2: the active change's constraints, marked on a node in its scope while the scope is shown. */
+  changeConstraints?: number;
   isDropTarget?: boolean;
   containerParentLabel?: string;
   containerPlacementKind?: string;
@@ -53,6 +58,12 @@ export interface RFNodeData extends Record<string, unknown> {
   transitionPhase?: 'idle' | 'entering-nested' | 'exiting-nested';
   artifactCount?: number;
   isInsideLogicalBoundary?: boolean;
+  /** AA.3: exploded into its parts: a box whose role is not a container. */
+  exploded?: boolean;
+  /** AA.3b: an exploded data store: its model and how many groups and items it holds. */
+  dataShape?: DataShape;
+  /** AA.3b: a group of a data store (a table group): what it lists. */
+  group?: { model: DataModel | null; entries: GroupEntry[] };
   onToggleLock?: () => void;
   onUpdateMetadata?: (updates: Record<string, unknown>) => void;
   onFitChildren?: () => void;
@@ -114,12 +125,42 @@ export interface RFEdgeData extends Record<string, unknown> {
   layerMode?: ArchitectureLayerMode;
   direction?: 'unidirectional' | 'bidirectional';
   criticality?: 'required' | 'optional' | 'fallback';
+  /** RI-6: repo-import evidence behind the edge (hosted + enterprise). */
+  importEvidence?: ImportEdgeEvidence;
+  /** AA.2: while a change's scope is shown: inside it, crossing into it, or outside it. */
+  scopeState?: 'in' | 'crossing' | 'out';
+  /** AA.3: an end is drawn on the collapsed box that hides it, not on the node it names. */
+  rolledUp?: boolean;
+  /** AA.3b: a service edge landing on a data store's group reads, writes or both. */
+  access?: Access;
+  /** AA.3b: an edge between two groups: a foreign key, or a reference kept in code. */
+  reference?: Reference;
+}
+
+export interface ImportEdgeEvidence {
+  kind: string;
+  count: number;
+  samples: string[];
+}
+
+/** edge.metadata.evidence as written by the import synthesizer, or undefined. */
+export function readImportEdgeEvidence(metadata: Record<string, unknown> | undefined): ImportEdgeEvidence | undefined {
+  if (!hasRepoImportCanvas || !metadata) return undefined;
+  const ev = metadata.evidence as { kind?: unknown; count?: unknown; samples?: unknown } | undefined;
+  if (!ev || typeof ev.count !== 'number') return undefined;
+  return {
+    kind: typeof ev.kind === 'string' ? ev.kind : 'import',
+    count: ev.count,
+    samples: Array.isArray(ev.samples) ? ev.samples.filter((s): s is string => typeof s === 'string') : [],
+  };
 }
 
 export type SpecGraphRFNode = RFNode<RFNodeData>;
 export type SpecGraphRFEdge = RFEdge<RFEdgeData>;
 
-export type CanvasViewMode = 'decomposition' | 'architecture';
+// V3 P3: the shell's CanvasViewMode ('ideation' | 'architecture') lives in
+// ViewToggle.tsx — this adapter serves the Architecture canvas only, and
+// its one dimension is the layer mode.
 export type ArchitectureLayerMode = 'flat' | 'nested';
 
 export function mapGraphToRFNodes(graph: Graph, layerMode: ArchitectureLayerMode = 'nested', catalog?: CatalogResolver | null, maxDepth?: number): SpecGraphRFNode[] {
@@ -171,8 +212,27 @@ export function mapNodeToRFNode(node: Node, graph: Graph, layerMode: Architectur
   const childTechnologies = childCount > 0 ? dominantChildTechnologies(children) : undefined;
 
   const rfNodeType = resolveRFVisualType(node.type, catalog);
-  const nodeIsContainer = isContainerType(node.type, catalog);
+  const roleIsContainer = isContainerType(node.type, catalog);
   const nodeIsLogicalBoundary = rfNodeType === 'logicalBoundary';
+  // AA.3: a node whose role is not a container has children only when it is
+  // exploded into its parts. AB.7 (owner 2026-09-24): parts are what a node is
+  // made of, not where it runs. The deployment view never shows them: the node
+  // is itself, in its host. The functional view shows it as a card that opens
+  // on demand (metadata.partsShown, the viewer's own view state): a data store
+  // opens into its schema, anything else into its parts.
+  const exploded = !roleIsContainer && !nodeIsLogicalBoundary && childCount > 0;
+  const explodedBox = exploded && layerMode === 'flat';
+  const partsShown = explodedBox && partsAreShown(node);
+  const nodeIsContainer = roleIsContainer || explodedBox;
+  // AA.3b: an exploded data store and its groups (their shape, in the functional view).
+  const dataChildren = explodedBox ? children.filter((c) => isDataPartNode(c, catalog)) : [];
+  const dataShape: DataShape | undefined = dataChildren.length > 0
+    ? { model: dataModelOf(node, catalog), groups: dataChildren.length, items: dataChildren.reduce((n, c) => n + groupEntries(c, graph).length, 0) }
+    : undefined;
+  const parentNode = node.parentId ? graph.nodes[node.parentId] : undefined;
+  const group = parentNode && isDataPartNode(node, catalog)
+    ? { model: dataModelOf(parentNode, catalog), entries: groupEntries(node, graph) }
+    : undefined;
 
   const position = { x: 0, y: 0 };
 
@@ -183,16 +243,22 @@ export function mapNodeToRFNode(node: Node, graph: Graph, layerMode: Architectur
   let isInsideLogicalBoundary = false;
 
   if (layerMode === 'nested' && !nodeIsContainer && !nodeIsLogicalBoundary) {
-    actualRFType = 'icon';
+    actualRFType = group ? 'tableGroup' : 'icon';
   }
 
   if (layerMode === 'flat') {
-    if (nodeIsContainer && !nodeIsLogicalBoundary) {
+    // AA.3: the flat view hides hosting boxes and shows what they hold; an
+    // exploded node is not a hosting box, so it shows. AB.7: its parts show
+    // inside it once it is opened, and roll up into it while it is closed.
+    if (roleIsContainer && !nodeIsLogicalBoundary) {
       shouldBeHidden = true;
     }
     if (node.parentId) {
       const parent = graph.nodes[node.parentId];
-      if (parent && isLogicalBoundaryType(parent.type, catalog)) {
+      if (parent && isExplodedNode(parent, graph, catalog)) {
+        if (partsAreShown(parent)) actualRFType = group ? 'tableGroup' : 'icon';
+        else shouldBeHidden = true;
+      } else if (parent && isLogicalBoundaryType(parent.type, catalog)) {
         isInsideLogicalBoundary = true;
         if (!nodeIsContainer && !nodeIsLogicalBoundary) {
           actualRFType = 'icon';
@@ -235,7 +301,6 @@ export function mapNodeToRFNode(node: Node, graph: Graph, layerMode: Architectur
         const art = graph.artifacts[aid];
         return art && art.status !== 'suggested';
       }).length,
-      ports: node.ports ?? [],
       metadata: {
         ...node.metadata ?? {},
         childCount,
@@ -251,14 +316,20 @@ export function mapNodeToRFNode(node: Node, graph: Graph, layerMode: Architectur
       containerPlacementKind: containerParentLabel ? (node.placementKind || 'contains') : undefined,
       sealedBoundary: sealedBoundary || undefined,
       isInsideLogicalBoundary: isInsideLogicalBoundary || undefined,
+      exploded: explodedBox || undefined,
+      ...(dataShape ? { dataShape } : {}),
+      ...(group ? { group } : {}),
     },
-    zIndex: nodeIsContainer ? 1 : 10,
+    zIndex: roleIsContainer || partsShown ? 1 : 10,
     hidden: shouldBeHidden,
   };
 
   if (node.parentId && layerMode === 'nested') {
     const parent = graph.nodes[node.parentId];
-    if (!parent) {
+    if (parent && isExplodedNode(parent, graph, catalog)) {
+      // AB.7: a part never shows where things run; its node stands for it.
+      rfNode.hidden = true;
+    } else if (!parent) {
       // Dangling parentId (e.g. the container was deleted without reparenting children):
       // render as a root node. Setting rfNode.parentId to a non-existent node makes React
       // Flow drop the child SILENTLY — the "node vanished until refresh" bench symptom.
@@ -277,7 +348,11 @@ export function mapNodeToRFNode(node: Node, graph: Graph, layerMode: Architectur
 
   if (node.parentId && layerMode === 'flat') {
     const parent = graph.nodes[node.parentId];
-    if (parent && isLogicalBoundaryType(parent.type, catalog)) {
+    if (parent && isExplodedNode(parent, graph, catalog) && partsAreShown(parent)) {
+      rfNode.parentId = node.parentId;
+      rfNode.extent = 'parent' as const;
+      rfNode.zIndex = 10;
+    } else if (parent && isLogicalBoundaryType(parent.type, catalog)) {
       const parentIsExpanded = (parent?.metadata?.containerExpanded as boolean | undefined) ?? true;
       if (parentIsExpanded) {
         rfNode.parentId = node.parentId;
@@ -289,7 +364,7 @@ export function mapNodeToRFNode(node: Node, graph: Graph, layerMode: Architectur
     }
   }
 
-  if (nodeIsContainer && (layerMode === 'nested' || nodeIsLogicalBoundary)) {
+  if (nodeIsContainer && (layerMode === 'nested' || nodeIsLogicalBoundary || explodedBox)) {
     const nestedContainerCount = Object.values(graph.nodes).filter(
       n => n.parentId === node.id && isContainerType(n.type, catalog),
     ).length;
@@ -311,7 +386,8 @@ export function mapNodeToRFNode(node: Node, graph: Graph, layerMode: Architectur
         rfNode.height = Math.max(minSize.height, metaH ?? 0);
       }
     } else {
-      const isExpanded = (node.metadata?.containerExpanded as boolean | undefined) ?? true;
+      // AB.7: an exploded node opens by its own toggle, closed until opened.
+      const isExpanded = explodedBox ? partsShown : ((node.metadata?.containerExpanded as boolean | undefined) ?? true);
 
       rfNode.type = 'container';
 
@@ -321,8 +397,9 @@ export function mapNodeToRFNode(node: Node, graph: Graph, layerMode: Architectur
       } else {
         const metaW = node.metadata?.width as number | undefined;
         const metaH = node.metadata?.height as number | undefined;
-        rfNode.width = Math.max(minSize.width, metaW ?? 0);
-        rfNode.height = Math.max(minSize.height, metaH ?? 0);
+        const fit = explodedBox ? layoutParts(node.id, graph, catalog).sizing : minSize;
+        rfNode.width = Math.max(fit.width, metaW ?? 0);
+        rfNode.height = Math.max(fit.height, metaH ?? 0);
       }
     }
   }
@@ -339,7 +416,6 @@ export function mapNodeGroupToRFNode(nodeGroup: NodeGroup): SpecGraphRFNode {
       label: nodeGroup.label,
       nodeType: 'node_group',
       artifacts: [],
-      ports: [],
       metadata: nodeGroup.metadata ?? {},
       hasError: false,
       isDraft: false,
@@ -374,6 +450,142 @@ export function computeMaxNestingDepth(graph: Graph): number {
     if (depth > max) max = depth;
   }
   return max;
+}
+
+/** AA.3b: a part that groups a data store's contents (a table group): its role
+ *  is a part whose interface is data. Before the catalog is read, the table
+ *  group's own role id. A table list alone does not make one: a database the
+ *  person drew carries its tables too, and it is a database wherever it sits. */
+export function isDataPartNode(node: Node, catalog?: CatalogResolver | null): boolean {
+  const role = catalog?.getRole(node.type);
+  if (role) return (role.capabilityTags ?? []).includes('part') && role.interfaceKind === 'data';
+  return node.type === 'part-table-group';
+}
+
+/** AA.3b: the data model of a node's technology, from its catalog row. */
+function dataModelOf(node: Node, catalog?: CatalogResolver | null): DataModel | null {
+  if (!catalog || !node.technology) return null;
+  return asDataModel(catalog.getTechnology(node.technology)?.aiContext?.dataModel);
+}
+
+/** AA.3b: what a group lists, each with the file that defines it when that
+ *  file is bound. Item 25: the file may live anywhere in the project (a
+ *  service's migrations, one schema file left on the database); the group's
+ *  own file wins, and the row opens it on the node that holds it. */
+function groupEntries(node: Node, graph: Graph): GroupEntry[] {
+  const raw = Array.isArray(node.metadata?.tables) ? node.metadata!.tables as Array<Record<string, unknown>> : [];
+  const artifactByPath = new Map<string, { id: string; nodeId: string }>();
+  for (const a of Object.values(graph.artifacts)) {
+    if (!a.path || !a.nodeId || a.kind === 'task' || a.kind === 'test-plan') continue;
+    if (a.nodeId === node.id || !artifactByPath.has(a.path)) artifactByPath.set(a.path, { id: a.id, nodeId: a.nodeId });
+  }
+  return raw
+    .filter((t) => t && typeof t.name === 'string' && t.name)
+    .map((t) => {
+      const entry: GroupEntry = { name: String(t.name) };
+      if (typeof t.columns === 'number') entry.columns = t.columns;
+      if (Array.isArray(t.keys)) entry.keys = t.keys.map(String);
+      if (typeof t.kind === 'string') entry.kind = t.kind;
+      if (typeof t.note === 'string') entry.note = t.note;
+      if (typeof t.file === 'string') {
+        entry.file = t.file;
+        const bound = artifactByPath.get(t.file);
+        if (bound) { entry.artifactId = bound.id; entry.artifactNodeId = bound.nodeId; }
+      }
+      return entry;
+    });
+}
+
+/** AB.7: whether the viewer opened an exploded node to show its parts (its schema, for a data store). Closed by default. */
+export function partsAreShown(node: Node): boolean {
+  return node.metadata?.partsShown === true;
+}
+
+/** AB.7: a part of an exploded node. It is placed inside its node, never on its own. */
+export function isPartNode(node: Node, graph: Graph, catalog?: CatalogResolver | null): boolean {
+  const parent = node.parentId ? graph.nodes[node.parentId] : undefined;
+  return !!parent && isExplodedNode(parent, graph, catalog);
+}
+
+const PARTS_PAD_X = 40;
+const PARTS_PAD_TOP = 72;
+const PARTS_PAD_BOTTOM = 40;
+const PARTS_GAP = 32;
+const GROUP_WIDTH = 340;
+const ICON_SIZE = 80;
+
+/** AB.7: where an opened node's parts sit inside it (relative to it), and the
+ *  size that holds them. A table group is as tall as the rows it shows. */
+export function layoutParts(
+  nodeId: string,
+  graph: Graph,
+  catalog?: CatalogResolver | null,
+): { positions: Array<{ id: string; x: number; y: number }>; sizing: { width: number; height: number } } {
+  const parts = Object.values(graph.nodes)
+    .filter((n) => n.parentId === nodeId)
+    .sort((a, b) => a.label.localeCompare(b.label));
+  if (parts.length === 0) return { positions: [], sizing: { width: 240, height: 80 } };
+
+  const sized = parts.map((p) => {
+    if (!isDataPartNode(p, catalog)) return { id: p.id, w: ICON_SIZE, h: ICON_SIZE };
+    const rows = groupEntries(p, graph).length;
+    const shown = Math.min(rows, ROWS_SHOWN);
+    return { id: p.id, w: GROUP_WIDTH, h: 56 + Math.max(1, shown) * 34 + (rows > ROWS_SHOWN ? 34 : 0) };
+  });
+  const cols = Math.min(sized.length, sized.some((s) => s.w === GROUP_WIDTH) ? 2 : 4);
+  const cellW = Math.max(...sized.map((s) => s.w));
+
+  const positions: Array<{ id: string; x: number; y: number }> = [];
+  let y = PARTS_PAD_TOP;
+  for (let row = 0; row * cols < sized.length; row++) {
+    const inRow = sized.slice(row * cols, row * cols + cols);
+    inRow.forEach((s, col) => positions.push({ id: s.id, x: PARTS_PAD_X + col * (cellW + PARTS_GAP), y }));
+    y += Math.max(...inRow.map((s) => s.h)) + PARTS_GAP;
+  }
+  return {
+    positions,
+    sizing: {
+      width: PARTS_PAD_X * 2 + cols * cellW + (cols - 1) * PARTS_GAP,
+      height: y - PARTS_GAP + PARTS_PAD_BOTTOM,
+    },
+  };
+}
+
+/** AA.3: a node whose role is not a container but that has children: it is exploded into its parts. */
+export function isExplodedNode(node: Node, graph: Graph, catalog?: CatalogResolver | null): boolean {
+  if (isContainerType(node.type, catalog) || isLogicalBoundaryType(node.type, catalog)) return false;
+  return Object.values(graph.nodes).some((n) => n.parentId === node.id);
+}
+
+/** A box that collapses and expands (a container or a logical boundary). AB.7:
+ *  an exploded node is not one: its parts open by its own toggle, in the
+ *  functional view only. */
+export function isBoxNode(node: Node, _graph: Graph, catalog?: CatalogResolver | null): boolean {
+  return isContainerType(node.type, catalog) || isLogicalBoundaryType(node.type, catalog);
+}
+
+/**
+ * AA.3: where an edge's end shows on the canvas. Nested: the node itself, or the
+ * outermost collapsed box hiding it, so a collapsed box shows its outside edges.
+ * AB.7: a part rolls up into its exploded node in the deployment view always,
+ * and in the functional view while the node is closed.
+ */
+export function visibleEndpoint(nodeId: string, graph: Graph, layerMode: ArchitectureLayerMode, catalog?: CatalogResolver | null): string {
+  let shown = nodeId;
+  const visited = new Set<string>();
+  let currentId: string | undefined = graph.nodes[nodeId]?.parentId;
+  while (currentId && !visited.has(currentId)) {
+    visited.add(currentId);
+    const ancestor = graph.nodes[currentId];
+    if (!ancestor) break;
+    if (isExplodedNode(ancestor, graph, catalog)) {
+      if (layerMode === 'nested' || !partsAreShown(ancestor)) shown = ancestor.id;
+    } else if (layerMode === 'nested' && ((ancestor.metadata?.containerExpanded as boolean | undefined) ?? true) === false) {
+      shown = ancestor.id;
+    }
+    currentId = ancestor.parentId;
+  }
+  return shown;
 }
 
 export function isAncestorCollapsed(nodeId: string, graph: Graph): boolean {
@@ -518,25 +730,38 @@ export function computeCrossContainerSummaries(graph: Graph, catalog?: CatalogRe
 export function mapGraphToRFEdges(graph: Graph, layerMode: ArchitectureLayerMode = 'nested', catalog?: CatalogResolver | null): SpecGraphRFEdge[] {
   const edges = Object.values(graph.edges);
 
-  const edgeGroups = new Map<string, Edge[]>();
+  const rolledGroups = new Map<string, Edge[]>();
   for (const edge of edges) {
-    const key = `${edge.source}-${edge.target}`;
-    if (!edgeGroups.has(key)) {
-      edgeGroups.set(key, []);
+    const key = `${visibleEndpoint(edge.source, graph, layerMode, catalog)}-${visibleEndpoint(edge.target, graph, layerMode, catalog)}`;
+    if (!rolledGroups.has(key)) {
+      rolledGroups.set(key, []);
     }
-    edgeGroups.get(key)!.push(edge);
+    rolledGroups.get(key)!.push(edge);
   }
 
   return edges.map((edge) => {
-    const key = `${edge.source}-${edge.target}`;
-    const group = edgeGroups.get(key)!;
+    // AA.3: an end hidden inside a collapsed box (or a part in the flat view)
+    // shows on the box; edges that now share a pair of ends are staggered together.
+    const source = visibleEndpoint(edge.source, graph, layerMode, catalog);
+    const target = visibleEndpoint(edge.target, graph, layerMode, catalog);
+    const key = `${source}-${target}`;
+    const group = rolledGroups.get(key)!;
     const index = group.indexOf(edge);
 
     const visibility = layerMode === 'nested' ? classifyEdge(edge, graph, catalog) : 'external';
     const staggerPx = visibility === 'intra-container' ? 15 : 30;
     const offset = group.length > 1 ? (index - (group.length - 1) / 2) * staggerPx : 0;
 
-    return mapEdgeToRFEdge(edge, graph, offset, visibility, layerMode);
+    const rfEdge = mapEdgeToRFEdge(edge, graph, offset, visibility, layerMode);
+    if (source === edge.source && target === edge.target) return rfEdge;
+    return {
+      ...rfEdge,
+      source,
+      target,
+      // Both ends inside the same collapsed box: the edge is inside it.
+      hidden: rfEdge.hidden || source === target,
+      data: { ...rfEdge.data!, rolledUp: true },
+    };
   });
 }
 
@@ -556,21 +781,6 @@ export function mapEdgeToRFEdge(edge: Edge, graph: Graph, curveOffset: number = 
     errorMessage = `Missing target node: ${edge.target}`;
   }
 
-  if (!hasError && edge.sourcePortId && edge.sourcePortId !== 'null' && edge.targetPortId && edge.targetPortId !== 'null') {
-    const sourceNode = graph.nodes[edge.source];
-    const targetNode = graph.nodes[edge.target];
-    const sourcePort = sourceNode?.ports?.find(p => p.id === edge.sourcePortId);
-    const targetPort = targetNode?.ports?.find(p => p.id === edge.targetPortId);
-
-    if (!sourcePort) {
-      hasError = true;
-      errorMessage = `Missing source port: ${edge.sourcePortId}`;
-    } else if (!targetPort) {
-      hasError = true;
-      errorMessage = `Missing target port: ${edge.targetPortId}`;
-    }
-  }
-
   const archObligations = deriveArchitecturalObligations(graph);
   const dismissedWarnings = (edge.metadata?.dismissedWarnings as string[]) || [];
   const edgeWarnings = archObligations.filter(ob => {
@@ -583,20 +793,12 @@ export function mapEdgeToRFEdge(edge: Edge, graph: Graph, curveOffset: number = 
   const hasWarning = edgeWarnings.length > 0;
   const warningMessage = edgeWarnings.length > 0 ? edgeWarnings[0].message : undefined;
 
-  // Owner bench 2026-07-29: React Flow SILENTLY drops an edge whose handle id
-  // isn't rendered on the node — and node components render a handle per port,
-  // typed by direction. A handle binding is therefore passed through ONLY when the
-  // port exists AND its direction matches the role (source needs 'out', target
-  // needs 'in'); anything else falls back to undefined, which binds to the node's
-  // first matching handle (incl. the new FallbackHandles) — the edge RENDERS
-  // instead of vanishing, and hasError above still flags truly-missing ports.
-  const rawSourceHandle = edge.sourcePortId === 'null' || edge.sourcePortId === null || !edge.sourcePortId ? undefined : edge.sourcePortId;
-  const rawTargetHandle = edge.targetPortId === 'null' || edge.targetPortId === null || !edge.targetPortId ? undefined : edge.targetPortId;
-  const sourcePortForHandle = rawSourceHandle ? graph.nodes[edge.source]?.ports?.find(p => p.id === rawSourceHandle) : undefined;
-  const targetPortForHandle = rawTargetHandle ? graph.nodes[edge.target]?.ports?.find(p => p.id === rawTargetHandle) : undefined;
-  const sourceHandle = sourcePortForHandle && sourcePortForHandle.direction === 'out' ? rawSourceHandle : undefined;
-  const targetHandle = targetPortForHandle && targetPortForHandle.direction === 'in' ? rawTargetHandle : undefined;
-
+  // AG.13 (owner 2026-09-28): ports came out of the model. Every node draws
+  // one unnamed handle each side (LeafHandles, or FallbackHandles on a
+  // container), so an edge never names a handle: a stored port id on an old
+  // edge is ignored, and React Flow binds the edge to the node's handle. Before
+  // this, an edge naming a handle the node did not draw was silently dropped
+  // (owner bench 2026-07-29).
   const shouldHide = layerMode === 'nested' && edgeVisibility === 'containment';
 
   // Owner 2026-07-29: NODES draw above EDGES, always. Leaf nodes sit at
@@ -616,8 +818,6 @@ export function mapEdgeToRFEdge(edge: Edge, graph: Graph, curveOffset: number = 
     id: edge.id,
     source: edge.source,
     target: edge.target,
-    sourceHandle: sourceHandle ?? undefined,
-    targetHandle: targetHandle ?? undefined,
     type: 'default',
     label: edge.label ?? contract?.name,
     animated: hasError,
@@ -635,6 +835,9 @@ export function mapEdgeToRFEdge(edge: Edge, graph: Graph, curveOffset: number = 
       layerMode,
       direction: edge.direction,
       criticality: edge.criticality,
+      importEvidence: readImportEdgeEvidence(edge.metadata as Record<string, unknown> | undefined),
+      ...(asAccess(edge.metadata?.access) ? { access: asAccess(edge.metadata?.access)! } : {}),
+      ...(asReference(edge.metadata?.reference) ? { reference: asReference(edge.metadata?.reference)! } : {}),
     },
   };
 

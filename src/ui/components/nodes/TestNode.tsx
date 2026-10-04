@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import { Handle, Position } from '@xyflow/react';
+import { LeafHandles } from './LeafHandles.js';
 import type { RFNodeData } from '../../adapters/graph-to-reactflow.js';
 import { useTheme } from '../../theme/ThemeContext.js';
 import { CircleCheck as CheckCircle2, CircleX, Circle, TriangleAlert } from 'lucide-react';
@@ -65,8 +65,6 @@ function TestNodeComponent({ data, selected, highlighted }: TestNodeProps) {
     flexDirection: 'column',
   };
 
-  const inputPorts = data.ports?.filter(p => p.direction === 'in') || [];
-
   const handleStyles: React.CSSProperties = {
     width: '8px',
     height: '8px',
@@ -82,18 +80,7 @@ function TestNodeComponent({ data, selected, highlighted }: TestNodeProps) {
 
   return (
     <div style={containerStyles} title={tooltip}>
-      {inputPorts.map((_, index) => (
-        <Handle
-          key={`in-${index}`}
-          type="target"
-          position={Position.Left}
-          id={`in-${index}`}
-          style={{
-            ...handleStyles,
-            top: `${((index + 1) * 100) / (inputPorts.length + 1)}%`,
-          }}
-        />
-      ))}
+      <LeafHandles style={handleStyles} source={false} />
 
       <div style={{
         padding: '0 10px',

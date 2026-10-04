@@ -91,10 +91,10 @@ describe('R7c: the card offers a requirements load, independent of the model loa
     expect(source).toContain('Requirements the repo does not have are kept, never deleted');
   });
 
-  it('the result message reports how much evidence survived', () => {
-    const source = read('ui/components/panels/GitIntegrationModal.tsx');
-    expect(source).toContain('met criterion(s) kept their evidence');
-    expect(source).toContain('were KEPT, not deleted');
+  it('both panels report a load through one message (behaviour in repo-activity.test.ts)', () => {
+    for (const panel of ['ui/components/panels/GitIntegrationModal.tsx', 'ui/components/panels/ChangesPanel.tsx']) {
+      expect(read(panel)).toContain('loadSpecMessage(result)');
+    }
   });
 
   it('the Repository panel carries the card-independent spec loader too', () => {
@@ -138,24 +138,12 @@ describe('R5c: a git tick becomes evidence only through an approval', () => {
 
 // ── R3-6: second-project branch safety (client half) ─────────────────────────
 
-describe('R3-6: connect names the design branches it materialized', () => {
-  it('the service folds branchDetect onto the connect result', () => {
-    const service = read('ui/services/GitService.ts');
-    expect(service).toContain('branchDetect?: BranchDetectResult');
-    expect(service).toContain('...(result.branchDetect ? { branchDetect: result.branchDetect } : {})');
-  });
-
-  it('the connect message lists them by name', () => {
-    const source = read('ui/components/panels/GitIntegrationModal.tsx');
-    expect(source).toContain('Detected ${bd.created.length} design branch(es) from the repository');
-    expect(source).toContain('they are in the Branches menu with their models loaded');
-  });
-
-  it('the branch note rides the connect outcomes, NOT the commit toast', () => {
-    const source = read('ui/components/panels/GitIntegrationModal.tsx');
-    const occurrences = source.split('${branchNote}').length - 1;
-    expect(occurrences).toBeGreaterThanOrEqual(4);
-    // The commit toast is a different handler with no branch detection in scope.
-    expect(source).toContain('.${deleted}${specNote}`');
+// V3 AD.2b retired R3-6's design-branch detection: it wrote each repository
+// branch's snapshot straight from git, and 2.2 keeps one design branch.
+describe('V3 AD.2b: connect materializes no design branch', () => {
+  it('the service and the panel carry no branch detection', () => {
+    expect(read('ui/services/GitService.ts')).not.toContain('branchDetect');
+    expect(read('ui/components/panels/GitIntegrationModal.tsx')).not.toContain('branchNote');
   });
 });
+

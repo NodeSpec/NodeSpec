@@ -1,15 +1,20 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { extractOrchestratorAuth } from "../_shared/auth-helpers.ts";
 import { decryptWithUpgrade, isEncrypted } from "../_shared/crypto.ts";
-import { serializeModel, parseModel, diffAnchors, renderAnchorDiffMarkdown, coreModelHash, MODEL_ANCHOR_PATH, type ModelAnchor } from "../_shared/model-anchor.ts";
+import { serializeModelWithReport, serializeModel, parseModel, diffAnchors, renderAnchorDiffMarkdown, sameDesign, verifyModelHash, MODEL_ANCHOR_PATH, type ModelAnchor, type WithheldValue } from "../_shared/model-anchor.ts";
 import { serializeSpec, loadSpecPlane, SPEC_ANCHOR_PATH } from "../_shared/spec-anchor.ts";
-import { providerApiBase, fetchRepoFile, fetchRemoteHeadSha, createRemoteBranch, createPullRequest, mergeRemoteBranch } from "../_shared/git-provider.ts";
+import { constraintsCarried } from "../_shared/node-constraints.ts";
+import { providerApiBase, fetchRepoFile, readRepoFile, fetchRemoteHeadSha, fetchRemoteHeadShaDetailed, createRemoteBranch, createPullRequest, mergeRemoteBranch, listPullRequests, resetRemoteBranch, type PullRequestRef } from "../_shared/git-provider.ts";
 import { resolveCommitMode, workBranchName } from "../_shared/commit-mode.ts";
 import { BOARD_PATH, buildBoardModel, renderBoardMd } from "../_shared/board-generator.ts";
 import { isPrimaryRow, getPrimaryBranch } from "../_shared/primary-branch.ts";
-import { evaluateUnbaselinedPush, loadLatestSnapshot, computeStalePaths, SELF_PUSH_PREFIX } from "../_shared/git-drift.ts";
+import { evaluateUnbaselinedPush, loadLatestSnapshot, computeStalePaths, runDriftSweep, SELF_PUSH_PREFIX } from "../_shared/git-drift.ts";
+import { readRange, foreignPaths, planAttempt, baselineAfterPush, gitBlobSha, gitLabChanges, gitLabActions, gitLabBranchMoved, type PushPlan } from "../_shared/push-plan.ts";
+import { fetchFullGitLabTree, gitlabProjectPath } from "../_shared/git-tree.ts";
 import { refreshTaskPackets } from "../_shared/packet-freshness.ts";
-import { BINDINGS_PATH, parseBindingManifest, computeRemainingBindings, renderBindingManifest } from "../_shared/binding-manifest.ts";
+import { BINDINGS_PATH } from "../_shared/binding-manifest.ts";
+import { mayUseIntegration, INTEGRATION_NOT_FOUND } from "../_shared/git-access.ts";
+import { advanceBaseline, ancestryFor } from "../_shared/baseline.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -61,12 +66,22 @@ Deno.serve(async (req: Request) => {
 
     const { data: integration, error: integrationError } = await serviceClient
       .from("git_integrations")
-      .select("id, provider, repo_owner, repo_name, default_branch, base_url, access_token_encrypted, commit_mode")
+      .select("id, project_id, provider, repo_owner, repo_name, default_branch, base_url, access_token_encrypted, commit_mode")
       .eq("id", integrationId)
       .maybeSingle();
 
     if (integrationError) throw integrationError;
-    if (!integration) throw new Error("Integration not found");
+    // AD.0 (S1): the integration must be the named project's, and every action
+    // here writes to the repository or a baseline, so the caller needs a
+    // contributor seat. A refusal reads as an unknown id.
+    if (!integration || !(await mayUseIntegration(serviceClient, {
+      integrationProjectId: integration.project_id, requestedProjectId: projectId, userId, access: "write",
+    }))) {
+      return new Response(
+        JSON.stringify({ error: INTEGRATION_NOT_FOUND }),
+        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
 
     let token = integration.access_token_encrypted;
     if (isEncrypted(token)) {
@@ -95,6 +110,7 @@ Deno.serve(async (req: Request) => {
     // Debt audit 2026-07-29: pure function of the integration — computed ONCE
     // instead of once per lane (it was recomputed 4x in this handler).
     const apiBase = providerApiBase(integration.provider, integration.base_url);
+    const pushAncestry = ancestryFor(integration.provider, apiBase, integration.repo_owner, integration.repo_name, token);
 
     // R3-3a: the ref this branch is bound to — a NodeSpec branch maps 1:1 to a git
     // ref. main falls back to the integration default (connect binds it anyway);
@@ -115,12 +131,15 @@ Deno.serve(async (req: Request) => {
       // on a pre-push main, which surfaced three checks later as an unexplainable
       // "PR has merge conflicts" (mergeable=false/dirty) on a clean PR. Live head
       // is the fallback only when the source branch has never synced.
-      const { data: fromBranch } = await serviceClient
-        .from("branches")
-        .select("git_ref, last_synced_commit")
-        .eq("project_id", projectId)
-        .eq("name", fromBranchName ?? "main")
-        .maybeSingle();
+      // AD.4 (D15): no source named means the primary branch, by its flag.
+      const { data: fromBranch } = fromBranchName
+        ? await serviceClient
+          .from("branches")
+          .select("git_ref, last_synced_commit")
+          .eq("project_id", projectId)
+          .eq("name", fromBranchName)
+          .maybeSingle()
+        : { data: await getPrimaryBranch(serviceClient, projectId, "git_ref, last_synced_commit, is_primary") };
       const sourceRef = fromBranch?.git_ref || integration.default_branch;
       const fromSha = fromBranch?.last_synced_commit
         || await fetchRemoteHeadSha(integration.provider, apiBase, integration.repo_owner, integration.repo_name, sourceRef, token);
@@ -137,9 +156,10 @@ Deno.serve(async (req: Request) => {
           { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
-      await serviceClient.from("branches")
-        .update({ git_ref: branchName, last_synced_commit: created.sha })
-        .eq("id", branch.id);
+      // AD.1: through the one writer; a new ref re-anchors its branch.
+      await advanceBaseline(serviceClient, {
+        branchId: branch.id, to: created.sha, ancestry: pushAncestry, reanchor: true, extra: { git_ref: branchName },
+      });
       return new Response(
         JSON.stringify({ success: true, created: true, ref: branchName, sha: created.sha, alreadyExists: created.alreadyExists === true, fromRef: sourceRef }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
@@ -159,7 +179,13 @@ Deno.serve(async (req: Request) => {
         );
       }
       const primaryForMerge = targetBranchName ? null : await getPrimaryBranch(serviceClient, projectId, "id, name");
-      const targetName = targetBranchName ?? primaryForMerge?.name ?? "main";
+      const targetName: string | undefined = targetBranchName ?? primaryForMerge?.name;
+      if (!targetName) {
+        return new Response(
+          JSON.stringify({ error: "This project has no primary branch to merge into." }),
+          { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
       const { data: targetBranch, error: targetError } = await serviceClient
         .from("branches")
         .select("id, git_ref, last_synced_commit")
@@ -234,10 +260,10 @@ Deno.serve(async (req: Request) => {
           const { graph: targetSnapGraph } = await loadLatestSnapshot(serviceClient, targetBranch.id);
           const targetGraph = targetSnapGraph || {};
           const ownParsed = parseModel(await serializeModel(targetGraph));
-          // R7d: architecture-only comparison — a pre-R7d target anchor still
-          // carries a mappings section its stored hash covers.
-          targetInSync = ownParsed.ok &&
-            (await coreModelHash(ownParsed.model)) === (await coreModelHash(targetParsed.model as ModelAnchor));
+          // R7d: never the stored hashes (a pre-R7d target anchor still carries
+          // a mappings section its stored hash covers). AD.2: the whole design
+          // when both anchors carry it, architecture when either is version 1.
+          targetInSync = ownParsed.ok && await sameDesign(ownParsed.model, targetParsed.model as ModelAnchor);
         } catch (syncErr) {
           console.warn("[git-push] merge-direct targetInSync computation failed (treating as diverged):", syncErr);
         }
@@ -308,9 +334,10 @@ Deno.serve(async (req: Request) => {
           { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
-      await serviceClient.from("branches")
-        .update({ git_ref: branchName, last_synced_commit: created.sha })
-        .eq("id", branch.id);
+      // AD.1: through the one writer; a new ref re-anchors its branch.
+      await advanceBaseline(serviceClient, {
+        branchId: branch.id, to: created.sha, ancestry: pushAncestry, reanchor: true, extra: { git_ref: branchName },
+      });
       // Keep the in-memory row coherent for the guard + baseline logic below —
       // the ref we just created at `created.sha` IS this branch's sync state.
       branch.git_ref = branchName;
@@ -325,20 +352,21 @@ Deno.serve(async (req: Request) => {
     // synced AND the repo already carries a model anchor, stop and require explicit
     // confirmation. Baselined pushes are untouched (the drift sweep owns that lane).
     if (!branch.last_synced_commit && !confirmOverwrite) {
-      let repoAnchorText: string | null = null;
-      try {
-        repoAnchorText = await fetchRepoFile(
-          integration.provider, apiBase, integration.repo_owner, integration.repo_name,
-          MODEL_ANCHOR_PATH, targetRef, token,
-        );
-      } catch (guardErr) {
-        // Provider unreachable → cannot prove the repo is safe to overwrite; fail
-        // CLOSED (the whole point is protecting the last surviving copy).
+      // Provider unreachable → cannot prove the repo is safe to overwrite; fail
+      // CLOSED (the whole point is protecting the last surviving copy). AD.1
+      // (D11): this read used to return null on any error, so an outage read
+      // as "no model here" and the guard passed.
+      const guardRead = await readRepoFile(
+        integration.provider, apiBase, integration.repo_owner, integration.repo_name,
+        MODEL_ANCHOR_PATH, targetRef, token,
+      );
+      if (guardRead.status === "failed") {
         return new Response(
-          JSON.stringify({ error: `Could not verify the repository's existing model before an unbaselined push: ${guardErr instanceof Error ? guardErr.message : String(guardErr)}` }),
+          JSON.stringify({ error: `Could not verify the repository's existing model before an unbaselined push: ${guardRead.error}` }),
           { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
+      const repoAnchorText = guardRead.status === "found" ? guardRead.text : null;
       const verdict = evaluateUnbaselinedPush(branch.last_synced_commit, repoAnchorText);
       if (verdict.blocked) {
         return new Response(
@@ -361,7 +389,7 @@ Deno.serve(async (req: Request) => {
     // for generator-managed task artifacts and regenerates stale ones IN MEMORY before file
     // extraction and anchor serialization, so file, anchor, and ARCHITECTURE.md agree within
     // this commit. Never throws; a refresh failure just pushes what the snapshot holds.
-    const packetRefresh = await refreshTaskPackets(serviceClient, projectId, graph);
+    const packetRefresh = await refreshTaskPackets(serviceClient, projectId, graph, branch.id);
     if (packetRefresh.error) {
       console.warn(`[git-push] packet freshness gate failed (pushing snapshot content as-is): ${packetRefresh.error}`);
     }
@@ -409,7 +437,10 @@ Deno.serve(async (req: Request) => {
     // rectify"): ARCHITECTURE ONLY. Requirement mappings no longer ride here —
     // one fact, one file: the spec plane (requirements, criteria, mappings) is
     // `.nodespec/spec.json`'s, written just below.
-    files.push({ path: MODEL_ANCHOR_PATH, content: await serializeModel(graph) });
+    // AD.2 (I12): the anchor carries configuration and schema bodies now, with
+    // every value that looks like a credential withheld; the push names each.
+    const anchorWrite = await serializeModelWithReport(graph);
+    files.push({ path: MODEL_ANCHOR_PATH, content: anchorWrite.text });
 
     // R7a (owner 2026-07-31: "requirements/acceptance criteria and spec are not
     // imported at all"): they were never EXPORTED either — model.json carries
@@ -422,7 +453,7 @@ Deno.serve(async (req: Request) => {
     let specAnchored = false;
     let specPlane: Awaited<ReturnType<typeof loadSpecPlane>> = null;
     try {
-      specPlane = await loadSpecPlane(serviceClient, projectId);
+      specPlane = await loadSpecPlane(serviceClient, projectId, { constraintsCarried: await constraintsCarried(serviceClient, projectId) });
       if (specPlane) {
         files.push({
           path: SPEC_ANCHOR_PATH,
@@ -455,34 +486,16 @@ Deno.serve(async (req: Request) => {
     }
 
     // B3 (docs/WORK_LOOP_PLAN.md): clear CONSUMED declarations from
-    // `.nodespec/bindings.json` — bind-then-clear, keyed off the graph being
-    // pushed: an entry leaves the file ONLY when its path is actually bound
-    // now, so a failed or not-yet-applied bind can never lose a declaration.
-    // Skipped whenever the parse produced flagged rows (rewriting from parsed
-    // entries would silently delete a malformed row before its author saw the
-    // flag) and never fails a push.
-    try {
-      const bindingsRaw = await fetchRepoFile(
-        integration.provider, apiBase, integration.repo_owner, integration.repo_name,
-        BINDINGS_PATH, targetRef, token,
-      );
-      if (bindingsRaw) {
-        const parsedBindings = parseBindingManifest(bindingsRaw);
-        if (parsedBindings.flagged.length === 0 && parsedBindings.entries.length > 0) {
-          const boundPaths = new Set(
-            Object.values((graph.artifacts ?? {}) as Record<string, { path?: string }>)
-              .map((a) => (typeof a?.path === "string" ? a.path.replace(/^\//, "") : ""))
-              .filter((p) => p.length > 0),
-          );
-          const { remaining, consumed } = computeRemainingBindings(parsedBindings, boundPaths);
-          if (consumed.length > 0) {
-            files.push({ path: BINDINGS_PATH, content: renderBindingManifest(remaining) });
-          }
-        }
-      }
-    } catch (bindErr) {
-      console.warn("[git-push] bindings cleanup skipped (push continues):", bindErr);
-    }
+    // `.nodespec/bindings.json`: bind-then-clear, keyed off the graph being
+    // pushed. An entry leaves the file ONLY when its path is bound now, so a
+    // failed or not-yet-applied bind can never lose a declaration. The
+    // manifest is read and rewritten per attempt, at the head that attempt
+    // builds on (`planAttempt`), never at an earlier read of the ref.
+    const boundPaths = new Set(
+      Object.values((graph.artifacts ?? {}) as Record<string, { path?: string }>)
+        .map((a) => (typeof a?.path === "string" ? a.path.replace(/^\//, "") : ""))
+        .filter((p) => p.length > 0),
+    );
 
     // Owner bench 2026-07-29 (rename bug): the push lane only ever ADDED tree
     // entries, so renaming an artifact in the inspector left the OLD file behind
@@ -502,17 +515,23 @@ Deno.serve(async (req: Request) => {
     let cleanupSkipped: string | null = null;
     if (branch.last_synced_commit) {
       try {
-        const oldAnchorText = await fetchRepoFile(
+        // AD.1 (D5, D11): a deletion is named only by an anchor NodeSpec wrote,
+        // which its hash proves; a hand-edited or unreadable model.json names none.
+        const oldRead = await readRepoFile(
           integration.provider, apiBase, integration.repo_owner, integration.repo_name,
           MODEL_ANCHOR_PATH, targetRef, token,
         );
-        const oldParsed = oldAnchorText ? parseModel(oldAnchorText) : null;
-        if (oldParsed?.ok) {
-          stalePaths = computeStalePaths(oldParsed.model.artifacts, graph.artifacts ?? {}, files.map((f) => f.path));
-        } else if (!oldAnchorText) {
+        const oldParsed = oldRead.status === "found" ? parseModel(oldRead.text) : null;
+        if (oldRead.status === "failed") {
+          cleanupSkipped = `could not read ${MODEL_ANCHOR_PATH} on ${targetRef} (${oldRead.error}), so nothing was deleted`;
+        } else if (oldRead.status === "absent") {
           cleanupSkipped = `no ${MODEL_ANCHOR_PATH} found on ${targetRef}`;
-        } else {
+        } else if (!oldParsed?.ok) {
           cleanupSkipped = `repo model anchor on ${targetRef} is unreadable (${oldParsed && !oldParsed.ok ? oldParsed.error : "parse failed"}) — likely hand-edited/hand-merged; this push rewrites a valid anchor`;
+        } else if (!(await verifyModelHash(oldParsed.model))) {
+          cleanupSkipped = `repo model anchor on ${targetRef} fails its hash (hand-edited), so it names no deletion; this push rewrites a valid anchor`;
+        } else {
+          stalePaths = computeStalePaths(oldParsed.model.artifacts, graph.artifacts ?? {}, files.map((f) => f.path));
         }
       } catch (staleErr) {
         cleanupSkipped = `anchor fetch failed: ${staleErr instanceof Error ? staleErr.message : String(staleErr)}`;
@@ -535,58 +554,166 @@ Deno.serve(async (req: Request) => {
     // it, so a custom message that lost the prefix would make NodeSpec read its own
     // commit as out-of-band drift and raise a card against itself.
     const reasonText = typeof reason === "string" ? reason.trim().replace(/\s+/g, " ").slice(0, 120) : "";
-    const commitMessage = reasonText
+    // AD.1: the prefix stays as a label for people; NodeSpec knows its own
+    // commits by the sha and blobs recorded below, never by this message.
+    const commitMessageFor = (fileCount: number) => reasonText
       ? `${SELF_PUSH_PREFIX} ${reasonText}`
-      : `${SELF_PUSH_PREFIX} ${files.length} files from ${branchName}`;
-    let pushResult: { sha: string; deletedPaths: string[]; unchanged?: boolean };
+      : `${SELF_PUSH_PREFIX} ${fileCount} files from ${branchName}`;
+    const json = (body: unknown, status = 200) => new Response(
+      JSON.stringify(body),
+      { status, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
 
-    // UX-1.1b: commit mode — 'direct' (default; identical to before) or
-    // 'pull-request': commit to a nodespec/push-* work branch cut at the
-    // target's head, then open the PR. The work-branch push still carries
-    // SELF_PUSH_PREFIX, so the webhook's self-push guard skips it; the PR's
-    // eventual merge lands in the existing merge-arrival lane.
+    // AD.1 (D1, D2): the push preflight. Read the head, read what changed in
+    // git since the baseline, and never write over it: every file git changed
+    // other than by NodeSpec is skipped, reference files included, and
+    // reported, and that change is on a card before anything is written. The
+    // commit is built on exactly the head that was read; if the branch moves
+    // meanwhile, the preflight runs once more.
+    // UX-1.1b: commit mode, 'direct' (default) or 'pull-request'. AD.4 (D14,
+    // ruling 6): one work branch per tracked ref and one open pull request on
+    // it; while it is open each push adds a commit to it, and with none open
+    // the work branch starts again at the tracked branch's head.
     const commitMode = resolveCommitMode(integration);
+    const baselineAtStart: string | null = branch.last_synced_commit ?? null;
+    let pushResult: GitPushResult | null = null;
+    let plan: PushPlan = { write: files, skipped: [], deletions: stalePaths };
     let pushRef = targetRef;
     let prWorkBranch: string | null = null;
-    if (commitMode === "pull-request") {
-      const baseSha = await fetchRemoteHeadSha(
+    let openPr: PullRequestRef | null = null;
+    let blobs: Record<string, string> = {};
+    let logRowId: string | null = null;
+    for (let attempt = 0; attempt < 2 && !pushResult; attempt++) {
+      const headRead = await fetchRemoteHeadShaDetailed(
         integration.provider, apiBase, integration.repo_owner, integration.repo_name, targetRef, token,
       );
-      if (!baseSha) throw new Error(`Cannot open a PR: target ref '${targetRef}' has no head (push directly once first)`);
-      prWorkBranch = workBranchName(targetRef);
-      const created = await createRemoteBranch(
-        integration.provider, apiBase, integration.repo_owner, integration.repo_name, prWorkBranch, baseSha, token,
-      );
-      if (!created.sha && created.alreadyExists !== true) {
-        throw new Error(`Could not create the PR work branch '${prWorkBranch}': ${created.error ?? "unknown error"}`);
+      // No branch yet (404) or an empty repository (GitHub's 409) has no head
+      // to build on; any other failure is not "no head" and stops the push.
+      if (!headRead.sha && headRead.status !== 404 && headRead.status !== 409) {
+        return json({ error: `Could not read the head of ${targetRef} before pushing (${headRead.status ? `HTTP ${headRead.status}` : "network error"}); nothing was written. Try again.` }, 502);
       }
-      pushRef = prWorkBranch;
-    }
+      const head = headRead.sha;
+      let foreign = new Set<string>();
+      if (baselineAtStart && head && head !== baselineAtStart) {
+        const range = await readRange(serviceClient, {
+          provider: integration.provider, apiBase, owner: integration.repo_owner, repo: integration.repo_name, token,
+          integrationId: integration.id, branchId: branch.id, base: baselineAtStart, head, ref: targetRef,
+        });
+        if (!range.ok) {
+          return json({
+            error: `Could not tell what changed on ${targetRef} since the last sync (the provider could not compare the two; the history may have been rewritten). Nothing was written. Load the repository's model to sync from its head, then push.`,
+            code: "range-unknown",
+          }, 409);
+        }
+        foreign = foreignPaths(range.foreign);
+        if (range.foreign.length > 0 && attempt === 0) {
+          // The change is on its card before anything is written.
+          await runDriftSweep(serviceClient, projectId, { branchName, force: true });
+        }
+      }
+      plan = await planAttempt({
+        files, stalePaths, foreign, head, ref: targetRef, boundPaths,
+        readManifest: (at) => fetchRepoFile(
+          integration.provider, apiBase, integration.repo_owner, integration.repo_name, BINDINGS_PATH, at, token,
+        ),
+      });
+      if (plan.write.length === 0 && plan.deletions.length === 0) {
+        return json({
+          error: "Every file this push would write changed in git since the last sync. Review the pending change, then push again.",
+          code: "all-skipped",
+          skipped: plan.skipped,
+        }, 409);
+      }
+      blobs = Object.fromEntries(await Promise.all(plan.write.map(async (f) => [f.path, await gitBlobSha(f.content)] as const)));
 
-    if (integration.provider === "github") {
-      pushResult = await pushToGitHub(
-        apiBase,
-        integration.repo_owner,
-        integration.repo_name,
-        pushRef,
-        token,
-        commitMessage,
-        files,
-        stalePaths,
-      );
-    } else if (integration.provider === "gitlab") {
-      pushResult = await pushToGitLab(
-        apiBase,
-        integration.repo_owner,
-        integration.repo_name,
-        pushRef,
-        token,
-        commitMessage,
-        files,
-        stalePaths,
-      );
-    } else {
-      throw new Error(`Unsupported provider: ${integration.provider}`);
+      pushRef = targetRef;
+      prWorkBranch = null;
+      openPr = null;
+      // The commit is built on this: the tracked branch's head, or the work
+      // branch's head while its pull request is open.
+      let buildOn: string | null = head;
+      if (commitMode === "pull-request") {
+        if (!head) throw new Error(`Cannot open a PR: target ref '${targetRef}' has no head (push directly once first)`);
+        prWorkBranch = workBranchName(targetRef);
+        const open = await listPullRequests(
+          integration.provider, apiBase, integration.repo_owner, integration.repo_name, prWorkBranch, targetRef, token, "open",
+        );
+        if (!open) {
+          return json({ error: `Could not read the open pull requests from ${prWorkBranch}; nothing was written. Try again.` }, 502);
+        }
+        const workHead = await fetchRemoteHeadShaDetailed(
+          integration.provider, apiBase, integration.repo_owner, integration.repo_name, prWorkBranch, token,
+        );
+        if (!workHead.sha && workHead.status !== 404) {
+          return json({ error: `Could not read the head of ${prWorkBranch} (${workHead.status ? `HTTP ${workHead.status}` : "network error"}); nothing was written. Try again.` }, 502);
+        }
+        if (open.length > 0 && workHead.sha) {
+          openPr = open[0];
+          buildOn = workHead.sha;
+        } else {
+          // No pull request is open: whatever the work branch held was merged
+          // or turned down, so it starts again at the tracked branch's head.
+          const reset = await resetRemoteBranch(
+            integration.provider, apiBase, integration.repo_owner, integration.repo_name, prWorkBranch, head, token,
+          );
+          if (!reset.ok) throw new Error(`Could not start the pull request branch '${prWorkBranch}': ${reset.error}`);
+        }
+        pushRef = prWorkBranch;
+      }
+
+      // Recorded before the ref moves (GitHub), so a sync check or webhook
+      // that sees the commit already knows it is NodeSpec's.
+      const record = async (sha: string, parent: string | null, deletedPaths: string[]) => {
+        const { data: row } = await serviceClient.from("git_sync_log").insert({
+          integration_id: integrationId,
+          project_id: projectId,
+          branch_id: branch.id,
+          direction: "push",
+          commit_sha: sha,
+          status: "pending",
+          metadata: {
+            nodespecPush: true, parent, blobs, deleted: deletedPaths,
+            // AD.4 (D14): a pull request push names its work branch and, once
+            // known, its pull request: a merge of that pull request brings it.
+            ...(prWorkBranch ? { workBranch: prWorkBranch, ...(openPr ? { prNumber: openPr.number } : {}) } : {}),
+          },
+        }).select("id").maybeSingle();
+        logRowId = row?.id ?? null;
+      };
+
+      if (integration.provider === "github") {
+        const attemptResult = await pushToGitHub(
+          apiBase, integration.repo_owner, integration.repo_name, pushRef, token,
+          commitMessageFor(plan.write.length), plan.write, plan.deletions, buildOn, record,
+        );
+        if (attemptResult.moved) {
+          if (logRowId) {
+            await serviceClient.from("git_sync_log")
+              .update({ status: "failed", error_message: "the branch moved while pushing", completed_at: new Date().toISOString() })
+              .eq("id", logRowId);
+          }
+          logRowId = null;
+          continue;
+        }
+        pushResult = attemptResult;
+      } else if (integration.provider === "gitlab") {
+        const attemptResult = await pushToGitLab(
+          apiBase, integration.repo_owner, integration.repo_name, pushRef, token,
+          commitMessageFor(plan.write.length), plan.write, plan.deletions, buildOn, blobs,
+        );
+        // AD.4 (D17): GitLab refused the commit because a file changed since
+        // the preflight read the branch; nothing landed, so it runs again.
+        if (attemptResult.moved) continue;
+        pushResult = attemptResult;
+        // GitLab names the commit only after it lands; the sync check matches
+        // its files by blob until this row exists.
+        if (!pushResult.unchanged) await record(pushResult.sha, pushResult.parent, pushResult.deletedPaths);
+      } else {
+        throw new Error(`Unsupported provider: ${integration.provider}`);
+      }
+    }
+    if (!pushResult) {
+      return json({ error: `${targetRef} moved twice while pushing, so nothing was written. Push again.`, code: "moved" }, 409);
     }
     const commitSha = pushResult.sha;
     const unchanged = pushResult.unchanged === true;
@@ -595,10 +722,13 @@ Deno.serve(async (req: Request) => {
     // commit. A PR failure here is a real failure — the user chose PR mode,
     // so silently leaving an orphan work branch would be worse than erroring.
     // An UNCHANGED push opens no PR: there is nothing to review.
-    let prInfo: { url: string; number?: number } | null = null;
-    if (commitMode === "pull-request" && prWorkBranch && !unchanged) {
-      const prTitle = `NodeSpec design push: ${reasonText || `${files.length} file(s) from ${branchName}`}`;
-      const prBody = `NodeSpec pushed ${files.length} file(s) from design branch \`${branchName}\` in pull-request commit mode.\n\nMerging applies the design state to \`${targetRef}\`; NodeSpec reconciles automatically on merge.`;
+    let prInfo: { url: string; number?: number; reused?: boolean } | null = null;
+    if (commitMode === "pull-request" && prWorkBranch && openPr) {
+      // AD.4 (D14): the push added a commit to the pull request already open.
+      prInfo = { url: openPr.url ?? "", number: openPr.number, reused: true };
+    } else if (commitMode === "pull-request" && prWorkBranch && !unchanged) {
+      const prTitle = `NodeSpec design push: ${reasonText || `${plan.write.length} file(s) from ${branchName}`}`;
+      const prBody = `NodeSpec pushed ${plan.write.length} file(s) from design branch \`${branchName}\` in pull-request commit mode.\n\nMerging applies the design state to \`${targetRef}\`; NodeSpec reconciles automatically on merge.`;
       const pr = await createPullRequest(
         integration.provider, apiBase, integration.repo_owner, integration.repo_name,
         prWorkBranch, targetRef, prTitle, prBody, token,
@@ -614,69 +744,91 @@ Deno.serve(async (req: Request) => {
       sync_status: "idle",
     }).eq("id", integrationId);
 
-    await serviceClient.from("git_sync_log").insert({
-      integration_id: integrationId,
-      project_id: projectId,
-      branch_id: branch.id,
-      direction: "push",
-      commit_sha: commitSha,
-      status: "success",
-      patches_synced: patches?.length || 0,
-      completed_at: new Date().toISOString(),
-      metadata: {
-        fileCount: files.length,
-        ...(unchanged ? { unchanged: true } : {}),
-        // rename/removal cleanup observability: what the anchor comparison
-        // wanted deleted, what the provider commit actually deleted, and why
-        // the lane was skipped when it was.
-        stalePaths,
-        deletedPaths: pushResult.deletedPaths,
-        ...(cleanupSkipped ? { cleanupSkipped } : {}),
-        // R7a: did the spec plane travel with this commit? A project with no spec
-        // row writes no spec.json, and that must be distinguishable from a failure.
-        specAnchored,
-        ...(prInfo ? { commitMode: "pull-request", prUrl: prInfo.url, workBranch: prWorkBranch } : {}),
-      },
-    });
+    const withheld: WithheldValue[] = plan.write.some((f) => f.path === MODEL_ANCHOR_PATH) ? anchorWrite.withheld : [];
+    const logMetadata = {
+      fileCount: plan.write.length,
+      ...(unchanged ? { unchanged: true } : { nodespecPush: true, parent: pushResult.parent, blobs, deleted: pushResult.deletedPaths }),
+      // rename/removal cleanup observability: what the anchor comparison
+      // wanted deleted, what the provider commit actually deleted, and why
+      // the lane was skipped when it was.
+      stalePaths,
+      deletedPaths: pushResult.deletedPaths,
+      ...(cleanupSkipped ? { cleanupSkipped } : {}),
+      // AD.1: what the push left alone because git changed it since the last sync.
+      ...(plan.skipped.length ? { skipped: plan.skipped } : {}),
+      // AD.2: the values kept out of git because they looked like credentials.
+      ...(withheld.length ? { withheld } : {}),
+      // R7a: did the spec plane travel with this commit? A project with no spec
+      // row writes no spec.json, and that must be distinguishable from a failure.
+      specAnchored,
+      ...(prInfo ? { commitMode: "pull-request", prUrl: prInfo.url, workBranch: prWorkBranch, ...(typeof prInfo.number === "number" ? { prNumber: prInfo.number } : {}) } : {}),
+    };
+    if (logRowId) {
+      await serviceClient.from("git_sync_log").update({
+        status: "success",
+        patches_synced: patches?.length || 0,
+        completed_at: new Date().toISOString(),
+        metadata: logMetadata,
+      }).eq("id", logRowId);
+    } else {
+      // An unchanged push made no commit: its row names the existing head and
+      // never claims it as NodeSpec's.
+      await serviceClient.from("git_sync_log").insert({
+        integration_id: integrationId,
+        project_id: projectId,
+        branch_id: branch.id,
+        direction: "push",
+        commit_sha: commitSha,
+        status: "success",
+        patches_synced: patches?.length || 0,
+        completed_at: new Date().toISOString(),
+        metadata: logMetadata,
+      });
+    }
 
-    // P1-7 R1: advance the sync baseline — the commit we just created IS the reconciled state.
-    // The drift sweep diffs remote HEAD against this; because pushes advance it, sweep ranges
-    // normally contain only out-of-band (user) commits. Also bind git_ref opportunistically if
-    // the branch was never bound (R3 makes binding first-class).
-    // R3-3a: bind to the ref we actually pushed to — never clobber a feature
-    // branch's binding with the integration default.
+    // AD.1 (D2): the baseline moves to this commit only when it was built on
+    // the baseline itself. Otherwise commits NodeSpec did not write lie
+    // between, and they stay on their card until a person resolves it.
     // UX-1.1b: in pull-request mode the TARGET has not moved — the commit sits
     // on the work branch behind a PR — so the baseline must NOT advance; the
-    // merge-arrival lane fast-forwards it when the PR merges.
+    // sync check moves it when the merge arrives.
+    let baselineOutcome: { moved: boolean; reason: string } = { moved: false, reason: "pull-request" };
     if (commitMode !== "pull-request") {
-      const { error: baselineError } = await serviceClient
-        .from("branches")
-        .update({ last_synced_commit: commitSha, git_ref: targetRef })
-        .eq("id", branch.id);
-      if (baselineError) {
-        console.warn(`[git-push] failed to advance sync baseline: ${baselineError.message}`);
+      if (branch.git_ref !== targetRef) {
+        await serviceClient.from("branches").update({ git_ref: targetRef }).eq("id", branch.id);
+      }
+      const after = baselineAfterPush({ baseline: baselineAtStart, parent: pushResult.parent, newSha: commitSha, unchanged });
+      baselineOutcome = { moved: false, reason: after.reason };
+      if (after.move) {
+        const moved = await advanceBaseline(serviceClient, { branchId: branch.id, to: commitSha, ancestry: pushAncestry });
+        baselineOutcome = { moved: moved.moved, reason: moved.moved ? after.reason : moved.outcome };
+        if (!moved.moved && moved.outcome !== "same") {
+          console.warn(`[git-push] sync baseline not advanced (${moved.outcome})`);
+        }
       }
     }
 
-    return new Response(
-      JSON.stringify({
-        success: true, commitSha, fileCount: files.length,
-        // Dogfood find #4: an unchanged tree mints NO commit — commitSha is
-        // the existing head, and the caller can finally trust that a new sha
-        // means something actually changed.
-        ...(unchanged ? { unchanged: true, message: "Tree identical to the current head — no commit created." } : {}),
-        specAnchored,
-        ...(prInfo ? { commitMode: "pull-request", prUrl: prInfo.url, prNumber: prInfo.number, workBranch: prWorkBranch } : {}),
-        deletedPaths: pushResult.deletedPaths,
-        ...(cleanupSkipped ? { cleanupSkipped } : {}),
-        packetsRefreshed: packetRefresh.refreshed,
-        ...(packetRefresh.refreshedPaths.length ? { refreshedPackets: packetRefresh.refreshedPaths } : {}),
-        // C4 step 2: the freshness gate covers test plans too — same observability shape.
-        testPlansRefreshed: packetRefresh.testPlansRefreshed,
-        ...(packetRefresh.testPlansRefreshedPaths.length ? { refreshedTestPlans: packetRefresh.testPlansRefreshedPaths } : {}),
-      }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    return json({
+      success: true, commitSha, fileCount: plan.write.length,
+      // Dogfood find #4: an unchanged tree mints NO commit; commitSha is
+      // the existing head, and the caller can finally trust that a new sha
+      // means something actually changed.
+      ...(unchanged ? { unchanged: true, message: "Tree identical to the current head: no commit created." } : {}),
+      // AD.1: the files left alone because git changed them since the last sync.
+      ...(plan.skipped.length ? { skipped: plan.skipped } : {}),
+      // AD.2: the values kept out of git because they looked like credentials.
+      ...(withheld.length ? { withheld } : {}),
+      baseline: baselineOutcome,
+      specAnchored,
+      ...(prInfo ? { commitMode: "pull-request", prUrl: prInfo.url, prNumber: prInfo.number, workBranch: prWorkBranch, ...(prInfo.reused ? { prReused: true } : {}) } : {}),
+      deletedPaths: pushResult.deletedPaths,
+      ...(cleanupSkipped ? { cleanupSkipped } : {}),
+      packetsRefreshed: packetRefresh.refreshed,
+      ...(packetRefresh.refreshedPaths.length ? { refreshedPackets: packetRefresh.refreshedPaths } : {}),
+      // C4 step 2: the freshness gate covers test plans too, in the same observability shape.
+      testPlansRefreshed: packetRefresh.testPlansRefreshed,
+      ...(packetRefresh.testPlansRefreshedPaths.length ? { refreshedTestPlans: packetRefresh.testPlansRefreshedPaths } : {}),
+    });
   } catch (error: any) {
     console.error("Git push error:", error);
     const message = error.message || "Failed to push to git";
@@ -743,13 +895,27 @@ function extractArtifactFiles(graph: any): ArtifactFilterResult {
 }
 
 
+/** AD.1: what a push attempt did. `moved`: the branch was no longer at the
+ *  head the preflight read, so nothing landed and the preflight runs again. */
+interface GitPushResult {
+  sha: string;
+  /** The commit this one was built on (the head the preflight read). */
+  parent: string | null;
+  deletedPaths: string[];
+  unchanged?: boolean;
+  moved?: boolean;
+}
+
 async function pushToGitHub(
   apiBase: string,
   owner: string, repo: string, branch: string, token: string,
   message: string, files: FileEntry[],
-  stalePaths: string[] = [],
-  _staleHeadRetry = false,
-): Promise<{ sha: string; deletedPaths: string[] }> {
+  stalePaths: string[],
+  /** AD.1: build on exactly this head (null: the branch has no head yet). */
+  parent: string | null,
+  /** AD.1: record the commit as NodeSpec's before the ref moves. */
+  onCommitCreated: (sha: string, parent: string | null, deletedPaths: string[]) => Promise<void>,
+): Promise<GitPushResult> {
   const baseUrl = apiBase;
 
   console.log('[pushToGitHub] Pushing to:', `${owner}/${repo}`);
@@ -773,22 +939,16 @@ async function pushToGitHub(
     throw new Error(`Repository not found or not accessible (${repoCheckResponse.status}): ${body}. Please ensure the repository exists and the token has write access.`);
   }
 
-  const refResponse = await fetch(`${baseUrl}/repos/${owner}/${repo}/git/ref/heads/${branch}`, { headers });
-
-  let latestCommitSha: string | null = null;
+  // AD.1: build on the head the preflight read and checked, never on
+  // whatever the ref reads now; a branch that moved meanwhile is reported as
+  // moved and the preflight runs again.
+  const latestCommitSha: string | null = parent;
   let baseTreeSha: string | null = null;
-
-  if (refResponse.ok) {
-    const refData = await refResponse.json();
-    latestCommitSha = refData.object.sha;
-
+  if (latestCommitSha) {
     const commitResponse = await fetch(`${baseUrl}/repos/${owner}/${repo}/git/commits/${latestCommitSha}`, { headers });
     if (!commitResponse.ok) throw new Error(`Failed to get commit: ${commitResponse.statusText}`);
     const commitData = await commitResponse.json();
     baseTreeSha = commitData.tree.sha;
-  } else if (refResponse.status !== 404 && refResponse.status !== 409) {
-    const body = await refResponse.text();
-    throw new Error(`Failed to get branch ref (${refResponse.status}): ${body}`);
   }
 
   // For empty repos (no base tree), create blobs first
@@ -873,7 +1033,7 @@ async function pushToGitHub(
   // change — the ref moved while nothing did. Report the existing head as
   // unchanged instead; evidence-over-claims applies to the server too.
   if (latestCommitSha && baseTreeSha && treeData.sha === baseTreeSha) {
-    return { sha: latestCommitSha, deletedPaths: [], unchanged: true };
+    return { sha: latestCommitSha, parent: latestCommitSha, deletedPaths: [], unchanged: true };
   }
 
   const commitPayload: any = { message, tree: treeData.sha };
@@ -888,6 +1048,7 @@ async function pushToGitHub(
   });
   if (!newCommitResponse.ok) throw new Error(`Failed to create commit: ${newCommitResponse.statusText}`);
   const newCommitData = await newCommitResponse.json();
+  await onCommitCreated(newCommitData.sha, latestCommitSha, deletedPaths);
 
   if (latestCommitSha) {
     const updateRefResponse = await fetch(`${baseUrl}/repos/${owner}/${repo}/git/refs/heads/${branch}`, {
@@ -896,15 +1057,13 @@ async function pushToGitHub(
       body: JSON.stringify({ sha: newCommitData.sha }),
     });
     if (!updateRefResponse.ok) {
-      // 422 non-fast-forward: the head we built on was STALE (the provider can
-      // serve a lagging ref for seconds after a recent push — the bench hit it
-      // on two rapid same-ref pushes, and R4's auto-push-on-accept does the same
-      // in production). One full re-attempt on a freshly read head: the tree is
-      // rebuilt against the real base, the commit re-parented, honest content
-      // either way. A second 422 is genuine contention — surface it.
-      if (updateRefResponse.status === 422 && !_staleHeadRetry) {
-        console.warn('[pushToGitHub] ref update 422 (stale head) — rebuilding on fresh head, one retry');
-        return pushToGitHub(apiBase, owner, repo, branch, token, message, files, stalePaths, true);
+      // 422 non-fast-forward: the branch is no longer at the head we built on
+      // (someone pushed, or the provider served a lagging ref). AD.1: the
+      // caller re-runs the preflight on the new head, so nothing written on a
+      // stale read can overwrite a change git made since.
+      if (updateRefResponse.status === 422) {
+        console.warn('[pushToGitHub] ref update 422: the branch moved; the preflight runs again');
+        return { sha: newCommitData.sha, parent: latestCommitSha, deletedPaths, moved: true };
       }
       throw new Error(`Failed to update ref: ${updateRefResponse.statusText}`);
     }
@@ -920,59 +1079,74 @@ async function pushToGitHub(
     }
   }
 
-  return { sha: newCommitData.sha, deletedPaths };
+  return { sha: newCommitData.sha, parent: latestCommitSha, deletedPaths };
 }
 
 async function pushToGitLab(
   apiBase: string,
   owner: string, repo: string, branch: string, token: string,
   message: string, files: FileEntry[],
-  stalePaths: string[] = [],
-): Promise<{ sha: string; deletedPaths: string[] }> {
-  const baseUrl = apiBase;
-  const projectPath = `${owner}/${repo}`;
+  stalePaths: string[],
+  /** AD.4 (D17): the head the preflight read (null: the branch has none yet). */
+  parent: string | null,
+  /** path to the blob this push writes there */
+  blobs: Record<string, string>,
+): Promise<GitPushResult> {
+  const project = gitlabProjectPath(owner, repo);
   const glHeaders = { "PRIVATE-TOKEN": token, "Content-Type": "application/json" };
 
-  const projectResponse = await fetch(`${baseUrl}/projects/${encodeURIComponent(projectPath)}`, { headers: glHeaders });
-  if (!projectResponse.ok) throw new Error(`Failed to get project: ${projectResponse.statusText}`);
-  const projectData = await projectResponse.json();
-  const glProjectId = projectData.id;
-
-  const existingFilesResponse = await fetch(
-    `${baseUrl}/projects/${glProjectId}/repository/tree?ref=${branch}&recursive=true&per_page=100`,
-    { headers: glHeaders },
-  );
-  const existingFiles = existingFilesResponse.ok ? await existingFilesResponse.json() : [];
-  const existingPaths = new Set(
-    (existingFiles as any[]).filter((f: any) => f.type === "blob").map((f: any) => f.path),
-  );
-
-  const actions: Array<Record<string, string>> = files.map((f) => ({
-    action: existingPaths.has(f.path) ? "update" : "create",
-    file_path: f.path,
-    content: f.content,
-  }));
-  // Rename/removal cleanup — delete only paths that still exist on the branch
-  // (the commits API fails the WHOLE commit on deleting a nonexistent path).
-  const deletedPaths: string[] = [];
-  for (const p of stalePaths) {
-    if (existingPaths.has(p)) {
-      actions.push({ action: "delete", file_path: p });
-      deletedPaths.push(p);
-    }
+  // AD.4 (D17): the files the branch held at the head the preflight read,
+  // every page of them. The listing used to stop at its first hundred entries,
+  // so a file past them was "created" and GitLab refused the whole commit; a
+  // failed read was taken for an empty branch. It throws now.
+  const existing = new Map<string, string>();
+  if (parent) {
+    const listed = await fetchFullGitLabTree(apiBase, owner, repo, parent, token);
+    if (listed.truncated) throw new Error(`NodeSpec could not list every file of ${owner}/${repo} (${listed.collectedCount} read); nothing was written. Try the push again.`);
+    // deno-lint-ignore no-explicit-any
+    for (const t of listed.tree as any[]) existing.set(t.path, t.sha);
+  }
+  const changes = gitLabChanges({ files, blobs, existing, stalePaths });
+  if (parent && changes.creates.length + changes.updates.length + changes.deletes.length === 0) {
+    return { sha: parent, parent, deletedPaths: [], unchanged: true };
   }
 
-  const commitResponse = await fetch(`${baseUrl}/projects/${glProjectId}/repository/commits`, {
+  // Each file updated or deleted names the commit that last changed it at
+  // that head, so GitLab refuses the commit when the file changed since.
+  const lastCommitIds = new Map<string, string>();
+  const touched = [...changes.updates.map((f) => f.path), ...changes.deletes];
+  for (let i = 0; i < touched.length; i += 10) {
+    await Promise.all(touched.slice(i, i + 10).map(async (path) => {
+      const resp = await fetch(
+        `${apiBase}/projects/${project}/repository/files/${encodeURIComponent(path)}?ref=${encodeURIComponent(parent as string)}`,
+        { method: "HEAD", headers: { "PRIVATE-TOKEN": token } },
+      );
+      const id = resp.headers.get("x-gitlab-last-commit-id");
+      if (!resp.ok || !id) throw new Error(`Could not read ${path} at ${String(parent).slice(0, 8)} (HTTP ${resp.status}); nothing was written. Try again.`);
+      lastCommitIds.set(path, id);
+    }));
+  }
+
+  const commitResponse = await fetch(`${apiBase}/projects/${project}/repository/commits`, {
     method: "POST",
     headers: glHeaders,
-    body: JSON.stringify({ branch, commit_message: message, actions }),
+    body: JSON.stringify({ branch, commit_message: message, actions: gitLabActions(changes, lastCommitIds) }),
   });
   if (!commitResponse.ok) {
     const errorText = await commitResponse.text();
+    if (gitLabBranchMoved(commitResponse.status, errorText)) {
+      console.warn("[pushToGitLab] a file changed since the preflight read the branch; the preflight runs again");
+      return { sha: "", parent, deletedPaths: [], moved: true };
+    }
     throw new Error(`Failed to create commit: ${commitResponse.statusText} - ${errorText}`);
   }
   const commitData = await commitResponse.json();
-  return { sha: commitData.id, deletedPaths };
+  // AD.1: the commit names the parent GitLab gave it; one other than the head
+  // the preflight read means commits landed between, and the baseline stays.
+  const committedParent = Array.isArray(commitData.parent_ids) && typeof commitData.parent_ids[0] === "string"
+    ? commitData.parent_ids[0] as string
+    : null;
+  return { sha: commitData.id, parent: committedParent, deletedPaths: changes.deletes };
 }
 
 function generateArchitectureDocument(graph: any): string | null {

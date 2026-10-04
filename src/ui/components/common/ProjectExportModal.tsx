@@ -1,21 +1,17 @@
 import { useState, memo } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useTheme } from '../../theme/ThemeContext.js';
 import type { ProjectExportData } from '../../utils/export-context.js';
-import { downloadAsFile, copyToClipboard } from '../../utils/export-context.js';
+import { downloadAsFile, copyToClipboard, exportCounts, exportPreviewLine } from '../../utils/export-context.js';
 import { downloadProjectAsZip } from '../../utils/export-zip.js';
 import { formatSpecificationReadme } from '../../utils/export-specification.js';
 import { formatAsClaude, formatAsCursorRules, formatAsAgents } from '../../utils/export-agent-rules.js';
 import { formatAsMermaid } from '../../utils/export-mermaid.js';
-import type { FeatureGate } from '../../hooks/useFeatureGate.js';
-import { getSupabaseClient } from '../../../persistence/supabase/client.js';
-import { SubscriptionService } from '../../services/SubscriptionService.js';
+import { resolveSupabaseConfig } from '../../../persistence/supabase/client.js';
 import { isHostedEdition } from '../../config/edition.js';
 
 interface ProjectExportModalProps {
   data: ProjectExportData;
   onClose: () => void;
-  featureGate?: FeatureGate;
   hasGitIntegration?: boolean;
   onPushToGit?: () => void;
   /** Hosted edition only: opens the marketplace publish modal (owned by GraphEditor). */
@@ -27,7 +23,6 @@ interface ExportOption {
   label: string;
   filename: string;
   description: string;
-  placement: string;
   icon: React.ReactNode;
   getContent: () => string | null;
   isZip?: boolean;
@@ -44,7 +39,6 @@ function buildTestPlanOption(data: ProjectExportData): ExportOption[] {
     label: 'Test Plans',
     filename: `${data.meta.projectName.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase()}-test-plans.md`,
     description: `${testPlanArtifacts.length} test plan document${testPlanArtifacts.length > 1 ? 's' : ''} with acceptance criteria, strategy, and framework recommendations.`,
-    placement: 'Testing context for AI agents',
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
         <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" />
@@ -73,15 +67,13 @@ function buildTestPlanOption(data: ProjectExportData): ExportOption[] {
   }];
 }
 
-function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegration, onPushToGit, onPublishToMarketplace }: ProjectExportModalProps) {
+function ProjectExportModalComponent({ data, onClose, hasGitIntegration, onPushToGit, onPublishToMarketplace }: ProjectExportModalProps) {
   const { theme } = useTheme();
   const c = theme.colors;
-  const navigate = useNavigate();
   const [includeCode, setIncludeCode] = useState(true);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [upgradeLoading, setUpgradeLoading] = useState(false);
-
-  const gitPushAllowed = featureGate ? !featureGate.loading && featureGate.can('git_push') : true;
+  // The design's preview pane, folded under the card: the file's own line and its text.
+  const [previewId, setPreviewId] = useState<string | null>(null);
 
   const buildFilteredData = (): ProjectExportData => {
     if (includeCode) return data;
@@ -91,33 +83,14 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
     };
   };
 
-  const handleUpgradeClick = async () => {
-    setUpgradeLoading(true);
-    try {
-      const supabase = getSupabaseClient();
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session) {
-        const svc = new SubscriptionService(supabase);
-        const result = await svc.createCheckoutSession('indie', 'month', session.access_token);
-        if (!('error' in result)) {
-          window.location.href = result.url;
-          return;
-        }
-      }
-    } catch { /* fall through to pricing page */ }
-    setUpgradeLoading(false);
-    navigate('/pricing');
-  };
-
   const exportOptions: ExportOption[] = [
     {
       id: 'git-push',
       label: 'Commit to Git',
       filename: '',
-      description: gitPushAllowed && !hasGitIntegration
+      description: !hasGitIntegration
         ? 'Connect a GitHub or GitLab repository to commit artifact files.'
         : 'Commit all artifact files directly to your connected GitHub or GitLab repository.',
-      placement: 'Connected repository',
       icon: (
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
           <line x1="6" y1="3" x2="6" y2="15" />
@@ -129,6 +102,26 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
       getContent: () => null,
       isGitPush: true,
     },
+    // 9.13 (owner): Specification.md sits directly under Commit to Git. It is
+    // the document a PERSON reads — the vision, the requirements and whether
+    // they are proved — so it leads the list of files; the three agent files
+    // follow, because they are read by tools.
+    {
+      id: 'spec',
+      label: 'Specification.md',
+      filename: `${data.meta.projectName.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase()}-specification.md`,
+      description: 'For people: the vision, every requirement with its acceptance criteria met and unmet, test coverage and progress.',
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+          <line x1="16" y1="13" x2="8" y2="13" />
+          <line x1="16" y1="17" x2="8" y2="17" />
+          <line x1="10" y1="9" x2="8" y2="9" />
+        </svg>
+      ),
+      getContent: () => formatSpecificationReadme(data),
+    },
     // Hosted edition only: the marketplace publish card. Self-hosted builds
     // never pass the callback and isHostedEdition compiles the branch away.
     ...(isHostedEdition && onPublishToMarketplace ? [{
@@ -136,7 +129,6 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
       label: 'Publish to NodeSpec Marketplace',
       filename: '',
       description: 'Share this architecture as a community template others can browse, upvote, and start from. Source code never leaves your project.',
-      placement: 'nodespec.io/templates',
       icon: (
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
           <path d="M12 2 2 7l10 5 10-5-10-5z" />
@@ -151,11 +143,10 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
       id: 'claude',
       label: 'CLAUDE.md',
       filename: 'CLAUDE.md',
-      description: 'Claude Code reads this on every session. Includes @imports to per-node context.',
-      placement: 'Drop into your repo root',
+      description: 'For agents: architecture, constraints and every unmet acceptance criterion. Claude Code reads it each session and follows its @imports to per-node context.',
       icon: (
         <img
-          src="https://komnpkjlvgfworfbdrya.supabase.co/storage/v1/object/public/icons/anthropic.png"
+          src={`${resolveSupabaseConfig().url}/storage/v1/object/public/icons/anthropic.png`}
           alt="Anthropic"
           width={20}
           height={20}
@@ -168,8 +159,7 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
       id: 'agents',
       label: 'AGENTS.md',
       filename: 'AGENTS.md',
-      description: 'Universal agent context file. Read by Codex, Jules, Copilot, Gemini CLI, and 20+ tools.',
-      placement: 'Drop into your repo root',
+      description: 'The same agent context, self-contained for tools with no import mechanism. Read by Codex, Jules, Copilot, Gemini CLI and 20+ others.',
       icon: (
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
           <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
@@ -184,8 +174,7 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
       id: 'cursor',
       label: 'Cursor Rules',
       filename: '.cursor/rules/nodespec.mdc',
-      description: 'Auto-attaches when you edit project files. Uses glob-based file matching.',
-      placement: 'Place in .cursor/rules/',
+      description: 'The same agent context, kept terse: it auto-attaches by glob while you edit, so it carries directives and points at the context directory.',
       icon: (
         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
           <path d="M5.5 3.21V20.8c0 .45.54.67.85.35l4.86-4.86h6.21c.36 0 .57-.4.36-.68L5.97 2.8a.5.5 0 0 0-.47.41Z" />
@@ -194,28 +183,10 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
       getContent: () => formatAsCursorRules(buildFilteredData()),
     },
     {
-      id: 'spec',
-      label: 'Specification.md',
-      filename: `${data.meta.projectName.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase()}-specification.md`,
-      description: 'Human-readable spec with requirements, features, acceptance criteria, and traceability.',
-      placement: 'For team documentation',
-      icon: (
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-          <polyline points="14 2 14 8 20 8" />
-          <line x1="16" y1="13" x2="8" y2="13" />
-          <line x1="16" y1="17" x2="8" y2="17" />
-          <line x1="10" y1="9" x2="8" y2="9" />
-        </svg>
-      ),
-      getContent: () => formatSpecificationReadme(data),
-    },
-    {
       id: 'mermaid',
       label: 'Mermaid Diagram',
       filename: `${data.meta.projectName.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase()}-architecture.mmd`,
       description: 'Architecture diagram as Mermaid flowchart -- paste into GitHub, Notion, docs, or mermaid.live.',
-      placement: 'For docs, wikis, and presentations',
       icon: (
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
           <rect x="3" y="3" width="6" height="6" rx="1" />
@@ -234,7 +205,6 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
       label: 'Full Project (.zip)',
       filename: `${data.meta.projectName.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase()}-repo.zip`,
       description: 'All of the above + per-node RAG context files (.nodespec/context/) + source artifacts.',
-      placement: 'Complete export bundle',
       icon: (
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -268,13 +238,8 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
     }
   };
 
-  const stats = [
-    { value: data.meta.nodeCount, label: 'nodes' },
-    { value: data.meta.edgeCount, label: 'edges' },
-    { value: data.meta.contractCount, label: 'contracts' },
-    { value: data.meta.artifactCount, label: 'artifacts' },
-    ...(data.meta.testCount > 0 ? [{ value: data.meta.testCount, label: 'tests' }] : []),
-  ];
+  // V3 4.5: four counts, from the one pure function the tests read.
+  const stats = exportCounts(data);
 
   return (
     <div
@@ -329,7 +294,6 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
                       padding: '14px 16px', borderRadius: '10px',
                       border: `1px solid ${c.border}`,
                       backgroundColor: c.background,
-                      opacity: gitPushAllowed ? 1 : 0.5,
                       transition: 'border-color 0.15s',
                     }}
                   >
@@ -347,46 +311,14 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
                         <span style={{ fontSize: '13px', fontWeight: 600, color: c.text }}>
                           {option.label}
                         </span>
-                        {!gitPushAllowed && (
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={c.textMuted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                          </svg>
-                        )}
-                        <span style={{
-                          fontSize: '10px', fontWeight: 500, color: c.textMuted,
-                          padding: '1px 6px', borderRadius: '4px',
-                          backgroundColor: theme.mode === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
-                        }}>
-                          {option.placement}
-                        </span>
                       </div>
                       <div style={{ fontSize: '11.5px', color: c.textMuted, lineHeight: 1.4 }}>
                         {option.description}
                       </div>
-                      {!gitPushAllowed && (
-                        <div style={{ fontSize: '10.5px', color: c.textMuted, marginTop: '4px', fontStyle: 'italic' }}>
-                          Available on Architect and Pro plans
-                        </div>
-                      )}
                     </div>
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
-                      {!gitPushAllowed ? (
-                        <button
-                          onClick={handleUpgradeClick}
-                          disabled={upgradeLoading}
-                          style={{
-                            padding: '6px 16px', fontSize: '12px', fontWeight: 600,
-                            border: 'none', borderRadius: '6px',
-                            cursor: upgradeLoading ? 'wait' : 'pointer',
-                            backgroundColor: '#3b82f6', color: '#ffffff',
-                            opacity: upgradeLoading ? 0.7 : 1,
-                          }}
-                        >
-                          {upgradeLoading ? 'Redirecting...' : 'Upgrade to Architect'}
-                        </button>
-                      ) : !hasGitIntegration ? (
+                      {!hasGitIntegration ? (
                         <button
                           onClick={onPushToGit}
                           style={{
@@ -457,13 +389,6 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
                         <span style={{ fontSize: '13px', fontWeight: 600, color: c.text }}>
                           {option.label}
                         </span>
-                        <span style={{
-                          fontSize: '10px', fontWeight: 500, color: c.textMuted,
-                          padding: '1px 6px', borderRadius: '4px',
-                          backgroundColor: theme.mode === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
-                        }}>
-                          {option.placement}
-                        </span>
                       </div>
                       <div style={{ fontSize: '11.5px', color: c.textMuted, lineHeight: 1.4 }}>
                         {option.description}
@@ -497,19 +422,25 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
               const content = !option.isZip ? option.getContent() : 'zip';
               const isAvailable = content !== null;
               const isCopied = copiedId === option.id;
+              const previewable = !option.isZip && isAvailable;
+              const previewing = previewable && previewId === option.id;
+              const line = exportPreviewLine(option.id, data);
 
               return (
                 <div
                   key={option.id}
+                  data-testid="export-card"
+                  data-option={option.id}
                   style={{
-                    display: 'flex', alignItems: 'center', gap: '14px',
+                    display: 'flex', flexDirection: 'column', gap: '10px',
                     padding: '14px 16px', borderRadius: '10px',
-                    border: `1px solid ${c.border}`,
+                    border: `1px solid ${previewing ? c.primary : c.border}`,
                     backgroundColor: c.background,
                     opacity: isAvailable ? 1 : 0.5,
                     transition: 'border-color 0.15s',
                   }}
                 >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
                   {/* Icon */}
                   <div style={{
                     width: '36px', height: '36px', borderRadius: '8px',
@@ -526,13 +457,6 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
                       <span style={{ fontSize: '13px', fontWeight: 600, color: c.text }}>
                         {option.label}
                       </span>
-                      <span style={{
-                        fontSize: '10px', fontWeight: 500, color: c.textMuted,
-                        padding: '1px 6px', borderRadius: '4px',
-                        backgroundColor: theme.mode === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
-                      }}>
-                        {option.placement}
-                      </span>
                     </div>
                     <div style={{ fontSize: '11.5px', color: c.textMuted, lineHeight: 1.4 }}>
                       {option.description}
@@ -541,6 +465,21 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
 
                   {/* Actions */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+                    {previewable && (
+                      <button
+                        data-testid="export-preview-toggle"
+                        aria-pressed={previewing}
+                        onClick={() => setPreviewId(previewing ? null : option.id)}
+                        title={previewing ? 'Hide the file' : 'Read the file here'}
+                        style={{
+                          padding: '6px 10px', fontSize: '12px', fontWeight: 500, borderRadius: '6px',
+                          border: `1px solid ${previewing ? c.primary : c.border}`, backgroundColor: 'transparent',
+                          color: previewing ? c.primary : c.textMuted, cursor: 'pointer', transition: 'all 0.15s',
+                        }}
+                      >
+                        {previewing ? 'Hide' : 'Preview'}
+                      </button>
+                    )}
                     {!option.isZip && isAvailable && (
                       <button
                         onClick={() => handleCopy(option)}
@@ -596,6 +535,13 @@ function ProjectExportModalComponent({ data, onClose, featureGate, hasGitIntegra
                       Download
                     </button>
                   </div>
+                </div>
+                {previewing && (
+                  <div data-testid="export-preview" style={{ display: 'flex', flexDirection: 'column', gap: '6px', borderTop: `1px solid ${c.border}`, paddingTop: '10px' }}>
+                    {line && <span data-testid="export-preview-line" style={{ fontSize: '11.5px', fontWeight: 600, color: c.textSecondary }}>{line}</span>}
+                    <pre style={{ margin: 0, maxHeight: '260px', overflow: 'auto', padding: '10px 12px', borderRadius: '8px', backgroundColor: c.surface, border: `1px solid ${c.border}`, fontSize: '11px', lineHeight: 1.5, color: c.text, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{content}</pre>
+                  </div>
+                )}
                 </div>
               );
             })}

@@ -3,7 +3,7 @@
 // as a separate set (one Group row + hosting containers; the taxonomy N7's ONTOLOGY.md
 // captures first-class).
 import { describe, expect, it } from 'vitest';
-import { buildTechnologyListItems, buildRoleListItems, buildStructureListItems, buildPlatformListItems, buildFunctionalRoleItems, buildAlphabeticalPalette, groupByLetter, familyForTechnology, familyPlatformRoleIds, familiesInList } from '../ui/utils/palette-list.js';
+import { buildTechnologyListItems, buildRoleListItems, buildStructureListItems, buildPlatformListItems, buildPlatformsAndHostsItems, buildFunctionalRoleItems, buildAlphabeticalPalette, groupByLetter, familyForTechnology, familyPlatformRoleIds, familiesInList, technologyVisibleInProject } from '../ui/utils/palette-list.js';
 import type { CatalogResolver, NodeRole, TechnologyCatalogEntry } from '../persistence/supabase/catalog-repository.js';
 
 function role(id: string, over: Record<string, unknown> = {}): NodeRole {
@@ -12,7 +12,7 @@ function role(id: string, over: Record<string, unknown> = {}): NodeRole {
     rfVisualType: 'service', paletteCategory: 'Services',
     nature: 'build', interfaceKind: 'service', provider: null, capabilityTags: [],
     isContainer: false, containerLayer: null, containerStyle: null, canContain: [],
-    metadataSchema: null, defaultPorts: [], suggestedContracts: [], sortOrder: 1,
+    metadataSchema: null, suggestedContracts: [], sortOrder: 1,
     deprecated: false, defaultTechnology: null,
     ...over,
   } as NodeRole;
@@ -90,7 +90,6 @@ describe('buildTechnologyListItems', () => {
     const ec2 = items.find(i => i.id === 'aws-ec2')!;
     expect(ec2).toBeDefined();
     expect(ec2.dragRoleId).toBe('docker-container'); // drops as the hosting container, tech bound
-    expect(ec2.chip).toBe('Host');
     // Leaf affinities still take precedence when a tech has both.
     expect(items.find(i => i.id === 'react')!.dragRoleId).toBe('backend-service');
     // Deprecated-only affinities remain skipped.
@@ -103,7 +102,6 @@ describe('buildTechnologyListItems', () => {
     expect(vpc).toBeDefined();
     expect(vpc.family).toBe('aws');       // appears under the AWS chip
     expect(vpc.dragRoleId).toBeNull();    // two container affinities → drop-time picker
-    expect(vpc.chip).toBe('Host');
   });
 });
 
@@ -118,10 +116,9 @@ describe('buildRoleListItems', () => {
 });
 
 describe('buildStructureListItems — the organizational group roles ONLY (owner ruling 2026-08-05)', () => {
-  it("the 'Logical'-filed logical-boundary roles, application-module first, all chipped Group", () => {
+  it("the 'Logical'-filed logical-boundary roles, application-module first", () => {
     const items = buildStructureListItems(resolver);
     expect(items.map(i => i.id)).toEqual(['application-module', 'bounded-context']);
-    expect(items.every(i => i.chip === 'Group')).toBe(true);
     // hosting containers are a DIFFERENT concept — never Structure rows
     expect(items.map(i => i.id)).not.toContain('aws');
     expect(items.map(i => i.id)).not.toContain('docker-container');
@@ -137,7 +134,6 @@ describe('buildPlatformListItems — BRAND platforms only (owner ruling 2026-08-
     // Supabase (Managed) is a LEAF boundary node now (2026-08-05 ruling) — it left
     // the Platforms browse and drops from the Technology list instead.
     expect(items.map(i => i.id)).not.toContain('supabase');
-    expect(items.every(i => i.chip === 'Host')).toBe(true);
     // generic hosting concepts are Functional, not Platforms
     expect(items.map(i => i.id)).not.toContain('docker-container');
     expect(items.map(i => i.id)).not.toContain('robot');
@@ -147,17 +143,24 @@ describe('buildPlatformListItems — BRAND platforms only (owner ruling 2026-08-
   });
 });
 
-describe('generic containers browse under Functional Node Types (owner ruling 2026-08-05)', () => {
-  it('unbranded hosting/hardware containers list with Host chips; branded ones never do', () => {
-    const ids = buildFunctionalRoleItems(resolver).map(i => i.id);
-    expect(ids).toContain('docker-container'); // generic hosting concept
-    expect(ids).toContain('robot');            // hardware concept
-    expect(ids).not.toContain('aws');          // platform — its own section
-    expect(ids).not.toContain('ecs-cluster');  // AWS-branded — reachable via aws-ecs tech + search only
-    expect(ids).not.toContain('application-module'); // logical group — Structure
-    const docker = buildFunctionalRoleItems(resolver).find(i => i.id === 'docker-container')!;
-    expect(docker.chip).toBe('Host');
+describe('AG.1: generic hosts and devices list under Platforms and hosts, after the brand platforms', () => {
+  it('unbranded hosting and hardware containers follow the platforms; branded ones never list', () => {
+    const ids = buildPlatformsAndHostsItems(resolver).map(i => i.id);
+    expect(ids).toEqual(['aws', 'docker-container', 'robot']); // platforms first, then hosts A to Z
+    expect(ids).not.toContain('ecs-cluster');  // AWS-branded: reached through its technology and search
+    expect(ids).not.toContain('application-module'); // a group: Structure
+    const docker = buildPlatformsAndHostsItems(resolver).find(i => i.id === 'docker-container')!;
     expect(docker.dragRoleId).toBe('docker-container');
+  });
+
+  it('a provider filter narrows it to that provider\'s platform', () => {
+    expect(buildPlatformsAndHostsItems(resolver, 'aws').map(i => i.id)).toEqual(['aws']);
+    expect(buildPlatformsAndHostsItems(resolver, 'azure').map(i => i.id)).toEqual([]);
+  });
+
+  it('Node types holds functional leaves only', () => {
+    const items = buildFunctionalRoleItems(resolver);
+    expect(items.some(i => resolver.getRole(i.id)?.isContainer)).toBe(false);
   });
 
   it('the Supabase (Managed) leaf role never browses loose (integrate — the tech row is the entry)', () => {
@@ -211,7 +214,7 @@ describe('buildAlphabeticalPalette + groupByLetter', () => {
   it('N4.6: familiesInList counts members, largest first, hides singletons', () => {
     const mk = (id: string, family: string | null) => ({
       key: `tech:${id}`, nature: 'build', kind: 'technology' as const, id, name: id, caption: null,
-      chip: null, natureLine: '', iconName: null, color: null, brandColor: null,
+      iconName: null, color: null, brandColor: null,
       dragRoleId: null, family,
     });
     const chips = familiesInList([
@@ -264,19 +267,135 @@ describe('buildAlphabeticalPalette + groupByLetter', () => {
     expect(ids).toContain('external-data');
     expect(ids).toContain('iac-workflow');
 
-    // Roles with technologies carry the pick-later caption with the count.
+    // AG.2: a type's caption is its own first sentence, then its technology count.
     const db = buildFunctionalRoleItems(r).find(i => i.id === 'database')!;
-    expect(db.caption).toBe('generic — pick technology later (2 available)');
-    // Tech-less exempt roles keep their description caption.
+    expect(db.caption).toBe('Does things · 2 technologies');
+    // Tech-less exempt roles keep their first sentence alone.
     const sensor = buildFunctionalRoleItems(r).find(i => i.id === 'sensor')!;
-    expect(sensor.caption).not.toContain('pick technology later');
+    expect(sensor.caption).toBe('Does things.');
   });
 
   it('non-alphabetic leaders bucket under # at the end', () => {
     const groups = groupByLetter([
-      { key: 'tech:x', kind: 'technology' as const, id: 'x', name: '4chan-api', caption: null, chip: null, natureLine: '', iconName: null, color: null, brandColor: null, dragRoleId: null, family: null },
-      { key: 'tech:y', kind: 'technology' as const, id: 'y', name: 'Alpha', caption: null, chip: null, natureLine: '', iconName: null, color: null, brandColor: null, dragRoleId: null, family: null },
+      { key: 'tech:x', kind: 'technology' as const, id: 'x', name: '4chan-api', caption: null, iconName: null, color: null, brandColor: null, dragRoleId: null, family: null },
+      { key: 'tech:y', kind: 'technology' as const, id: 'y', name: 'Alpha', caption: null, iconName: null, color: null, brandColor: null, dragRoleId: null, family: null },
     ]);
     expect(groups.map(g => g.letter)).toEqual(['A', '#']);
+  });
+});
+
+// AG.6c (owner 2026-09-28): a custom technology row belongs to one project. An admin, and a
+// member of two projects, can read other projects' custom rows, so the palette shows one only
+// inside its own project; with no project open it shows none.
+describe('custom technologies stay in their project', () => {
+  const custom = (id: string, projectId: string | null) => ({ ...tech(id, id, ['backend-service']), isUserContributed: true, projectId });
+  const techs = [...TECHS, custom('ours', 'p1'), custom('theirs', 'p2'), custom('nobodys', null)];
+  const r = { ...resolver, getAllTechnologies: () => techs, getTechnology: (id: string) => techs.find(t => t.id === id) ?? null } as unknown as CatalogResolver;
+
+  it('inside p1: the catalog rows and p1\'s own custom row, never another project\'s', () => {
+    const ids = buildAlphabeticalPalette(r, 'p1').map(i => i.id);
+    expect(ids).toContain('ours');
+    expect(ids).toContain('react');
+    expect(ids).not.toContain('theirs');
+    expect(ids).not.toContain('nobodys');
+  });
+
+  it('with no project: no custom row at all', () => {
+    const ids = buildTechnologyListItems(r).map(i => i.id);
+    expect(ids.filter(id => ['ours', 'theirs', 'nobodys'].includes(id))).toEqual([]);
+    expect(ids).toContain('react');
+  });
+
+  it('the rule the picker and the search use too', () => {
+    expect(technologyVisibleInProject(custom('ours', 'p1'), 'p1')).toBe(true);
+    expect(technologyVisibleInProject(custom('theirs', 'p2'), 'p1')).toBe(false);
+    expect(technologyVisibleInProject(custom('nobodys', null), 'p1')).toBe(false);
+    expect(technologyVisibleInProject(tech('react', 'React', ['backend-service']), null)).toBe(true);
+  });
+});
+
+// Phase 3 of the catalog plan (owner 2026-09-28): the sidebar over the rows as migration
+// 20260928130000 leaves them, beside the rows as they were.
+describe('the catalog shape: what the sidebar offers', () => {
+  const host = (id: string, paletteCategory: string, over: Record<string, unknown> = {}) =>
+    role(id, { label: id, isContainer: true, containerStyle: 'hosting', paletteCategory, ...over });
+  const shapeRoles = (retired: boolean) => [
+    role('game-client', { label: 'Game Client', paletteCategory: 'Game Development' }),
+    role('mobile-app', { label: 'Mobile App' }),
+    role('desktop-app', { label: 'Desktop Application' }),
+    role('firmware-service', { label: 'Firmware Service', paletteCategory: 'Hardware' }),
+    role('microcontroller', { label: 'Microcontroller', paletteCategory: 'Hardware', deprecated: retired }),
+    role('embedded-device', { label: 'Embedded Device', paletteCategory: 'Hardware', deprecated: retired }),
+    role('embedded-system', { label: 'Embedded System', isContainer: true, containerStyle: 'logical-boundary', paletteCategory: 'Logical', deprecated: retired }),
+    role('application-module', { label: 'Application Module', isContainer: true, containerStyle: 'logical-boundary', paletteCategory: 'Logical' }),
+    host('edge-device', 'Hardware'),
+    host('vpc', 'Networking'),
+    host('subnet', 'Networking'),
+  ];
+  const shapeResolver = (roles: NodeRole[], techs: TechnologyCatalogEntry[]) => ({
+    getAllRoles: () => roles,
+    getAllTechnologies: () => techs,
+    getRole: (id: string) => roles.find(r => r.id === id) ?? null,
+    getTechnology: (id: string) => techs.find(t => t.id === id) ?? null,
+  } as unknown as CatalogResolver);
+  const offered = (r: CatalogResolver) => new Set([
+    ...buildRoleListItems(r), ...buildFunctionalRoleItems(r), ...buildStructureListItems(r),
+    ...buildPlatformsAndHostsItems(r), ...buildAlphabeticalPalette(r),
+  ].map(i => i.id));
+
+  it('AG.4: Microcontroller, Embedded Device and Embedded System are offered nowhere once retired; Edge Device, Firmware Service and Application Module are', () => {
+    const before = offered(shapeResolver(shapeRoles(false), []));
+    const after = offered(shapeResolver(shapeRoles(true), []));
+    for (const id of ['microcontroller', 'embedded-device', 'embedded-system']) {
+      expect(before.has(id), `${id} was offered before`).toBe(true);
+      expect(after.has(id), `${id} is offered after`).toBe(false);
+    }
+    for (const id of ['edge-device', 'firmware-service', 'application-module']) expect(after.has(id), id).toBe(true);
+  });
+
+  it('AF.1: Unity drops as a Game Client with no picker; filed as an app first, it asked', () => {
+    const drop = (affinities: string[]) =>
+      buildTechnologyListItems(shapeResolver(shapeRoles(true), [tech('unity', 'Unity', affinities)]))[0].dragRoleId;
+    expect(drop(['mobile-app', 'desktop-app', 'game-client'])).toBeNull();
+    expect(drop(['game-client'])).toBe('game-client');
+  });
+
+  it('AG.7: a VPC product drops as a VPC with no picker; filed as VPC or Subnet, it asked', () => {
+    const drop = (affinities: string[]) =>
+      buildTechnologyListItems(shapeResolver(shapeRoles(true), [tech('aws-vpc', 'Amazon VPC', affinities)]))[0].dragRoleId;
+    expect(drop(['vpc', 'subnet'])).toBeNull();
+    expect(drop(['vpc'])).toBe('vpc');
+  });
+});
+
+// AG.2 (owner 2026-09-28): 39 Node types rows read "generic, pick technology later (N
+// available)", so Event Store, Event Stream, Message Broker and Message Queue read alike.
+// Each row now says what the type is, then how many technologies it has.
+describe('AG.2: captions say what each type is', () => {
+  const roles: NodeRole[] = [
+    role('queue', { label: 'Message Queue', description: 'Point-to-point work dispatch. One consumer per message.' }),
+    role('event-stream', { label: 'Event Stream or Pub/Sub', description: 'Topics that many consumers read. Replay too.' }),
+    role('cli-tool', { label: 'CLI Tool', description: 'A binary people run.' }),
+  ];
+  const techs = [
+    tech('aws-sqs', 'SQS', ['queue']), tech('rabbitmq', 'RabbitMQ', ['queue']),
+    tech('kafka', 'Kafka', ['event-stream']), tech('nats', 'NATS', ['event-stream']),
+    tech('go', 'Go', ['cli-tool']),
+  ];
+  const r = {
+    getAllRoles: () => roles, getAllTechnologies: () => techs,
+    getRole: (id: string) => roles.find(x => x.id === id) ?? null,
+    getTechnology: (id: string) => techs.find(t => t.id === id) ?? null,
+  } as unknown as CatalogResolver;
+
+  it('no two rows share a caption, even with the same technology count', () => {
+    const captions = buildFunctionalRoleItems(r).map(i => i.caption);
+    expect(new Set(captions).size).toBe(captions.length);
+    expect(captions).toContain('Point-to-point work dispatch · 2 technologies');
+    expect(captions).toContain('Topics that many consumers read · 2 technologies');
+  });
+
+  it('the count follows the type\'s own sentence, singular for one', () => {
+    expect(buildFunctionalRoleItems(r).find(i => i.id === 'cli-tool')!.caption).toBe('A binary people run · 1 technology');
   });
 });

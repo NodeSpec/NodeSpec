@@ -137,6 +137,11 @@ describe('M5 write boundary — validateCatalogFiling (the triple must cohere)',
     ).toContain('non-container');
   });
 
+  it('AB.5: only a container is drawn as one (desktop-app was a leaf drawn as a box)', () => {
+    expect(validateCatalogFiling(role({ rf_visual_type: 'container' }), KNOWN).join(' ')).toContain("rf_visual_type 'container' is set on a non-container");
+    expect(validateCatalogFiling(role({ rf_visual_type: 'container', is_container: true, container_style: 'hosting', can_contain: ['worker'] }), KNOWN)).toEqual([]);
+  });
+
   it('container_layer must agree with container_style — the double-encoding cannot contradict', () => {
     // 2026-08-05 audit: the two columns encode hosting-vs-logical twice with no
     // cross-column constraint; a contradictory pair renders one truth in ContainerNode's

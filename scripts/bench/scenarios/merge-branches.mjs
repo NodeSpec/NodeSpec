@@ -1,5 +1,6 @@
 // SB-4 scenarios 5–6: the merge-swallow regression (rebase AND squash) and
-// R3-6 second-project branch safety.
+// R3-6 second-project branch safety. V3 AD.2b: a merge files a load proposal,
+// and connect no longer materializes the repository's branches.
 import { callFn, github, rest, uid, until, sweepUntil, Scenario } from '../lib.mjs';
 import { createProject, connectRepo, RUN_PREFIX } from '../fixtures.mjs';
 
@@ -103,19 +104,29 @@ function makeMergeSwallow(mergeMethod) {
       // THE regression: a rebase/squash merge yields a pure self-push range on
       // main. The old code bare-advanced the baseline without loading — the
       // artifact silently never existed on main, permanently undetectable.
+      // V3 AD.2b: the merge is filed as a load proposal a person accepts; the
+      // canvas never changes under an open editor, and the last sync waits.
+      const [before] = await rest(env).select('branches', `id=eq.${fx.ids.branch}&select=last_synced_commit`);
       const result = await sweepUntil(
         () => sweep(env, session, integrationId, 'main'),
-        (r) => r?.status === 'fast_forwarded' && r?.restoredModel === true,
+        (r) => r?.status === 'load_proposed' && !!r?.proposalId,
       );
-      s.check('sweep fast-forwards WITH a model load (restoredModel)',
-        result?.status === 'fast_forwarded' && result?.restoredModel === true,
+      s.check('sweep files git\'s model as a proposal (load_proposed)',
+        result?.status === 'load_proposed' && !!result?.proposalId,
         JSON.stringify(result).slice(0, 300));
 
-      const [snap] = await rest(env).select('graph_snapshots',
-        `branch_id=eq.${fx.ids.branch}&order=patch_sequence.desc,created_at.desc&limit=1&select=graph_data`);
-      const arrived = Object.values(snap?.graph_data?.artifacts ?? {}).some((a) => a.path === artifactPath);
-      s.check('the merged artifact EXISTS in main\'s model (not swallowed)', arrived,
-        `artifacts: ${Object.values(snap?.graph_data?.artifacts ?? {}).map((a) => a.path).join(', ')}`);
+      const [proposal] = result?.proposalId
+        ? await rest(env).select('ai_proposals', `id=eq.${result.proposalId}&select=status,patches,metadata`)
+        : [];
+      const binds = (proposal?.patches ?? []).some((e) => e.patch?.type === 'add_artifact' && e.patch?.payload?.path === artifactPath);
+      s.check('the merged artifact is IN the proposal (not swallowed)', binds,
+        (proposal?.patches ?? []).map((e) => `${e.patch?.type}:${e.patch?.payload?.path ?? e.patch?.payload?.label ?? ''}`).join(', ').slice(0, 300));
+      s.check('the proposal is a pending git load for the merged head', proposal?.status === 'pending' &&
+        proposal?.metadata?.source === 'git-load' && proposal?.metadata?.loadsModel?.headSha === result?.headSha,
+        JSON.stringify(proposal?.metadata ?? {}).slice(0, 300));
+      const [after] = await rest(env).select('branches', `id=eq.${fx.ids.branch}&select=last_synced_commit`);
+      s.check('the last sync waits for the accept', after?.last_synced_commit === before?.last_synced_commit,
+        `before=${before?.last_synced_commit} after=${after?.last_synced_commit}`);
       return { s, fx, integrationId };
     },
   };
@@ -126,7 +137,7 @@ export const mergeSwallowSquash = makeMergeSwallow('squash');
 
 export const branchSafety = {
   name: 'branch-safety',
-  boxes: ['R3-6 1–4 (detection + never-push-to-default)'],
+  boxes: ['R3-6 never-push-to-default; AD.2b no detection'],
   async run(env, session) {
     const s = new Scenario(this.name, this.boxes);
     // Project A seeds the repo with main + one feature branch carrying an anchor.
@@ -146,20 +157,16 @@ export const branchSafety = {
     });
     s.check('project A feature push succeeds (anchor on the ref)', pushFeature.data.success);
 
-    // Project B connects to the SAME repo → detection must materialize the branch.
+    // Project B connects to the SAME repo. V3 AD.2b retired design-branch
+    // detection (it wrote snapshots straight from git; 2.2 keeps one design
+    // branch): the connect creates no branch from the repository's refs.
     const fxB = await createProject(env, session, 'safety-b');
     const { integrationId: intB, connect } = await connectRepo(env, session, callFn, fxB.ids.project);
-    const detected = connect.branchDetect?.created ?? [];
-    s.check('R3-6: connect detects the design branch', detected.some((b) => b.name === 'bench-detected'),
-      JSON.stringify(connect.branchDetect).slice(0, 300));
+    s.check('AD.2b: connect reports no detected branches', connect.branchDetect === undefined,
+      JSON.stringify(connect).slice(0, 300));
     const rows = await rest(env).select('branches',
-      `project_id=eq.${fxB.ids.project}&name=eq.bench-detected&select=id,git_ref,last_synced_commit`);
-    s.check('detected branch row is bound + baselined', rows.length === 1 && rows[0].git_ref === 'bench-detected' && !!rows[0].last_synced_commit,
-      JSON.stringify(rows));
-    if (rows.length === 1) {
-      const snaps = await rest(env).select('graph_snapshots', `branch_id=eq.${rows[0].id}&select=id&limit=1`);
-      s.check('detected branch has a materialized model snapshot', snaps.length === 1);
-    }
+      `project_id=eq.${fxB.ids.project}&name=eq.bench-detected&select=id`);
+    s.check('AD.2b: no branch row is materialized from the repository', rows.length === 0, JSON.stringify(rows));
 
     // THE hazard: an unbound non-main branch must NEVER push to the repo default.
     const gh = github(env);
@@ -178,11 +185,21 @@ export const branchSafety = {
     });
     s.check('push from the unbound branch succeeds (self-healed ref)', freshPush.data.success,
       JSON.stringify(freshPush.data).slice(0, 300));
-    const newRef = await gh.headSha(`${RUN_PREFIX}fresh-slate`);
-    s.check('a git ref with the branch name was created', !!newRef);
+    // UAT hardening 2026-09-27: the new ref must carry THIS push's commit, and
+    // main's untouched head is checked by history too (a ref read can be stale).
+    const newRef = freshPush.data.commitSha
+      ? await until(async () => ((await gh.headSha(`${RUN_PREFIX}fresh-slate`)) === freshPush.data.commitSha ? true : null),
+        { timeoutMs: 20000, everyMs: 2000 })
+      : null;
+    s.check('a git ref with the branch name was created, at the pushed commit', !!newRef,
+      `pushed ${freshPush.data.commitSha ?? 'none'}`);
     const mainAfter = await gh.headSha('main');
-    s.check('main HEAD is UNTOUCHED (never the default-ref fallback)', mainAfter === mainBefore,
-      `before=${mainBefore} after=${mainAfter}`);
+    const pushVsMain = freshPush.data.commitSha ? await gh.compareStatus('main', freshPush.data.commitSha) : null;
+    s.check('main HEAD is UNTOUCHED (never the default-ref fallback)',
+      // 'identical' or 'behind' would mean the commit is on main; no common
+      // history (null) or 'ahead' both mean it is not.
+      mainAfter === mainBefore && pushVsMain !== 'identical' && pushVsMain !== 'behind',
+      `before=${mainBefore} after=${mainAfter} pushed commit vs main: ${pushVsMain}`);
     const [freshRow] = await db.select('branches', `id=eq.${freshId}&select=git_ref,last_synced_commit`);
     s.check('branch row bound + baselined by the self-heal', freshRow.git_ref === `${RUN_PREFIX}fresh-slate` && !!freshRow.last_synced_commit,
       JSON.stringify(freshRow));

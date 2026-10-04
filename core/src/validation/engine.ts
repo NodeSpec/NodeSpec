@@ -84,7 +84,7 @@ export class ValidationEngine {
     const issues: GraphValidationIssue[] = [];
 
     for (const rule of VALIDATION_RULES) {
-      if (rule.category === 'port_configuration' || rule.category === 'artifact_consistency' || rule.category === 'configuration_consistency' || rule.category === 'containment' || rule.category === 'dependency_alignment') {
+      if (rule.category === 'artifact_consistency' || rule.category === 'configuration_consistency' || rule.category === 'containment' || rule.category === 'dependency_alignment') {
         const ruleIssues = rule.check(context);
         issues.push(...ruleIssues);
       }
@@ -131,22 +131,7 @@ export class ValidationEngine {
       (a: any) => a.nodeId === node.id
     );
     const nodeEdges = allEdges.filter((e: any) => e.source === node.id || e.target === node.id);
-    const ports = node.ports || [];
-
     const hasRequiredArtifacts = nodeArtifacts.length > 0;
-
-    const allPortsConnected = ports.every((port: any) => {
-      const direction = port.direction;
-      return nodeEdges.some((e: any) => {
-        if (direction === 'in') {
-          return e.target === node.id && e.targetPortId === port.id;
-        }
-        if (direction === 'out') {
-          return e.source === node.id && e.sourcePortId === port.id;
-        }
-        return false;
-      });
-    });
 
     const relevantEdges = nodeEdges.filter((e: any) => e.source === node.id);
     const allContractsHaveSchemas = relevantEdges.every((e: any) => {
@@ -159,7 +144,6 @@ export class ValidationEngine {
 
     return {
       hasRequiredArtifacts,
-      allPortsConnected,
       allContractsHaveSchemas,
     };
   }

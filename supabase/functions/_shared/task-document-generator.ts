@@ -4,7 +4,12 @@ import { effectiveTreatmentForRole, deriveOwnership } from "./ontology.ts";
 import { collectInheritedScopes, effectiveInheritedValues, renderInheritedContext } from "./inherited-context.ts";
 import { inferProviderFromId, isProviderBrandedId } from "./provider-inference.ts";
 import { resolveConfigChoice } from "./config-choice.ts";
-import { assignTaskKeys } from "./task-deltas.ts";
+import { withholdCredentials, WITHHELD } from "./credential-withhold.ts";
+import { assignTaskKeys, getTaskDocumentPath } from "./task-deltas.ts";
+import { renderConstraintsSection, constraintsSignature, type NodeConstraint } from "./node-constraints.ts";
+import { servedVisionLines, type ServedVision } from "./served-vision.ts";
+import { isPartRole } from "./part-roles.ts";
+import { holdingKind } from "./role-registry.ts";
 
 // ── N5.8: THE deliverable quality gate ────────────────────────────────────────────────
 // One axis-pure classifier decides what a node's task doc demands — never per-technology
@@ -95,7 +100,7 @@ export function classifyNodeDeliverable(
 // counts as a gap. Deterministic — no LLM; the calling AI supplies the fixes (drafting
 // schemas is where its intelligence comes in).
 export interface ReadinessGap {
-  kind: "schema" | "owner" | "config" | "mapping" | "doc" | "classification" | "technology" | "tests";
+  kind: "schema" | "owner" | "config" | "mapping" | "doc" | "classification" | "technology" | "tests" | "constraint" | "container-edge";
   detail: string;
   resolveWith: string;
   /** N5.13: machine-safe node references (bench AI: prose labels are fragile for
@@ -315,6 +320,28 @@ export function assessNodeReadiness(input: TaskDocumentInput): NodeReadiness {
     });
   }
 
+  // AG.14 (owner 2026-09-28): an edge ends on the node inside a container,
+  // never on the box. A stored edge is not rewritten (which node inside was
+  // meant is the user's call); it is reported here, on its leaf end, naming
+  // what the container holds.
+  const isContainerNode = (n: GraphNode | undefined) => !!n && catalogs.nodeRoles[n.type]?.is_container === true;
+  for (const e of Object.values(graph.edges)) {
+    const otherId = e.source === node.id ? e.target : e.target === node.id ? e.source : null;
+    const box = otherId ? graph.nodes[otherId] : undefined;
+    if (!box || !isContainerNode(box)) continue;
+    const inside = Object.values(graph.nodes).filter((n) => n.parentId === box.id && !isContainerNode(n));
+    advisories.push({
+      kind: "container-edge",
+      detail: `The edge ${e.source === node.id ? "to" : "from"} "${box.label}" ends on a container (${box.type}), not on a node: ${inside.length > 0
+        ? `it holds ${inside.map((n) => `"${n.label}"`).join(", ")}`
+        : "it holds no node an edge can end on"}`,
+      resolveWith: inside.length > 0
+        ? "Propose moving the edge to the node inside that is meant (update_edge with the new source or target) for the user to accept."
+        : `Add the node "${box.label}" runs or holds, then propose moving the edge to it (update_edge).`,
+      relatedNodeIds: inside.map((n) => n.id),
+    });
+  }
+
   const upstreamNodeIds = [...new Set(
     contracts.filter((c) => c.direction === "outgoing" && isSyncOutgoing(c)).map((c) => c.connectedNodeId),
   )];
@@ -364,7 +391,6 @@ interface GraphNode {
   technology?: string;
   parentId?: string;
   placementKind?: string;
-  ports?: Array<{ name?: string; direction: "in" | "out"; contractId?: string }>;
   metadata?: {
     rationale?: string;
     domainMetadata?: unknown;
@@ -427,6 +453,12 @@ export interface TaskDocumentInput {
   requirements: RequirementForTask[];
   projectVision?: string;
   /**
+   * AA.6: the vision sentences this node's outcomes cite (served-vision.ts).
+   * When given it replaces `projectVision`: the packet carries what the node
+   * serves, and the fingerprint hashes the same block (servedVisionText).
+   */
+  servedVision?: ServedVision;
+  /**
    * Human requirement id (e.g. "REQ-001") -> ALL node ids the requirement is mapped to
    * (from specification_mappings). Requirements are pre-scoped to this node upstream;
    * the map exists so the doc can label sharing and bound cross-node attribution.
@@ -441,6 +473,12 @@ export interface TaskDocumentInput {
    * the pre-A4 output.
    */
   taskState?: Map<string, boolean>;
+  /**
+   * AA.0 (R.2a): the constraints that apply to this node, from
+   * `project_constraints` (node-constraints.ts). Absent (a caller that did not
+   * load them) renders no block; an empty list renders the one-line note.
+   */
+  constraints?: NodeConstraint[];
 }
 
 /** N5.6 (owner bench doc): some catalog ai_context code snippets were authored flat —
@@ -453,8 +491,54 @@ function normalizeFlattenedCode(code: string): string {
   return code.replace(/\\t/g, "\t").replace(/\\n/g, "\n");
 }
 
+/** AG.12b: the node's ancestors, nearest first, guarded against a cycle. */
+function ancestorsOf(node: GraphNode, graph: GraphData): GraphNode[] {
+  const out: GraphNode[] = [];
+  const seen = new Set<string>([node.id]);
+  let id = node.parentId;
+  while (id && !seen.has(id) && out.length < 12) {
+    seen.add(id);
+    const parent = graph.nodes[id];
+    if (!parent) break;
+    out.push(parent);
+    id = parent.parentId;
+  }
+  return out;
+}
+
+/** AG.12b (owner 2026-09-28): where a node runs, in its own packet. A node placed in the
+ *  model reads the chain up to the account (Orders API in App Engine in Production VPC in
+ *  AWS); code run by a host reads the host, its type and technology, where the host's
+ *  recorded choices are, and that the rest of its setup is in the host's packet; code
+ *  written against a platform's own API, with no host, reads that its platform
+ *  configuration is its own. A container reads only where it sits. */
+export function runsOnLines(node: GraphNode, graph: GraphData, catalogs: CatalogData): string[] {
+  const role = catalogs.nodeRoles[node.type];
+  const ancestors = ancestorsOf(node, graph);
+  const chain = ancestors.map((a) => a.label).join(" in ");
+  if (role?.is_container) return ancestors.length > 0 ? [`**Sits in:** ${chain}.`] : [];
+  const techName = (id?: string) => (id ? catalogs.technologies[id]?.name ?? id : null);
+  const host = ancestors.find((a) => holdingKind(catalogs, a.type) === "runs");
+  if (host) {
+    const hostTech = techName(host.technology);
+    const hasChoices = collectInheritedScopes(graph, node.id).some((scope) => scope.containerId === host.id);
+    return [
+      `**Runs on:** ${node.label} in ${chain}.`,
+      `**Host:** ${host.label} (${catalogs.nodeRoles[host.type]?.label ?? host.type}${hostTech ? `, ${hostTech}` : ""}) runs this code; write it for that runtime. ` +
+        `${hasChoices ? "The host's recorded choices are under Inherited Context below; " : "The host records no choices yet; "}` +
+        `the rest of its setup is in ${host.label}'s own task document.`,
+    ];
+  }
+  const techAiContext = node.technology ? catalogs.technologies[node.technology]?.ai_context as Record<string, unknown> | undefined : undefined;
+  const parentNature = node.parentId ? catalogs.nodeRoles[graph.nodes[node.parentId]?.type ?? ""]?.nature ?? null : null;
+  if (node.technology && isProviderBrandedId(node.technology) && classifyNodeDeliverable(role, techAiContext, node, parentNature) === "code") {
+    return [`**Runs on:** ${techName(node.technology)}${chain ? `, in ${chain}` : ""}. Its platform configuration (runtime, memory, timeout, triggers, permissions) is this node's own, not a host's.`];
+  }
+  return ancestors.length > 0 ? [`**Runs on:** ${node.label} in ${chain}.`] : [];
+}
+
 export function generateTaskDocument(input: TaskDocumentInput): string {
-  const { node, graph, catalogs, requirements, projectVision, requirementNodeMap, taskState } = input;
+  const { node, graph, catalogs, requirements, projectVision, servedVision, requirementNodeMap, taskState, constraints } = input;
 
   const roleRow = catalogs.nodeRoles[node.type];
   const techRow = node.technology ? catalogs.technologies[node.technology] : null;
@@ -482,6 +566,8 @@ export function generateTaskDocument(input: TaskDocumentInput): string {
   }
   if (roleRow?.description) lines.push(`**Description:** ${roleRow.description}`);
   if (node.metadata?.rationale) lines.push(`**Rationale:** ${node.metadata.rationale}`);
+  // AG.12b: where it runs, before what to deliver.
+  lines.push(...runsOnLines(node, graph, catalogs));
   lines.push("");
 
   // N5.7/N5.8 "Your Deliverable": ONE consistent statement of what output this node
@@ -576,6 +662,10 @@ export function generateTaskDocument(input: TaskDocumentInput): string {
     }
   }
 
+  // AA.0 (R.2a): the standing conditions, read before the work orders so every
+  // decision below is made under them. Rendered for every node, taskless too.
+  lines.push(...renderConstraintsSection(constraints));
+
   // N5.11: the packet CONTAINS the ordered task list — synthesized deterministically
   // from model truth (owner: explicit, contextual checkboxes, not an instruction to
   // write them). The consuming AI executes and refines; it does not author from zero.
@@ -651,8 +741,14 @@ export function generateTaskDocument(input: TaskDocumentInput): string {
     lines.push("## Configuration");
     lines.push("");
     lines.push("User-selected configuration for this component (honor these choices):");
-    for (const [key, value] of Object.entries(nodeConfig)) {
-      lines.push(`- **${key}:** ${typeof value === "object" ? JSON.stringify(value) : String(value)}`);
+    // AD.2 (I12): this document is committed to git; a value that looks like a
+    // credential is named, never written.
+    const shown = withholdCredentials(nodeConfig).value;
+    for (const [key, value] of Object.entries(shown)) {
+      const text = value === WITHHELD
+        ? "kept out of git because it looks like a credential; ask the user for it"
+        : typeof value === "object" ? JSON.stringify(value) : String(value);
+      lines.push(`- **${key}:** ${text}`);
     }
     lines.push("");
   } else if (configDelegated) {
@@ -673,7 +769,10 @@ export function generateTaskDocument(input: TaskDocumentInput): string {
     lines.push("");
   }
 
-  if (projectVision) {
+  if (servedVision) {
+    // AA.6: the sentences this node serves; the whole vision is one read away.
+    lines.push(...servedVisionLines(servedVision));
+  } else if (projectVision) {
     lines.push("## Project Context");
     lines.push("");
     lines.push(projectVision);
@@ -1118,27 +1217,60 @@ export function generateTaskDocument(input: TaskDocumentInput): string {
   }
 
   // -- Containment --
+  // AG.12b: the parent and the chain above it are the Runs on line under Component Purpose.
   if (node.parentId) {
-    const parent = graph.nodes[node.parentId];
-    if (parent) {
-      lines.push(`**Parent Container:** ${parent.label} (${parent.type})`);
-      lines.push("");
-    }
     // N8.4r: the containers' OWN configuration scopes this node — region, environment,
     // IAM baseline, tagging policy. Printing the parent's label alone left every one of
     // those choices invisible to the implementing AI.
-    const inherited = renderInheritedContext(collectInheritedScopes(graph, node.id));
+    // AD.2 (I12): an ancestor's credential stays out of this committed document too.
+    const inherited = renderInheritedContext(
+      collectInheritedScopes(graph, node.id).map((scope) => ({ ...scope, values: withholdCredentials(scope.values).value })),
+    );
     if (inherited) {
       lines.push(inherited);
       lines.push("");
     }
   }
   const children = Object.values(graph.nodes).filter((n) => n.parentId === node.id);
-  if (children.length > 0) {
-    lines.push("**Contains:**");
-    for (const child of children) {
-      const tech = child.technology ? ` [${child.technology}]` : "";
-      lines.push(`- ${child.label}${tech} (${child.type})`);
+  // AA.3: an exploded node's document is its integration document. Its parts
+  // each get their own; this one says how they fit together.
+  const parts = nodeParts(node, graph, catalogs);
+  const others = children.filter((c) => !parts.includes(c));
+  if (parts.length > 0) {
+    lines.push("## Parts");
+    lines.push("");
+    lines.push(`This node is exploded into ${parts.length} part${parts.length === 1 ? "" : "s"}. This document covers how they fit together and the contracts ${node.label} keeps with the rest of the system; each part has its own task document for its code.`);
+    lines.push("");
+    const partIds = new Set(parts.map((p) => p.id));
+    for (const part of parts) {
+      const files = Object.values(graph.artifacts).filter((a) => a.nodeId === part.id && a.kind !== "task" && a.kind !== "test-plan").length;
+      const why = typeof part.metadata?.description === "string" ? `: ${part.metadata.description}` : "";
+      // AA.3b: a database group lists what it holds.
+      const held = Array.isArray(part.metadata?.tables) ? (part.metadata.tables as Array<{ name?: unknown }>).map((t) => String(t?.name ?? "")).filter(Boolean) : [];
+      const holds = held.length > 0 ? `; holds ${held.slice(0, 6).join(", ")}${held.length > 6 ? ` and ${held.length - 6} more` : ""}` : "";
+      lines.push(`- **${part.label}** (${catalogs.nodeRoles[part.type]?.label ?? part.type})${why}${holds}${files > 0 ? ` (${files} file${files === 1 ? "" : "s"})` : ""}`);
+    }
+    const inner = Object.values(graph.edges).filter((e) => partIds.has(e.source) && partIds.has(e.target));
+    if (inner.length > 0) {
+      lines.push("");
+      lines.push("Between the parts:");
+      for (const e of inner) {
+        const how = (e as { label?: string }).label;
+        lines.push(`- ${graph.nodes[e.source]?.label ?? e.source} uses ${graph.nodes[e.target]?.label ?? e.target}${how ? ` (${how})` : ""}`);
+      }
+    }
+    lines.push("");
+  }
+  if (others.length > 0) {
+    // AG.12b: a host lists what it runs with each one's technology, so its deploy
+    // definition (app.yaml, Dockerfile, compose service, task definition) is written for
+    // the right framework.
+    const runs = holdingKind(catalogs, node.type) === "runs";
+    lines.push(runs ? "**Runs (write this host's deploy definition for each one's technology):**" : "**Contains:**");
+    for (const child of others) {
+      const role = catalogs.nodeRoles[child.type]?.label ?? child.type;
+      const tech = child.technology ? catalogs.technologies[child.technology]?.name ?? child.technology : null;
+      lines.push(`- ${child.label} (${role}): ${tech ?? "no technology recorded"}`);
     }
     lines.push("");
   }
@@ -1204,7 +1336,8 @@ function buildContractSection(node: GraphNode, graph: GraphData): ContractDetail
     let schemaContent: string | null = null;
     let danglingSchemaRef: string | null = null;
     if (contract.schema && Object.keys(contract.schema).length > 0) {
-      schemaContent = JSON.stringify(contract.schema, null, 2);
+      // AD.2 (I12): credentials in a schema's examples stay out of git.
+      schemaContent = JSON.stringify(withholdCredentials(contract.schema).value, null, 2);
     } else if (contract.schemaRef) {
       const schemaArtifact = graph.artifacts[contract.schemaRef];
       if (schemaArtifact?.content) {
@@ -1642,6 +1775,25 @@ function isSyncOutgoing(c: ContractDetail): boolean {
   return SYNC_INTERACTIONS.has(c.interactionKind ?? "") || (!c.interactionKind && SYNC_KINDS.has(c.contractKind ?? ""));
 }
 
+/**
+ * AA.6: which side of a node an edge's neighbour stands on, by the rule the
+ * packet's Dependency Chain renders (buildDependencyChain): 'upstream' when
+ * this node depends on it (an outgoing sync edge), 'consumer' when it depends
+ * on this node, 'peer' for an async producer (no ordering either way).
+ */
+export function dependencySide(c: { direction: "incoming" | "outgoing"; contractKind?: string | null; interactionKind?: string | null }): "upstream" | "consumer" | "peer" {
+  const kind = c.contractKind ?? "";
+  const interaction = c.interactionKind ?? "";
+  const connectionOriented = CONNECTION_ORIENTED_KINDS.has(kind);
+  const isAsync = !connectionOriented && (ASYNC_INTERACTIONS.has(interaction) || (!interaction && ASYNC_KINDS.has(kind)));
+  if (c.direction === "outgoing") {
+    if (isAsync) return "consumer";
+    return isSyncOutgoing({ contractKind: kind, interactionKind: interaction || undefined } as ContractDetail) ? "upstream" : "consumer";
+  }
+  if (interaction === "data_read" || interaction === "data_write" || interaction === "data_sync") return "consumer";
+  return isAsync ? "peer" : "consumer";
+}
+
 interface DependencyChainResult {
   mustBeAvailable: Array<{ label: string; reason: string }>;
   dependsOnThis: Array<{ label: string; reason: string }>;
@@ -1778,19 +1930,10 @@ function buildErrorHandlingContracts(contracts: ContractDetail[]): ErrorHandling
   return { emits, handles };
 }
 
-// P0-4: the path carries a short node-id suffix and is used ONLY to seed the FIRST
-// creation of a node's task doc. It is never recomputed to find an existing doc —
-// lookups go through findExistingTaskArtifact (nodeId + kind), so renaming a node
-// neither moves its doc nor duplicates it, and docs stored under legacy label-only
-// paths keep their persisted path on update.
-export function getTaskDocumentPath(nodeLabel: string, nodeId: string): string {
-  const slug = nodeLabel
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  const idSuffix = nodeId.replace(/[^a-z0-9]/gi, "").slice(0, 8).toLowerCase();
-  return `.nodespec/tasks/${slug}-${idSuffix}.task.md`;
-}
+// P0-4: getTaskDocumentPath seeds the FIRST creation of a node's task doc only;
+// lookups go through findExistingTaskArtifact. Y moved it to task-deltas.ts (the
+// app starts a doc when a person adds a task by hand); re-exported here unchanged.
+export { getTaskDocumentPath };
 
 // ── N5.17: the AI-authored "Implementation Context" section ──────────────────────
 //
@@ -1917,7 +2060,9 @@ function configSignatureFor(metadata: Record<string, unknown> | undefined): stri
   if (choice === "delegated") return "delegated";
   const values = metadata?.config as Record<string, unknown> | undefined;
   const hasValues = !!values && typeof values === "object" && Object.keys(values).length > 0;
-  return choice === "user-specified" && hasValues ? `manual:${stableSerialize(values)}` : "";
+  // AD.2: over the values as the document writes them, so a document written
+  // before credentials were withheld goes stale and is written again without them.
+  return choice === "user-specified" && hasValues ? `manual:${stableSerialize(withholdCredentials(values).value)}` : "";
 }
 
 // WS1: exported — mcp-context-assembly's schemaHash uses THE same h8 so a hash seen in
@@ -1946,9 +2091,10 @@ export interface TaskContextFingerprint {
     connectedNodeSignatures: string[];
     /** Rendered configuration state — "delegated" | `manual:{…}` | "" (unchosen). */
     configSignature: string;
-    /** R6 (Discovered #9): every packet embeds the project vision, so it is
-     *  packet CONTENT — without this a vision edit shipped stale packets
-     *  marked fresh (the anchor's specHash moved; no packet did). */
+    /** R6 (Discovered #9): the vision the packet embeds is packet CONTENT:
+     *  without this a vision edit shipped stale packets marked fresh. AA.6:
+     *  callers pass the served block (servedVisionText), so only an edit to a
+     *  sentence this node serves re-stales it. */
     visionHash: string;
     /** N10(b): the generator branches on the PARENT (rent-by-placement reads its role's
      *  nature; the hosted path reads its technology) — without this, reparenting a node
@@ -2044,12 +2190,58 @@ function catalogContentSignature(node: GraphNode, graph: GraphData, catalogs?: C
   }));
 }
 
+/** Every ancestor's configuration, outermost first: what the inherited scopes
+ *  render into the packet. Pure. */
+function inheritedConfigSignature(node: GraphNode, graph: GraphData): string {
+  const chain: string[] = [];
+  const seen = new Set<string>([node.id]);
+  let parentId = node.parentId;
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = graph.nodes[parentId];
+    if (!parent) break;
+    chain.unshift(`${parent.id}:${configSignatureFor(parent.metadata as Record<string, unknown> | undefined)}`);
+    parentId = parent.parentId;
+  }
+  return chain.join("|");
+}
+
+function partsSignatureFor(node: GraphNode, graph: GraphData, catalogs?: CatalogData): { partsSignature: string } | null {
+  const parts = nodeParts(node, graph, catalogs);
+  if (parts.length === 0) return null;
+  const ids = new Set(parts.map((p) => p.id));
+  const files = (id: string) => Object.values(graph.artifacts).filter((a) => a.nodeId === id && a.kind !== "task" && a.kind !== "test-plan").length;
+  const inner = Object.values(graph.edges).filter((e) => ids.has(e.source) && ids.has(e.target)).map((e) => `${e.source}>${e.target}:${(e as { label?: string }).label ?? ""}`).sort();
+  const desc = (p: GraphNode) => (typeof p.metadata?.description === "string" ? p.metadata.description : "");
+  const held = (p: GraphNode) => (Array.isArray(p.metadata?.tables) ? JSON.stringify(p.metadata.tables) : "");
+  return { partsSignature: simpleHash([...parts.map((p) => `${p.id}:${p.type}:${p.label}:${desc(p)}:${files(p.id)}:${held(p)}`), ...inner]) };
+}
+
+/** AG.12b: what the Runs on lines and the child list render: every ancestor and every
+ *  child, by id, label, type and technology. Null for a node with neither. */
+function placementSignatureFor(node: GraphNode, graph: GraphData): { placementSignature: string } | null {
+  const sig = (n: GraphNode) => `${n.id}:${n.label}:${n.type}:${n.technology ?? ""}`;
+  const up = ancestorsOf(node, graph).map(sig);
+  const down = Object.values(graph.nodes).filter((n) => n.parentId === node.id).map(sig).sort();
+  if (up.length === 0 && down.length === 0) return null;
+  return { placementSignature: simpleHash([up.join(">"), ...down]) };
+}
+
+/** AA.3: a node's parts, the children whose role is a part, in label order. */
+export function nodeParts(node: GraphNode, graph: GraphData, catalogs?: CatalogData): GraphNode[] {
+  if (!catalogs) return [];
+  return Object.values(graph.nodes)
+    .filter((n) => n.parentId === node.id && isPartRole(catalogs.nodeRoles[n.type]))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
 export function computeTaskContextFingerprint(
   node: GraphNode,
   graph: GraphData,
   requirements?: Array<string | RequirementFingerprintInput>,
   vision?: string,
   catalogs?: CatalogData,
+  constraints?: NodeConstraint[],
 ): TaskContextFingerprint {
   const edgeSignatures: string[] = [];
   const connectedNodeSignatures: string[] = [];
@@ -2075,7 +2267,8 @@ export function computeTaskContextFingerprint(
       const sa = graph.artifacts[contract.schemaRef];
       if (sa?.content) schemaHash = simpleHash(sa.content);
     } else if (contract?.schema && Object.keys(contract.schema).length > 0) {
-      schemaHash = simpleHash(JSON.stringify(contract.schema));
+      // AD.2: the schema as the document writes it (credentials withheld).
+      schemaHash = simpleHash(JSON.stringify(withholdCredentials(contract.schema).value));
     }
 
     const descriptors = `${contract?.interactionKind || ""}:${contract?.transport || ""}:${contract?.specFormat || ""}`;
@@ -2116,6 +2309,12 @@ export function computeTaskContextFingerprint(
       : "",
     // N10(b): the enrichment blind spot closed — catalog content the packet renders.
     catalogSignature: catalogContentSignature(node, graph, catalogs),
+    // AA.0: the constraints that apply here are packet content (R.2a), and an
+    // ancestor's configuration reaches the packet through the inherited
+    // scopes, so both re-stale it. Same one-time re-stale round as the fields
+    // above; the content-diff guard keeps unchanged renders from rewriting.
+    constraintSignature: constraintsSignature(constraints),
+    inheritedConfigSignature: inheritedConfigSignature(node, graph),
     // Dogfood #5 follow-up: the suppression flag rewrites the rendered Technology
     // Guidance section. Spread-only-when-true keeps every unflagged node's field
     // set (and therefore fingerprint) byte-identical — flipping the flag in either
@@ -2123,6 +2322,13 @@ export function computeTaskContextFingerprint(
     ...((node.metadata as Record<string, unknown> | undefined)?.suppressCatalogGuidance === true
       ? { guidanceSuppressed: true as const }
       : {}),
+    // AA.3: the Parts section is packet content. Spread only when the node has parts,
+    // so every node that was never exploded keeps a byte-identical fingerprint.
+    ...(partsSignatureFor(node, graph, catalogs) ?? {}),
+    // AG.12b: the Runs on lines and a container's list of what it holds are packet
+    // content: the chain above the node (label, type, technology) and each child. Spread
+    // only when there is a chain or a child; the placed nodes re-stale once.
+    ...(placementSignatureFor(node, graph) ?? {}),
   };
 
   return {

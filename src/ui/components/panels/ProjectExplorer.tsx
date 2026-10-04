@@ -5,6 +5,8 @@ import type { Project } from '../../../persistence/types.js';
 import { useAuth, useProject } from '../../context/ServiceContext.js';
 import type { FeatureGate } from '../../hooks/useFeatureGate.js';
 import { hasTemplatesGallery } from '../../config/edition.js';
+import { HOSTED_COMMUNITY_PROJECT_LIMIT } from '../../config/tiers.js';
+import { countedProjects, isExampleProject } from '../../utils/example-project.js';
 
 interface ProjectExplorerProps {
   currentProjectId: string | null;
@@ -31,8 +33,15 @@ export function ProjectExplorer({
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string; isActive: boolean } | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string; isActive: boolean; example?: boolean } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteProgress, setDeleteProgress] = useState(0);
+  // The plan's project cap is the only thing that stops a new project: the
+  // managed site's Free plan at HOSTED_COMMUNITY_PROJECT_LIMIT, nothing on a
+  // self-hosted build (owner 2026-09-28). The count is known once the list
+  // has loaded. AJ.6: the account's example is not counted.
+  const atCap = featureGate?.projectLimitReached(countedProjects(projects)) ?? false;
+  const canCreate = !loading && !atCap;
 
   const loadProjects = useCallback(async () => {
     setLoading(true);
@@ -46,6 +55,11 @@ export function ProjectExplorer({
 
       const projectList = await projectService.listProjects(session.user.id);
       setProjects(projectList);
+      // A delete the last session did not finish (the project is marked,
+      // hidden above) is completed here, off the critical path of the list.
+      void projectService.resumePendingDeletes(session.user.id).then(({ failed }) => {
+        if (failed.length > 0) setError(`Could not finish deleting: ${failed.join('; ')}`);
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load projects');
     } finally {
@@ -57,15 +71,16 @@ export function ProjectExplorer({
     loadProjects();
   }, [loadProjects]);
 
-  const handleDeleteProject = useCallback((projectId: string, projectName: string, isActive: boolean) => {
-    setPendingDelete({ id: projectId, name: projectName, isActive });
+  const handleDeleteProject = useCallback((projectId: string, projectName: string, isActive: boolean, example = false) => {
+    setPendingDelete({ id: projectId, name: projectName, isActive, example });
   }, []);
 
   const handleConfirmDelete = useCallback(async () => {
     if (!pendingDelete) return;
     setDeleting(true);
+    setDeleteProgress(0);
     try {
-      await projectService.deleteProject(pendingDelete.id);
+      await projectService.deleteProject(pendingDelete.id, setDeleteProgress);
       setPendingDelete(null);
       if (pendingDelete.isActive) {
         onClose();
@@ -219,6 +234,7 @@ export function ProjectExplorer({
             <div style={{ fontSize: '13px', color: c.textMuted, lineHeight: '1.5' }}>
               <span style={{ fontWeight: 600, color: c.text }}>{pendingDelete.name}</span> will be permanently deleted.
               This action cannot be undone.
+              {pendingDelete.example && <span data-testid="project-delete-example"> The example is not made again.</span>}
             </div>
           </div>
           <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
@@ -259,7 +275,9 @@ export function ProjectExplorer({
                 gap: '6px',
               }}
             >
-              {deleting ? 'Deleting...' : 'Delete project'}
+              {deleting
+                ? (deleteProgress > 0 ? `Deleting… ${deleteProgress.toLocaleString()} rows removed` : 'Deleting...')
+                : 'Delete project'}
             </button>
           </div>
         </div>
@@ -329,7 +347,9 @@ export function ProjectExplorer({
                     <div style={projectInfoStyles}>
                       <div style={projectNameStyles}>{project.name}</div>
                       <div style={projectMetaStyles}>
-                        Created {new Date(project.createdAt).toLocaleDateString()}
+                        {isExampleProject(project)
+                          ? <span data-testid="project-example">Example project, not counted in your plan</span>
+                          : <>Created {new Date(project.createdAt).toLocaleDateString()}</>}
                       </div>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -350,7 +370,7 @@ export function ProjectExplorer({
                         style={deleteButtonStyles}
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleDeleteProject(project.id, project.name, isActive);
+                          handleDeleteProject(project.id, project.name, isActive, isExampleProject(project));
                         }}
                       >
                         Delete
@@ -364,7 +384,7 @@ export function ProjectExplorer({
         </div>
 
         <div style={buttonContainerStyles}>
-          {featureGate && featureGate.projectLimitReached(projects.length) && (
+          {atCap && (
             <div style={{
               fontSize: '11px',
               color: c.textMuted,
@@ -373,7 +393,7 @@ export function ProjectExplorer({
               gap: '4px',
               marginRight: 'auto',
             }}>
-              Community: 2 project limit
+              Free includes {HOSTED_COMMUNITY_PROJECT_LIMIT} projects
             </div>
           )}
           <button style={buttonStyles(false)} onClick={onClose}>
@@ -401,10 +421,10 @@ export function ProjectExplorer({
           <button
             style={{
               ...buttonStyles(true),
-              ...(featureGate?.projectLimitReached(projects.length) ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+              ...(!canCreate ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
             }}
-            onClick={onCreateProject}
-            disabled={featureGate?.projectLimitReached(projects.length)}
+            onClick={() => { if (canCreate) onCreateProject(); }}
+            disabled={!canCreate}
           >
             + New Project
           </button>

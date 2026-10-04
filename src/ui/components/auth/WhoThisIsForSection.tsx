@@ -37,7 +37,7 @@ const PERSONAS = [
   },
   {
     title: 'Architects & Technical Leaders',
-    tagline: 'Model systems with contracts, ports, and dependencies',
+    tagline: 'Model systems with contracts and dependencies',
     description: 'Visually compose systems across 12+ architectural roles with typed contracts, interaction kinds, and container hierarchies. Define the structure once -- your team and your agents inherit it automatically.',
     capabilities: [
       'Visual canvas with typed contracts and port definitions',

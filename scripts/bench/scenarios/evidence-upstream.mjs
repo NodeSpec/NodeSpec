@@ -15,7 +15,7 @@
 //   evidence-due (upstream requirement edit stales the evidence).
 // REQ-002 sits beside it the whole time with zero evidence and must read
 // ⬜ pending at every step — the leakage control.
-import { callFn, rest, github, postSignedWebhook, mcpCall, uid, until, Scenario, boardDigest } from '../lib.mjs';
+import { callFn, rest, github, postSignedWebhook, mcpCall, uid, until, Scenario, boardDigest, parseMcp } from '../lib.mjs';
 import { createProject, connectRepo } from '../fixtures.mjs';
 
 const BOARD = '.nodespec/BOARD.md';
@@ -40,10 +40,6 @@ const anchoredDoc = () => [
   `  ↳ serves: REQ-001 "${CRIT1}"`, '',
 ].join('\n');
 
-const parseMcp = (r) => {
-  const text = r.data?.result?.content?.[0]?.text;
-  try { return JSON.parse(text); } catch { return { raw: text, isError: r.data?.result?.isError }; }
-};
 
 export const evidenceUpstream = {
   name: 'evidence-upstream',
@@ -81,8 +77,11 @@ export const evidenceUpstream = {
       project_id: fx.ids.project, requirement_id: 'REQ-002',
       node_ids: [fx.ids.nodeDb], mode: 'replace',
     }));
+    // UAT hardening 2026-09-27: read the mapping rows, not the tool's word.
+    const req2Maps = await db.select('specification_mappings', `requirement_id=eq.${fx.ids.req2}&select=node_id`);
     s.check('leakage control isolated: REQ-002 remapped to the Primary Database node',
-      moved?.success !== false && !moved?.isError, JSON.stringify(moved).slice(0, 200));
+      !moved?.isError && req2Maps.length === 1 && req2Maps[0].node_id === fx.ids.nodeDb,
+      `answer ${JSON.stringify(moved).slice(0, 160)}; mappings ${JSON.stringify(req2Maps)}`);
     const push1 = await callFn(env, session, 'git-push', {
       projectId: fx.ids.project, branchName: 'main', integrationId, confirmOverwrite: true,
     });
@@ -107,10 +106,17 @@ export const evidenceUpstream = {
     }));
     const [req1AfterDecl] = await db.select('specification_requirements',
       `id=eq.${fx.ids.req1}&select=acceptance_criteria`);
+    // UAT hardening 2026-09-27: "records the declaration" is read from the
+    // mapping row, and the unmet count is exact (REQ-001's two criteria; REQ-002
+    // was moved off this node above).
+    const [declMap] = await db.select('specification_mappings',
+      `requirement_id=eq.${fx.ids.req1}&node_id=eq.${fx.ids.nodeApi}&select=validation_status,validation_provenance`);
     s.check('mark_entity_complete records the declaration but flips ZERO criteria',
-      (declared?.unmetCriteria ?? 0) >= 2 &&
-      (req1AfterDecl?.acceptance_criteria ?? []).every((c) => c.met !== true),
-      JSON.stringify({ declared, criteria: req1AfterDecl?.acceptance_criteria }).slice(0, 300));
+      declared?.unmetCriteria === 2 &&
+      declMap?.validation_status === 'valid' && declMap?.validation_provenance?.source === 'mcp' &&
+      (req1AfterDecl?.acceptance_criteria ?? []).length === 2 &&
+      req1AfterDecl.acceptance_criteria.every((c) => c.met !== true),
+      JSON.stringify({ declared, declMap, criteria: req1AfterDecl?.acceptance_criteria }).slice(0, 300));
 
     // ── Mixed test evidence: one failure, one pass. ─────────────────────────
     const mixed = parseMcp(await mcpCall(env, 'report_test_results', {
@@ -157,13 +163,13 @@ export const evidenceUpstream = {
     });
     const cards = await until(async () => {
       const rows = await db.select('git_change_events',
-        `project_id=eq.${fx.ids.project}&status=eq.pending&select=id,metadata`);
+        `project_id=eq.${fx.ids.project}&status=eq.pending&select=id,commit_sha,metadata`);
       return rows.length > 0 ? rows : null;
     }, { timeoutMs: 30000, everyMs: 2000 });
     s.check('the board tick raised a pending card', !!cards, 'no pending git_change_events within 30s');
     if (!cards) return { s, fx, integrationId };
     const resolved = parseMcp(await mcpCall(env, 'resolve_change', {
-      change_event_id: cards[0].id, resolution: 'accepted', apply_ticks: true,
+      change_event_id: cards[0].id, commit_sha: cards[0].commit_sha, resolution: 'accepted', apply_ticks: true,
     }));
     s.check('task tick applied through the standard lane', (resolved?.tasksApplied ?? 0) >= 1,
       JSON.stringify(resolved ?? {}).slice(0, 200));

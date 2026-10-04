@@ -3,6 +3,7 @@
   (index.ts is a Deno.serve module). index.ts keeps auth, Stripe/DB side effects, and
   uses this decision's outputs unchanged.
 */
+import type { SeatedProject } from '../_shared/project-membership.ts';
 
 export const ANNUAL_REFUND_WINDOW_DAYS = 30;
 export const ANNUAL_REFUND_MONTHS = 11;
@@ -47,4 +48,20 @@ export function decideCancellation(
     refundAmountCents: 0,
     effectiveEndDate: new Date(subscription.current_period_end * 1000).toISOString(),
   };
+}
+
+/*
+  V3 AE.1 (owner 2026-09-25): "a team owner has to delegate ownership
+  status to one of the other accounts prior to downgrading" (Enterprise the
+  same, in the container the owner administers). index.ts runs this after
+  auth and before Stripe is touched: a refusal costs nothing, names the
+  projects, and points at the hand-over (the Team popup's Make owner,
+  transfer_project_ownership in the database). The reader is shared with
+  delete-account (ownedProjectsWithSeats, _shared/project-membership.ts).
+*/
+
+export function downgradeRefusal(blockers: ReadonlyArray<SeatedProject>): string {
+  const list = blockers.map((b) => `${b.name} (${b.seats} seat${b.seats === 1 ? '' : 's'})`).join(', ');
+  return `Before you downgrade, hand each project that still has seats to one of its accounts: ${list}. ` +
+    'Open the project, press Team, and press Make owner on the account that takes it; you keep a maintainer seat.';
 }

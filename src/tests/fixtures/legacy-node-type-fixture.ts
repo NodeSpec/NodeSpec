@@ -40,10 +40,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Blocking JavaScript in head',
           ],
         },
-        defaultPorts: [
-          { name: 'HTTP Request', direction: 'in' },
-          { name: 'Static Content', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api'],
         defaultMetadata: {
@@ -114,11 +110,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Direct database connections from browser',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'User Events', direction: 'in' },
-          { name: 'Auth Token', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'auth.supabase-auth'],
         defaultMetadata: {
@@ -194,11 +185,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Tight coupling between components',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'User Events', direction: 'in' },
-          { name: 'Auth Token', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'auth.supabase-auth'],
         defaultMetadata: {
@@ -274,11 +260,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Circular dependencies',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'User Events', direction: 'in' },
-          { name: 'Auth Token', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'auth.supabase-auth'],
         defaultMetadata: {
@@ -352,11 +333,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Excessive use of two-way binding',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'User Events', direction: 'in' },
-          { name: 'Auth Token', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'auth.supabase-auth'],
         defaultMetadata: {
@@ -429,11 +405,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Creating signals in render',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'User Events', direction: 'in' },
-          { name: 'Auth Token', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'auth.supabase-auth'],
         defaultMetadata: {
@@ -509,12 +480,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not leveraging caching strategies',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'Server Action', direction: 'out' },
-          { name: 'User Events', direction: 'in' },
-          { name: 'Auth Token', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'auth.supabase-auth', 'backend.nodejs'],
         defaultMetadata: {
@@ -588,12 +553,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not leveraging Nitro server',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'Server Route', direction: 'out' },
-          { name: 'User Events', direction: 'in' },
-          { name: 'Auth Token', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'auth.supabase-auth', 'backend.nodejs'],
         defaultMetadata: {
@@ -667,10 +626,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing image optimization',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'User Events', direction: 'in' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'auth.supabase-auth'],
         defaultMetadata: {
@@ -748,12 +703,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Tight coupling between components',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'SignalR Hub', direction: 'out' },
-          { name: 'User Events', direction: 'in' },
-          { name: 'Auth Token', direction: 'out' },
-        ],
         suggestedContracts: ['rest', 'websocket'],
         commonConnections: ['web.rest-api', 'web.websocket-server', 'auth.azure-ad-b2c'],
         defaultMetadata: {
@@ -814,10 +763,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not leveraging Rust\'s ownership system',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'User Events', direction: 'in' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'backend.rust', 'auth.supabase-auth'],
         defaultMetadata: {
@@ -878,10 +823,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Large bundle sizes',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'User Events', direction: 'in' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.rust', 'web.rest-api', 'auth.supabase-auth'],
         defaultMetadata: {
@@ -950,10 +891,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Blocking the main thread',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'Push Notification', direction: 'in' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'auth.supabase-auth', 'auth.firebase-auth'],
         defaultMetadata: {
@@ -1020,10 +957,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Blocking the main thread with network calls',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'Push Notification', direction: 'in' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'auth.supabase-auth', 'auth.firebase-auth'],
         defaultMetadata: {
@@ -1090,10 +1023,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not handling deep linking',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'Push Notification', direction: 'in' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'auth.supabase-auth', 'backend.nodejs'],
         defaultMetadata: {
@@ -1146,10 +1075,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Ignoring platform-specific adaptations',
           ],
         },
-        defaultPorts: [
-          { name: 'API Request', direction: 'out', required: true },
-          { name: 'Push Notification', direction: 'in' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'auth.supabase-auth', 'auth.firebase-auth'],
         defaultMetadata: {
@@ -1203,11 +1128,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Synchronous file operations',
           ],
         },
-        defaultPorts: [
-          { name: 'HTTP Request', direction: 'in', required: true },
-          { name: 'HTTP Response', direction: 'out' },
-          { name: 'Database Query', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['database.postgresql', 'cache.redis', 'auth.supabase-auth'],
         defaultMetadata: {
@@ -1291,11 +1211,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Over-engineering with complex types',
           ],
         },
-        defaultPorts: [
-          { name: 'HTTP Request', direction: 'in', required: true },
-          { name: 'HTTP Response', direction: 'out' },
-          { name: 'Database Query', direction: 'out' },
-        ],
         suggestedContracts: ['rest', 'grpc'],
         commonConnections: ['database.postgresql', 'cache.redis', 'auth.supabase-auth'],
         defaultMetadata: {
@@ -1376,11 +1291,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not handling exceptions',
           ],
         },
-        defaultPorts: [
-          { name: 'HTTP Request', direction: 'in', required: true },
-          { name: 'HTTP Response', direction: 'out' },
-          { name: 'Database Query', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['database.postgresql', 'cache.redis', 'auth.supabase-auth'],
         defaultMetadata: {
@@ -1469,11 +1379,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing synchronization',
           ],
         },
-        defaultPorts: [
-          { name: 'HTTP Request', direction: 'in', required: true },
-          { name: 'HTTP Response', direction: 'out' },
-          { name: 'Database Query', direction: 'out' },
-        ],
         suggestedContracts: ['rest', 'grpc'],
         commonConnections: ['database.postgresql', 'cache.redis', 'auth.supabase-auth'],
         defaultMetadata: {
@@ -1558,10 +1463,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing CORS configuration',
           ],
         },
-        defaultPorts: [
-          { name: 'HTTP In', direction: 'in', required: true },
-          { name: 'HTTP Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'backend.python', 'database.postgresql'],
         defaultMetadata: {
@@ -1598,10 +1499,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Over-fetching in resolvers',
           ],
         },
-        defaultPorts: [
-          { name: 'GraphQL In', direction: 'in', required: true },
-          { name: 'Response Out', direction: 'out' },
-        ],
         suggestedContracts: ['graphql'],
         commonConnections: ['backend.nodejs', 'backend.python', 'database.postgresql'],
         defaultMetadata: {
@@ -1637,10 +1534,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Blocking in stream handlers',
           ],
         },
-        defaultPorts: [
-          { name: 'RPC In', direction: 'in', required: true },
-          { name: 'RPC Out', direction: 'out' },
-        ],
         suggestedContracts: ['grpc'],
         commonConnections: ['backend.go', 'backend.rust', 'backend.nodejs'],
         defaultMetadata: {
@@ -1680,10 +1573,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing API keys for public APIs',
           ],
         },
-        defaultPorts: [
-          { name: 'Client In', direction: 'in', required: true },
-          { name: 'Backend Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['rest', 'graphql'],
         commonConnections: ['web.rest-api', 'cloud.lambda', 'database.dynamodb'],
         defaultMetadata: {
@@ -1724,10 +1613,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Hardcoding backend URLs in policies',
           ],
         },
-        defaultPorts: [
-          { name: 'Client In', direction: 'in', required: true },
-          { name: 'Backend Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'backend.nodejs', 'database.cosmosdb'],
         defaultMetadata: {
@@ -1766,10 +1651,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Inadequate error handling',
           ],
         },
-        defaultPorts: [
-          { name: 'Client In', direction: 'in', required: true },
-          { name: 'Backend Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'backend.nodejs', 'database.firestore'],
         defaultMetadata: {
@@ -1807,11 +1688,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing load balancing configuration',
           ],
         },
-        defaultPorts: [
-          { name: 'Client In', direction: 'in', required: true },
-          { name: 'Backend Out', direction: 'out', required: true },
-          { name: 'Admin API', direction: 'in' },
-        ],
         suggestedContracts: ['rest', 'graphql', 'grpc'],
         commonConnections: ['web.rest-api', 'web.grpc-service', 'database.postgresql'],
         defaultMetadata: {
@@ -1855,10 +1731,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Broadcasting to all connections without filtering',
           ],
         },
-        defaultPorts: [
-          { name: 'WebSocket In', direction: 'in', required: true },
-          { name: 'Backend Out', direction: 'out' },
-        ],
         suggestedContracts: ['websocket', 'kafka'],
         commonConnections: ['backend.nodejs', 'cache.redis', 'messaging.rabbitmq'],
         defaultMetadata: {
@@ -1944,10 +1816,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing retry budgets',
           ],
         },
-        defaultPorts: [
-          { name: 'Ingress', direction: 'in' },
-          { name: 'Service Mesh', direction: 'out' },
-        ],
         suggestedContracts: ['rest', 'grpc'],
         commonConnections: ['orchestration.kubernetes', 'web.rest-api', 'web.grpc-service'],
         defaultMetadata: {
@@ -1984,10 +1852,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing timeout configurations',
           ],
         },
-        defaultPorts: [
-          { name: 'Ingress', direction: 'in' },
-          { name: 'Service Mesh', direction: 'out' },
-        ],
         suggestedContracts: ['rest', 'grpc'],
         commonConnections: ['orchestration.kubernetes', 'web.rest-api', 'web.grpc-service'],
         defaultMetadata: {
@@ -2024,10 +1888,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not implementing backup strategy',
           ],
         },
-        defaultPorts: [
-          { name: 'Service Discovery', direction: 'in' },
-          { name: 'Mesh Traffic', direction: 'out' },
-        ],
         suggestedContracts: ['rest', 'grpc'],
         commonConnections: ['web.rest-api', 'web.grpc-service', 'database.postgresql'],
         defaultMetadata: {
@@ -2072,10 +1932,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Choosing PostgreSQL when the workload is purely key-value or time-series',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Result Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'backend.python', 'backend.rust', 'backend.go'],
         defaultMetadata: {
@@ -2120,11 +1976,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Using single() when query might return zero rows',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Result Out', direction: 'out' },
-          { name: 'Realtime Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql', 'rest'],
         commonConnections: ['auth.supabase-auth', 'backend.nodejs', 'frontend.react', 'frontend.vue'],
         defaultMetadata: {
@@ -2164,10 +2015,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Choosing MySQL over PostgreSQL for complex queries, JSONB, or extensibility needs',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Result Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'backend.python', 'backend.go'],
         defaultMetadata: {
@@ -2207,10 +2054,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Choosing MongoDB when ACID transactions across multiple collections are critical',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Result Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'backend.python', 'backend.go'],
         defaultMetadata: {
@@ -2250,10 +2093,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Ignoring memory limits leading to OOM kills',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Result Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'backend.python', 'cache.redis'],
         defaultMetadata: {
@@ -2294,10 +2133,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Choosing DynamoDB when complex joins or ad-hoc queries are required',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Result Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'backend.python', 'backend.go'],
         defaultMetadata: {
@@ -2336,10 +2171,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Choosing Cosmos DB for simple single-region apps where PostgreSQL suffices',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Result Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'backend.python'],
         defaultMetadata: {
@@ -2378,10 +2209,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Choosing Firestore outside the Firebase/GCP ecosystem',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Result Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'backend.python'],
         defaultMetadata: {
@@ -2419,10 +2246,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Choosing Neo4j for simple key-value or document storage',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Result Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'backend.python', 'backend.go'],
         defaultMetadata: {
@@ -2461,10 +2284,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Choosing Elasticsearch for simple CRUD without search requirements',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Result Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'backend.python', 'backend.go'],
         defaultMetadata: {
@@ -2503,10 +2322,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Choosing InfluxDB for general-purpose application data',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Result Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'backend.python', 'backend.go'],
         defaultMetadata: {
@@ -2547,10 +2362,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Choosing Cassandra for small datasets or simple CRUD apps',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Result Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'backend.python', 'backend.go'],
         defaultMetadata: {
@@ -2591,10 +2402,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Choosing RDS when Aurora Serverless would better handle variable load',
           ],
         },
-        defaultPorts: [
-          { name: 'SQL In', direction: 'in', required: true },
-          { name: 'Query Results Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'orchestration.ecs', 'cloud.compute.lambda'],
         metadataSchema: {
@@ -2660,10 +2467,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Choosing Aurora for simple low-traffic apps where standard RDS is more cost-effective',
           ],
         },
-        defaultPorts: [
-          { name: 'SQL In', direction: 'in', required: true },
-          { name: 'Query Results Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'orchestration.ecs'],
       },
@@ -2707,11 +2510,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Overusing MONITOR command',
           ],
         },
-        defaultPorts: [
-          { name: 'Cache In', direction: 'in', required: true },
-          { name: 'Cache Out', direction: 'out' },
-          { name: 'Pub/Sub', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'web.rest-api', 'messaging.rabbitmq'],
         defaultMetadata: {
@@ -2752,10 +2550,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Caching without expiration',
           ],
         },
-        defaultPorts: [
-          { name: 'Cache In', direction: 'in', required: true },
-          { name: 'Cache Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'web.rest-api'],
         defaultMetadata: {
@@ -2793,10 +2587,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not monitoring eviction metrics',
           ],
         },
-        defaultPorts: [
-          { name: 'Cache In', direction: 'in', required: true },
-          { name: 'Cache Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'web.rest-api'],
         defaultMetadata: {
@@ -2835,10 +2625,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not using VPC security',
           ],
         },
-        defaultPorts: [
-          { name: 'Cache In', direction: 'in', required: true },
-          { name: 'Cache Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['backend.nodejs', 'cloud.lambda'],
         defaultMetadata: {
@@ -2878,11 +2664,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing error handling',
           ],
         },
-        defaultPorts: [
-          { name: 'KV Read', direction: 'in', required: true },
-          { name: 'KV Write', direction: 'in' },
-          { name: 'Data Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['cloud.lambda'],
         defaultMetadata: {
@@ -2922,10 +2703,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'No data validation',
           ],
         },
-        defaultPorts: [
-          { name: 'Source In', direction: 'in', required: true },
-          { name: 'Sink Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['data.data-warehouse', 'database.postgresql'],
       },
@@ -2952,10 +2729,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Storing raw data only',
           ],
         },
-        defaultPorts: [
-          { name: 'Load In', direction: 'in', required: true },
-          { name: 'Query Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['data.etl-pipeline', 'data.bi-tool'],
       },
@@ -2982,10 +2755,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Stateless when state needed',
           ],
         },
-        defaultPorts: [
-          { name: 'Stream In', direction: 'in', required: true },
-          { name: 'Stream Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['kafka'],
         commonConnections: ['messaging.rabbitmq', 'data.data-warehouse'],
       },
@@ -3012,10 +2781,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Unoptimized dashboards',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Viz Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['data.data-warehouse'],
       },
@@ -3047,10 +2812,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Too many partitions per topic',
           ],
         },
-        defaultPorts: [
-          { name: 'Producer In', direction: 'in', required: true },
-          { name: 'Consumer Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['kafka'],
         commonConnections: ['data.stream-processor', 'backend.nodejs'],
         suggestedFiles: [
@@ -3084,10 +2845,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing checkpointing in streaming',
           ],
         },
-        defaultPorts: [
-          { name: 'Data In', direction: 'in', required: true },
-          { name: 'Data Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['data.data-warehouse', 'data.apache-kafka'],
       },
@@ -3116,10 +2873,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Hardcoding credentials',
           ],
         },
-        defaultPorts: [
-          { name: 'Trigger In', direction: 'in' },
-          { name: 'Pipeline Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['data.data-warehouse', 'data.etl-pipeline'],
       },
@@ -3148,10 +2901,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Circular dependencies',
           ],
         },
-        defaultPorts: [
-          { name: 'Source In', direction: 'in', required: true },
-          { name: 'Model Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['data.data-warehouse', 'data.bi-tool'],
       },
@@ -3190,10 +2939,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Using auto-delete queues for important messages',
           ],
         },
-        defaultPorts: [
-          { name: 'Producer In', direction: 'in' },
-          { name: 'Consumer Out', direction: 'out' },
-        ],
         suggestedContracts: ['amqp', 'kafka'],
         commonConnections: ['backend.nodejs'],
         defaultMetadata: {
@@ -3257,10 +3002,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Ignoring slow consumer warnings',
           ],
         },
-        defaultPorts: [
-          { name: 'Publish', direction: 'in' },
-          { name: 'Subscribe', direction: 'out' },
-        ],
         suggestedContracts: ['kafka', 'amqp'],
         commonConnections: ['backend.nodejs', 'iot.device-gateway'],
         defaultMetadata: {
@@ -3300,10 +3041,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Ignoring message size limits (256KB)',
           ],
         },
-        defaultPorts: [
-          { name: 'Send', direction: 'in' },
-          { name: 'Receive', direction: 'out' },
-        ],
         suggestedContracts: ['amqp'],
         commonConnections: ['cloud.compute.lambda', 'backend.nodejs'],
         defaultMetadata: {
@@ -3352,7 +3089,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not using VPC endpoints (expensive data transfer)',
           ],
         },
-        defaultPorts: [],
         suggestedContracts: [],
         commonConnections: [],
         defaultMetadata: {
@@ -3397,7 +3133,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not segmenting by subnet',
           ],
         },
-        defaultPorts: [],
         suggestedContracts: [],
         commonConnections: [],
       },
@@ -3428,7 +3163,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not enabling flow logs',
           ],
         },
-        defaultPorts: [],
         suggestedContracts: [],
         commonConnections: [],
       },
@@ -3468,10 +3202,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not updating ESXi hosts regularly',
           ],
         },
-        defaultPorts: [
-          { name: 'vCenter API', direction: 'in' },
-          { name: 'VM Network', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['infrastructure.virtual-machine', 'orchestration.kubernetes-cluster'],
       },
@@ -3503,10 +3233,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not patching Hyper-V hosts',
           ],
         },
-        defaultPorts: [
-          { name: 'WMI/CIM', direction: 'in' },
-          { name: 'VM Network', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['infrastructure.virtual-machine', 'orchestration.kubernetes-cluster'],
       },
@@ -3538,10 +3264,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not using enterprise repositories',
           ],
         },
-        defaultPorts: [
-          { name: 'REST API', direction: 'in' },
-          { name: 'VM Network', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['infrastructure.virtual-machine', 'runtime.docker-container'],
       },
@@ -3573,10 +3295,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Running outdated OS versions',
           ],
         },
-        defaultPorts: [
-          { name: 'SSH/RDP', direction: 'in' },
-          { name: 'Application', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['orchestration.docker-compose', 'runtime.docker-container', 'backend.nodejs'],
       },
@@ -3616,7 +3334,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Storing secrets in configmaps',
           ],
         },
-        defaultPorts: [],
         suggestedContracts: [],
         commonConnections: [],
         defaultMetadata: {
@@ -3677,7 +3394,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Storing secrets in plain text',
           ],
         },
-        defaultPorts: [],
         suggestedContracts: [],
         commonConnections: [],
         defaultMetadata: {
@@ -3737,7 +3453,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Exposing all ports publicly',
           ],
         },
-        defaultPorts: [],
         suggestedContracts: [],
         commonConnections: [],
         defaultMetadata: {
@@ -3803,10 +3518,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not using auto-lock',
           ],
         },
-        defaultPorts: [
-          { name: 'Docker API', direction: 'in' },
-          { name: 'Services', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['runtime.docker-container', 'backend.nodejs', 'database.postgresql'],
       },
@@ -3838,10 +3549,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing health checks',
           ],
         },
-        defaultPorts: [
-          { name: 'Nomad API', direction: 'in' },
-          { name: 'Workloads', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['runtime.docker-container', 'infrastructure.virtual-machine', 'database.postgresql'],
       },
@@ -3873,10 +3580,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Bypassing built-in security features',
           ],
         },
-        defaultPorts: [
-          { name: 'OpenShift API', direction: 'in' },
-          { name: 'Routes', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['runtime.docker-container', 'backend.nodejs', 'database.postgresql'],
       },
@@ -3908,10 +3611,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not using task role for AWS access',
           ],
         },
-        defaultPorts: [
-          { name: 'Load Balancer In', direction: 'in' },
-          { name: 'Service Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest', 'grpc'],
         commonConnections: ['lb.aws-alb', 'database.postgresql', 'cloud.storage.s3'],
         metadataSchema: {
@@ -3983,10 +3682,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Ignoring concurrent execution limits',
           ],
         },
-        defaultPorts: [
-          { name: 'Event In', direction: 'in', required: true },
-          { name: 'Response Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest', 'kafka'],
         commonConnections: ['gateway.aws-api-gateway', 'cloud.storage.s3', 'database.dynamodb', 'messaging.rabbitmq'],
         metadataSchema: {
@@ -4058,10 +3753,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Hardcoding connection strings',
           ],
         },
-        defaultPorts: [
-          { name: 'Trigger In', direction: 'in', required: true },
-          { name: 'Output Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest', 'kafka'],
         commonConnections: ['gateway.azure-api-management', 'cloud.storage.azure-blob', 'database.cosmosdb'],
       },
@@ -4093,10 +3784,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not using Secret Manager',
           ],
         },
-        defaultPorts: [
-          { name: 'Event In', direction: 'in', required: true },
-          { name: 'Response Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest', 'kafka'],
         commonConnections: ['gateway.gcp-api-gateway', 'cloud.storage.gcs', 'database.firestore'],
       },
@@ -4128,10 +3815,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing error handling',
           ],
         },
-        defaultPorts: [
-          { name: 'HTTP In', direction: 'in', required: true },
-          { name: 'Response Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['cloud.storage.s3', 'database.postgresql'],
         metadataSchema: {
@@ -4182,10 +3865,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Overly permissive bucket policies',
           ],
         },
-        defaultPorts: [
-          { name: 'Upload In', direction: 'in' },
-          { name: 'Download Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['cloud.compute.lambda', 'cloud.compute.ecs', 'ai.aws-sagemaker'],
         metadataSchema: {
@@ -4253,10 +3932,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Hardcoding connection strings',
           ],
         },
-        defaultPorts: [
-          { name: 'Upload In', direction: 'in' },
-          { name: 'Download Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['cloud.compute.azure-functions', 'backend.nodejs'],
       },
@@ -4288,10 +3963,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not using appropriate storage class',
           ],
         },
-        defaultPorts: [
-          { name: 'Upload In', direction: 'in' },
-          { name: 'Download Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['cloud.compute.cloud-functions', 'ai.vertex-ai'],
       },
@@ -4323,10 +3994,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not implementing backups',
           ],
         },
-        defaultPorts: [
-          { name: 'S3 API In', direction: 'in' },
-          { name: 'Object Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['orchestration.kubernetes', 'backend.nodejs'],
       },
@@ -4361,10 +4028,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Overly permissive rules',
           ],
         },
-        defaultPorts: [
-          { name: 'Traffic In', direction: 'in', required: true },
-          { name: 'Filtered Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'database.postgresql'],
       },
@@ -4391,10 +4054,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not logging access',
           ],
         },
-        defaultPorts: [
-          { name: 'Client In', direction: 'in', required: true },
-          { name: 'Network Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs'],
       },
@@ -4427,10 +4086,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not using multiple availability zones',
           ],
         },
-        defaultPorts: [
-          { name: 'Traffic In', direction: 'in', required: true },
-          { name: 'Backend Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'web.rest-api'],
         defaultMetadata: {
@@ -4469,10 +4124,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing monitoring and alerts',
           ],
         },
-        defaultPorts: [
-          { name: 'Traffic In', direction: 'in', required: true },
-          { name: 'Backend Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'database.postgresql'],
         defaultMetadata: {
@@ -4512,10 +4163,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Improper timeout configurations',
           ],
         },
-        defaultPorts: [
-          { name: 'Traffic In', direction: 'in', required: true },
-          { name: 'Backend Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'database.postgresql'],
         defaultMetadata: {
@@ -4554,10 +4201,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not monitoring backend health',
           ],
         },
-        defaultPorts: [
-          { name: 'Traffic In', direction: 'in', required: true },
-          { name: 'Backend Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'web.rest-api'],
         defaultMetadata: {
@@ -4596,10 +4239,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing capacity planning',
           ],
         },
-        defaultPorts: [
-          { name: 'Traffic In', direction: 'in', required: true },
-          { name: 'Backend Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'web.rest-api', 'orchestration.kubernetes-cluster'],
         defaultMetadata: {
@@ -4639,10 +4278,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not implementing rate limiting',
           ],
         },
-        defaultPorts: [
-          { name: 'Traffic In', direction: 'in', required: true },
-          { name: 'Backend Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'web.rest-api'],
         defaultMetadata: {
@@ -4681,11 +4316,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not implementing proper logging',
           ],
         },
-        defaultPorts: [
-          { name: 'Traffic In', direction: 'in', required: true },
-          { name: 'Backend Out', direction: 'out', required: true },
-          { name: 'Stats', direction: 'in' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'web.rest-api'],
         defaultMetadata: {
@@ -4732,10 +4362,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not monitoring cache hit ratios',
           ],
         },
-        defaultPorts: [
-          { name: 'Origin', direction: 'out', required: true },
-          { name: 'Client Request', direction: 'in', required: true },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['cloud.storage.s3', 'lb.aws-alb', 'web.rest-api'],
         defaultMetadata: {
@@ -4768,10 +4394,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Ignoring origin shield configuration',
           ],
         },
-        defaultPorts: [
-          { name: 'Origin', direction: 'out', required: true },
-          { name: 'Client Request', direction: 'in', required: true },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['web.rest-api', 'frontend.react'],
         defaultMetadata: {},
@@ -4816,10 +4438,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Exposing JWT secrets or service_role key in frontend bundles',
           ],
         },
-        defaultPorts: [
-          { name: 'Auth Request In', direction: 'in', required: true },
-          { name: 'Token Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['database.supabase', 'database.postgresql', 'backend.nodejs', 'web.rest-api'],
         defaultMetadata: {
@@ -4866,10 +4484,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Hardcoding tenant domain in client code',
           ],
         },
-        defaultPorts: [
-          { name: 'Auth Request In', direction: 'in', required: true },
-          { name: 'Token Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'web.rest-api', 'web.api-gateway'],
         defaultMetadata: {
@@ -4914,11 +4528,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Hardcoding user pool IDs',
           ],
         },
-        defaultPorts: [
-          { name: 'Auth Request In', direction: 'in', required: true },
-          { name: 'Token Out', direction: 'out' },
-          { name: 'AWS Credentials Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'web.rest-api', 'cloud.lambda'],
         defaultMetadata: {
@@ -4967,10 +4576,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing rate limiting on login',
           ],
         },
-        defaultPorts: [
-          { name: 'Auth Request In', direction: 'in', required: true },
-          { name: 'Token Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['database.postgresql', 'backend.nodejs', 'web.rest-api'],
         defaultMetadata: {
@@ -5014,10 +4619,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Using deprecated signInWithPopup without error handling',
           ],
         },
-        defaultPorts: [
-          { name: 'Auth Request In', direction: 'in', required: true },
-          { name: 'Token Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['database.firestore', 'backend.nodejs', 'cloud.lambda'],
         defaultMetadata: {
@@ -5062,10 +4663,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing CORS configuration',
           ],
         },
-        defaultPorts: [
-          { name: 'Auth Request In', direction: 'in', required: true },
-          { name: 'Token Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'web.rest-api', 'database.cosmosdb'],
         defaultMetadata: {
@@ -5117,10 +4714,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not implementing branch protection',
           ],
         },
-        defaultPorts: [
-          { name: 'Code Push In', direction: 'in', required: true },
-          { name: 'Deployment Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['cloud.compute.lambda', 'orchestration.kubernetes', 'cloud.storage.s3'],
         metadataSchema: {
@@ -5184,10 +4777,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Hardcoding variables',
           ],
         },
-        defaultPorts: [
-          { name: 'Code Push In', direction: 'in', required: true },
-          { name: 'Deploy Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['orchestration.kubernetes', 'cloud.storage.s3', 'backend.nodejs'],
         suggestedFiles: [
@@ -5228,10 +4817,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Overly complex pipeline logic',
           ],
         },
-        defaultPorts: [
-          { name: 'SCM Webhook', direction: 'in' },
-          { name: 'Deploy Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['orchestration.kubernetes', 'backend.nodejs'],
       },
@@ -5263,10 +4848,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not using ApplicationSets for scaling',
           ],
         },
-        defaultPorts: [
-          { name: 'Git Repo In', direction: 'in', required: true },
-          { name: 'K8s Apply Out', direction: 'out', required: true },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['orchestration.kubernetes'],
         metadataSchema: {
@@ -5313,10 +4894,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not monitoring build times',
           ],
         },
-        defaultPorts: [
-          { name: 'Code Push In', direction: 'in' },
-          { name: 'Deploy Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['cloud.compute.lambda', 'orchestration.kubernetes'],
       },
@@ -5357,10 +4934,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Excessive scrape intervals',
           ],
         },
-        defaultPorts: [
-          { name: 'Metrics Scrape', direction: 'in', required: true },
-          { name: 'Alerts Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['observability.grafana', 'orchestration.kubernetes', 'backend.nodejs'],
         metadataSchema: {
@@ -5406,10 +4979,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not organizing dashboards',
           ],
         },
-        defaultPorts: [
-          { name: 'Data Source In', direction: 'in', required: true },
-          { name: 'Dashboard View Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['observability.prometheus', 'database.postgresql', 'observability.loki'],
       },
@@ -5441,11 +5010,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Ignoring APM traces',
           ],
         },
-        defaultPorts: [
-          { name: 'Metrics In', direction: 'in' },
-          { name: 'Logs In', direction: 'in' },
-          { name: 'Traces In', direction: 'in' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'orchestration.kubernetes', 'cloud.compute.lambda'],
       },
@@ -5477,10 +5041,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Ignoring performance data',
           ],
         },
-        defaultPorts: [
-          { name: 'Error In', direction: 'in', required: true },
-          { name: 'Alert Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['frontend.react', 'backend.nodejs', 'mobile.ios-app'],
         metadataSchema: {
@@ -5529,10 +5089,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not using data streams',
           ],
         },
-        defaultPorts: [
-          { name: 'Logs In', direction: 'in', required: true },
-          { name: 'Query Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'orchestration.kubernetes'],
       },
@@ -5564,10 +5120,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Mixing multiple instrumentation libraries',
           ],
         },
-        defaultPorts: [
-          { name: 'Telemetry In', direction: 'in' },
-          { name: 'Metrics/Logs/Traces Out', direction: 'out' },
-        ],
         suggestedContracts: ['grpc', 'rest'],
         commonConnections: ['observability.prometheus', 'observability.datadog', 'backend.nodejs'],
       },
@@ -5610,10 +5162,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Storing user data inside the install directory instead of AppData',
           ],
         },
-        defaultPorts: [
-          { name: 'Application', direction: 'in' },
-          { name: 'Windows Registry', direction: 'out' },
-        ],
         suggestedContracts: [],
         commonConnections: ['runtime.electron-app', 'runtime.tauri-app', 'runtime.maui-app'],
         suggestedFiles: [
@@ -5683,10 +5231,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not testing on Apple Silicon causing Rosetta-only fallback',
           ],
         },
-        defaultPorts: [
-          { name: 'Application', direction: 'in' },
-          { name: 'Installation', direction: 'out' },
-        ],
         suggestedContracts: [],
         commonConnections: ['runtime.electron-app', 'runtime.tauri-app', 'runtime.maui-app'],
         suggestedFiles: [
@@ -5760,10 +5304,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not including an AppStream metainfo file for software centers',
           ],
         },
-        defaultPorts: [
-          { name: 'Application', direction: 'in' },
-          { name: 'Package Manager', direction: 'out' },
-        ],
         suggestedContracts: [],
         commonConnections: ['runtime.electron-app', 'runtime.tauri-app', 'backend.nodejs'],
         suggestedFiles: [
@@ -5841,10 +5381,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Using GPT-4o for tasks where GPT-4o-mini suffices',
           ],
         },
-        defaultPorts: [
-          { name: 'Prompt In', direction: 'in', required: true },
-          { name: 'Completion Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'cache.redis', 'vectordb.pinecone'],
         metadataSchema: {
@@ -5910,10 +5446,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not leveraging the full 200K context window',
           ],
         },
-        defaultPorts: [
-          { name: 'Prompt In', direction: 'in', required: true },
-          { name: 'Response Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['backend.nodejs', 'cache.redis', 'vectordb.pinecone'],
         metadataSchema: {
@@ -5976,11 +5508,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Deploying without A/B testing',
           ],
         },
-        defaultPorts: [
-          { name: 'Training Data In', direction: 'in' },
-          { name: 'Inference In', direction: 'in' },
-          { name: 'Predictions Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['cloud.storage.s3', 'web.rest-api', 'data.apache-spark'],
       },
@@ -6007,11 +5534,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Assuming vector similarity alone is enough for quality retrieval without chunking, ranking, and evaluation discipline.',
           ],
         },
-        defaultPorts: [
-          { name: 'Vector Upsert In', direction: 'in' },
-          { name: 'Query In', direction: 'in' },
-          { name: 'Results Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['ai.openai-api', 'ai.anthropic-claude', 'ai.langchain', 'backend.nodejs', 'cache.redis'],
         metadataSchema: {
@@ -6065,11 +5587,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not using batch operations',
           ],
         },
-        defaultPorts: [
-          { name: 'GraphQL In', direction: 'in' },
-          { name: 'REST In', direction: 'in' },
-          { name: 'Results Out', direction: 'out' },
-        ],
         suggestedContracts: ['graphql', 'rest'],
         commonConnections: ['ai.openai-api', 'backend.nodejs', 'orchestration.kubernetes'],
       },
@@ -6104,11 +5621,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Using LangChain abstractions for trivial single-call patterns',
           ],
         },
-        defaultPorts: [
-          { name: 'Input In', direction: 'in', required: true },
-          { name: 'LLM Out', direction: 'out' },
-          { name: 'Tool Access', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['ai.openai-api', 'ai.anthropic-claude', 'vectordb.pinecone', 'backend.nodejs'],
         metadataSchema: {
@@ -6169,11 +5681,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'No human oversight for critical tasks',
           ],
         },
-        defaultPorts: [
-          { name: 'Task In', direction: 'in', required: true },
-          { name: 'Tool Access', direction: 'out' },
-          { name: 'Result Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['ai.openai-api', 'ai.anthropic-claude', 'backend.nodejs'],
         suggestedFiles: [
@@ -6209,12 +5716,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing citation/source tracking',
           ],
         },
-        defaultPorts: [
-          { name: 'Query In', direction: 'in', required: true },
-          { name: 'Vector DB', direction: 'out' },
-          { name: 'LLM', direction: 'out' },
-          { name: 'Response Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['vectordb.pinecone', 'vectordb.weaviate', 'ai.openai-api'],
         suggestedFiles: [
@@ -6250,11 +5751,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'No A/B testing capability',
           ],
         },
-        defaultPorts: [
-          { name: 'Data In', direction: 'in', required: true },
-          { name: 'Model Out', direction: 'out' },
-          { name: 'Metrics Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['mlops.model-registry', 'mlops.feature-store', 'data.data-warehouse'],
         suggestedFiles: [
@@ -6288,10 +5784,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'No lineage tracking',
           ],
         },
-        defaultPorts: [
-          { name: 'Model In', direction: 'in', required: true },
-          { name: 'Model Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest'],
         commonConnections: ['mlops.pipeline', 'mlops.model-serving'],
         suggestedFiles: [
@@ -6324,10 +5816,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Unversioned feature definitions',
           ],
         },
-        defaultPorts: [
-          { name: 'Data In', direction: 'in' },
-          { name: 'Features Out', direction: 'out' },
-        ],
         suggestedContracts: ['sql'],
         commonConnections: ['mlops.pipeline', 'data.data-warehouse'],
         suggestedFiles: [
@@ -6361,10 +5849,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Direct model updates without testing',
           ],
         },
-        defaultPorts: [
-          { name: 'Request In', direction: 'in', required: true },
-          { name: 'Prediction Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest', 'grpc'],
         commonConnections: ['mlops.model-registry', 'backend.nodejs'],
         suggestedFiles: [
@@ -6403,10 +5887,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not handling timeouts',
           ],
         },
-        defaultPorts: [
-          { name: 'Request Out', direction: 'out', required: true },
-          { name: 'Response In', direction: 'in' },
-        ],
         suggestedContracts: ['rest', 'graphql'],
         commonConnections: ['backend.nodejs'],
       },
@@ -6433,10 +5913,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Not handling duplicates',
           ],
         },
-        defaultPorts: [
-          { name: 'Event In', direction: 'in', required: true },
-          { name: 'Process Out', direction: 'out' },
-        ],
         suggestedContracts: ['rest', 'kafka'],
         commonConnections: ['backend.nodejs', 'messaging.rabbitmq'],
       },
@@ -6476,10 +5952,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Tight coupling to external services',
           ],
         },
-        defaultPorts: [
-          { name: 'Module API', direction: 'in' },
-          { name: 'Events', direction: 'out' },
-        ],
         suggestedContracts: ['rest', 'kafka'],
         commonConnections: ['logical.software-layer', 'logical.component-library', 'database.postgresql'],
       },
@@ -6511,10 +5983,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Mixed responsibilities within layers',
           ],
         },
-        defaultPorts: [
-          { name: 'Layer Input', direction: 'in' },
-          { name: 'Layer Output', direction: 'out' },
-        ],
         suggestedContracts: [],
         commonConnections: ['logical.application-module', 'logical.component-library'],
       },
@@ -6546,10 +6014,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Missing tests',
           ],
         },
-        defaultPorts: [
-          { name: 'Package Import', direction: 'in' },
-          { name: 'Exports', direction: 'out' },
-        ],
         suggestedContracts: [],
         commonConnections: ['logical.application-module', 'frontend.react', 'backend.nodejs'],
       },
@@ -6586,10 +6050,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Unrealistic or untestable requirements',
           ],
         },
-        defaultPorts: [
-          { name: 'Implements', direction: 'out' },
-          { name: 'Depends On', direction: 'in' },
-        ],
         suggestedContracts: [],
         commonConnections: ['requirements.functional', 'requirements.non-functional', 'requirements.technical'],
         defaultMetadata: {
@@ -6678,10 +6138,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Ignoring real-world limitations',
           ],
         },
-        defaultPorts: [
-          { name: 'Constrains', direction: 'out' },
-          { name: 'Affects', direction: 'in' },
-        ],
         suggestedContracts: [],
         commonConnections: ['requirements.functional', 'requirements.technical'],
         defaultMetadata: {
@@ -6752,10 +6208,6 @@ const LEGACY_TEST_DOMAINS: NodeTypeDomain[] = [
             'Premature optimization',
           ],
         },
-        defaultPorts: [
-          { name: 'Requires', direction: 'out' },
-          { name: 'Influences', direction: 'in' },
-        ],
         suggestedContracts: [],
         commonConnections: ['requirements.functional', 'requirements.non-functional'],
         defaultMetadata: {

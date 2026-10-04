@@ -448,6 +448,9 @@ input, textarea, select {
   .landing-hero-headline {
     font-size: 26px !important;
   }
+  .landing-hero-slogan {
+    font-size: 16px !important;
+  }
   .landing-hero-subtitle {
     font-size: 15px !important;
   }
@@ -686,4 +689,12 @@ input, textarea, select {
   .reset-title {
     font-size: 24px !important;
   }
+}
+
+/* V3 R11: an agent appearing on the Agents button, or changing status, eases
+   in rather than popping. The header is where "something changed" belongs —
+   nothing on the canvas moves. */
+@keyframes nsAvatarIn {
+  from { opacity: 0; transform: scale(.72); }
+  to   { opacity: 1; transform: scale(1); }
 }

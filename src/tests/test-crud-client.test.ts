@@ -76,10 +76,11 @@ describe('service + repository rails', () => {
     expect(ti).toContain('re-run it against its new requirement');
   });
 
-  it('the Work Board opens the SAME inspector from its test chips and refreshes on close', () => {
-    const wb = read('ui/components/board/WorkBoardView.tsx');
-    expect(wb).toContain("import { TestInspector } from '../panels/TestInspector.js'");
-    expect(wb).toContain('setInspectTestId(tc.rowId!)');
-    expect(wb).toContain('onClose={() => { setInspectTestId(null); refresh(); }}');
+  it('the TestInspector outlives the retired Work Board (V3 R4) — P5 Trace re-mounts it', () => {
+    // The board that used to open the inspector from its test chips is
+    // retired; the inspector itself and its CRUD lanes are the survivors
+    // this suite pins above.
+    const ti = read('ui/components/panels/TestInspector.tsx');
+    expect(ti).toContain('TestInspector');
   });
 });

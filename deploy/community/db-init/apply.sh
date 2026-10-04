@@ -95,8 +95,20 @@ until [ "$("${PSQL_ADMIN[@]}" -tAc "select to_regclass('auth.users') is not null
   sleep 2
 done
 
+# V3 Q: this database is self-hosted. The plan checks in the database
+# (migration 20260922110000) defer to the licence the functions verify when
+# public.deployment_settings says so. Written on every run, so an install
+# initialized before that migration is marked the next time it starts.
+mark_self_hosted() {
+  if [ "$("${PSQL_ADMIN[@]}" -tAc "select to_regclass('public.deployment_settings') is not null")" = "t" ]; then
+    "${PSQL_PG[@]}" -c "INSERT INTO public.deployment_settings (id, mode) VALUES (true, 'self-hosted') ON CONFLICT (id) DO UPDATE SET mode = 'self-hosted', updated_at = now();" >/dev/null
+    echo "[nodespec-init] marked this database self-hosted"
+  fi
+}
+
 if [ "$("${PSQL_ADMIN[@]}" -tAc "select to_regclass('public.projects') is not null")" = "t" ]; then
   echo "[nodespec-init] NodeSpec schema already present — nothing to do"
+  mark_self_hosted
   exit 0
 fi
 
@@ -110,4 +122,5 @@ for f in /nodespec-migrations/*.sql; do
   "${PSQL_PG[@]}" -1 -f "${f}"
 done
 
+mark_self_hosted
 echo "[nodespec-init] done"
