@@ -2,8 +2,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { extractOrchestratorAuth } from "../_shared/auth-helpers.ts";
 import { decryptWithUpgrade, isEncrypted } from "../_shared/crypto.ts";
 import { providerApiBase } from "../_shared/git-provider.ts";
-import { runDriftSweep, fileModelLoadProposal, restoreSpecFromRef, applyCriterionDeltas, moveBaselineAfterLoad, resolveCardsAfterRestore } from "../_shared/git-drift.ts";
-import { applyTaskDeltas } from "../_shared/task-deltas.ts";
+import { runDriftSweep, fileModelLoadProposal, restoreSpecFromRef, applyCardTicks, moveBaselineAfterLoad, resolveCardsAfterRestore } from "../_shared/git-drift.ts";
 import { MODEL_ANCHOR_PATH } from "../_shared/model-anchor.ts";
 import { isPrimaryRow, getPrimaryBranch } from "../_shared/primary-branch.ts";
 import { buildGitHubHeaders, encodeRepoPath, fetchFullGitHubTree, fetchGitHubFiles } from "../_shared/git-tree.ts";
@@ -697,46 +696,22 @@ async function handleApplyCriteria(
   // AD.3 (ruling 3): this is the one way a criterion tick is applied, by a
   // person in the app. The provenance records who applied it beside who
   // committed it; for an automated criterion that is the person's own mark,
-  // standing where a test result would.
-  const result = hasCriterionDeltas
-    ? await applyCriterionDeltas(serviceClient, integration.project_id, {
-        deltas,
-        commitSha: card.commit_sha ?? undefined,
-        actor: card.author ?? undefined,
-        appliedBy: userId,
-      })
-    : { applied: 0, requirementsTouched: [] as string[] };
-
-  // A4 (docs/WORK_LOOP_PLAN.md): the card's anchored-task ticks apply through
-  // the SAME action — one approval covers both checkbox families. Tick-only
-  // and idempotent (already-done rows are skipped), like the criterion lane.
-  let tasksApplied = 0;
-  if (hasTaskDeltas) {
-    const taskResult = await applyTaskDeltas(serviceClient, integration.project_id, {
-      deltas: cardTaskDeltas,
-      commitSha: card.commit_sha ?? undefined,
-      actor: card.author ?? undefined,
-      source: "git",
-    });
-    tasksApplied = taskResult.applied;
+  // standing where a test result would. AL.29: written through the locked
+  // criteria writer, and the card is marked applied only when every write landed.
+  const out = await applyCardTicks(serviceClient, integration.project_id, card, userId);
+  if (out.failed.length > 0) {
+    const names = out.failed.map((f) => `${f.requirementId} (${f.reason})`).join(", ");
+    return new Response(
+      JSON.stringify({
+        error: `${out.applied > 0 ? `Marked ${out.applied} acceptance criterion(s) met, but ` : ""}the criteria of ${names} could not be written. The card stays open; apply it again to write what is still unmet.`,
+        applied: out.applied, tasksApplied: out.tasksApplied, requirements: out.requirements, failed: out.failed,
+      }),
+      { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
   }
 
-  // Record that this card's completion question has been answered, so
-  // re-opening the card cannot apply the same ticks twice — ONE metadata
-  // write carries both stamps.
-  await serviceClient
-    .from("git_change_events")
-    .update({
-      metadata: {
-        ...(card.metadata ?? {}),
-        criteriaApplied: { at: new Date().toISOString(), count: result.applied },
-        ...(hasTaskDeltas ? { ticksApplied: { at: new Date().toISOString(), count: tasksApplied } } : {}),
-      },
-    })
-    .eq("id", card.id);
-
   return new Response(
-    JSON.stringify({ success: true, applied: result.applied, tasksApplied, requirements: result.requirementsTouched }),
+    JSON.stringify({ success: true, applied: out.applied, tasksApplied: out.tasksApplied, requirements: out.requirements }),
     { headers: { ...corsHeaders, "Content-Type": "application/json" } },
   );
 }

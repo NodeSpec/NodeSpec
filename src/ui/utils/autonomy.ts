@@ -86,13 +86,14 @@ export function laneEffect(lane: AutonomyLane, level: AutonomyLevel): string {
     switch (level) {
       case 0: return 'Agents cannot change the architecture. You draw on the canvas.';
       case 1: return 'Each agent graph change waits as a proposal on the canvas.';
-      case 2: return 'Agent graph changes apply on the canvas and land in the review log. Imports and locked nodes still wait for you.';
+      case 2: return 'Agent graph changes apply on the canvas, app open or not, and are logged. Imports, git loads and locked nodes still wait for you.';
     }
   }
   // V3 2.4: the lane governs OPEN rows; confirm and lock are the row-level
   // brakes, and they hold whatever the lane says.
   const rungs = lane === 'requirements' ? ' Confirmed requirements still come back as proposals; locked ones refuse every change.' : '';
-  const settle = lane === 'candidates' && level === 2 ? ' Promotion and settle still wait for you.' : '';
+  const settle = lane === 'candidates' && level === 2 ? ' Promotion and settle still wait for you.'
+    : lane === 'tasks' && level === 2 ? ' A proposed build order is accepted as it files.' : '';
   // AL.6: an agent's batch now applies at Auto; changing or retiring a
   // constraint stays the person's (resolve_proposal's NEVER_AUTO_APPLY).
   if (lane === 'requirements' && level === 2) {

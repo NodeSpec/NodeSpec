@@ -96,9 +96,12 @@ a workflow that needs it.
 
 Two planes, never mixed in one call:
 
-- **Canvas changes** (nodes, edges, contracts, artifacts, explodes) are
-  always proposals the user decides on the canvas, whatever the Architecture
-  lane says.
+- **Canvas changes** (nodes, edges, contracts, artifacts, explodes) always
+  file as proposals. With the Architecture lane at Auto-apply they **apply as
+  they file**, on the server, whether or not the user has the app open (the
+  response says `routed: applied`); otherwise the user decides them on the
+  canvas. A batch whose read the branch moved under, or whose patch will not
+  apply, is set aside with the reason: read again and file again.
 - **Spec changes** (requirements, the vision, outcomes, workflows,
   constraints) follow the project's autonomy lanes. A direct spec tool
   (`create_requirement`, `update_requirement`, `delete_requirement`,
@@ -107,11 +110,15 @@ Two planes, never mixed in one call:
   `propose_patches` batch of spec ops always files, and **applies as it
   files** when every lane it touches is at Auto-apply, your key has the write
   scope, and your account may approve on the project (the owner's agent). The
-  response says it applied.
+  response says it applied. A drafted vision applies with it. With the Tasks
+  lane at Auto-apply, `propose_work_plan` from the owner's agent is accepted as
+  it files.
 - **What waits for the person at every level:** a promotion, an attach or a
   settle; a changed or retired constraint; any change to a confirmed
-  requirement; a batch that sets the vision; anything filed by a key that may
-  only propose or by a member's agent on a Team project. Only the user's
+  requirement; a node locked or leased by someone else; a repository import
+  and a load of the model from git; anything filed by a key that may only
+  propose or by a member's agent on a Team project. The response's `routing`
+  note says why it waits, and so does its card in Proposals. Only the user's
   session in the app accepts a promotion, attach, settle or constraint change.
 - **A batch that mixes the planes is refused by name** and nothing is filed:
   file the canvas changes first, then the spec changes.
@@ -229,6 +236,19 @@ respect "Never decompose its internals" on boundary nodes, and turn
 `## Manual Steps` into instructions for the user: you cannot click through a
 console for them.
 
+- **Steps.** Before building a work order, write its steps under its task
+  line: one indented checkbox line per step (`  - [ ] <step>`), with any
+  detail indented further under its step. Write them into the stored doc with
+  `propose_patches` `update_artifact`, passing `base_sequence` (the
+  `headSequence` you read the doc at). If another agent changed the doc first,
+  yours is set aside as a stale read: read the doc again and add your lines to
+  it. Steps stay with their work order when the doc regenerates.
+  `generate_task_docs` lists the open work orders with no steps
+  (`workOrdersWithoutSteps`, with the doc's `artifactId`) and the format
+  (`stepFormat`). When a work order is reworded or removed, its steps move to
+  `### Steps to review` at the end of Implementation Tasks, each group under
+  `Written for T<n>: <title>` (`stepsToReview` counts them): move each step
+  under the work order it belongs to, or delete it.
 - **Read set.** Open the node's bound artifacts and the schema artifacts its
   contracts reference. Grep wider only for symbols and conventions, never to
   discover scope.
@@ -258,6 +278,18 @@ requirements, and an over-budget report returns a consolidation nudge.
   (`refreshed: true` says it just did, and the user's own Test Strategy edits
   carry forward). Never force a regeneration. Resolve `schemaBlockedContracts`
   first (step 2); blocked scenarios are markers, not work.
+- **Statements.** Under each `#### AC-...` test case heading, write the
+  test's statements, one checkbox line each (`- [ ] Given ..., when ...,
+  then ...`, with a then that can be observed and names the file or API it
+  checks); under a manual item, the same lines indented by two spaces (the
+  check a person performs). Write them into the plan (`testPlanArtifactId`)
+  with `update_artifact` and `base_sequence`, as for steps. They stay with
+  their criterion when the plan regenerates. `get_test_plan` lists the cases
+  with none (`testCasesWithoutStatements`) and the format (`statementFormat`).
+  A reworded or removed criterion's statements move to
+  `#### Statements to review`, each group under a `Written for:` line that
+  quotes the criterion (`statementsToReview` counts them): move each under its
+  test case, or delete it. A case blocked by a schema waits for the schema.
 - **Claim the criterion first** when other agents work on the project:
   `checkout_task { level: 'criterion', ref_id: <the requirement's row id>,
   criterion_id: <the criterion's id from list_requirements> }`. The lease is
@@ -821,8 +853,9 @@ Either way, Workflows and outcomes are proposed, never applied: do not call
 `upsert_workflow` or `create_candidate` outside this one proposal for a
 backfill, at any autonomy level. The response's `routing` field names the
 strictest autonomy lane the batch answers to; the proposal files regardless, because
-proposing IS the ask, and a batch carrying the drafted vision waits even at
-Auto-apply. Workflows are Indie and above (so is repository import); read
+proposing IS the ask; at Auto-apply the batch applies as it files, the
+drafted vision with it, so tell the user it is a draft to confirm in their
+words. Workflows are Indie and above (so is repository import); read
 `workflows.available` on `get_outcome_board` before planning workflows.
 
 Then, for the whole system:
@@ -947,7 +980,7 @@ when to reach for the tool; the sections above say how.
 |---|---|
 | `get_build_readiness` | Preflight: the summary first, then ONE scoped call per node you will build |
 | `get_project_context` | A node's brief (`view:'brief'`) when its `.task.md` is not at hand; `view:'slice'` for what moved around it; an artifact's bytes (`target_type: 'artifact'`) |
-| `generate_task_docs` | Doc blockers: regenerate stale or missing task documents; a held node's document is left as it is and listed under `held` |
+| `generate_task_docs` | Doc blockers: regenerate stale or missing task documents; a held node's document is left as it is and listed under `held`; lists the work orders with no steps |
 | `propose_patches` | Every canvas write, and spec ops (outcomes, workflows, constraints, promotions, attaches, settles, and requirement changes that need a reason): see "Proposals and autonomy" and "Patch discipline" |
 | `get_proposal_status` | Did the user decide what you proposed; the status reflects what actually settled (no `project_id`) |
 | `mark_entity_complete` | Declaring a node done; it returns the criteria still unmet (believe them) |
@@ -968,7 +1001,7 @@ when to reach for the tool; the sections above say how.
 **Verify**
 | Tool | Use when |
 |---|---|
-| `get_test_plan` | Per requirement: the scenarios to implement |
+| `get_test_plan` | Per requirement: the scenarios to implement, and the test cases with no statements |
 | `report_test_results` | EVERY outcome you actually ran, with the exact `criterion_text`; this is what meets criteria. Commit and push first, then report with `git` |
 | `update_test_case` | Fixing a `test_id`, moving a case (`reassign_to`), retiring one (`retire` with a reason), or re-binding after a reword (`criterion_text`) |
 

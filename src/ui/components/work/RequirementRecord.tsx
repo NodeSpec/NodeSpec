@@ -9,8 +9,11 @@
 //   Architecture   the node it lives on (a door to the canvas), its
 //                  technology, how many of the node's tasks serve this
 //   Tasks          done or not, "ticked at <commit>" or "Set N" (a door to
-//                  the plan), the task id
-//   Tests          passed, failed or not run, "<type> · proves ACn", the TC id
+//                  the plan), the task id; AL.27: the criteria it serves and
+//                  what its work order says under its T# line, and the
+//                  node's other work orders one click away
+//   Tests          passed, failed or not run, "<type> · proves ACn", the TC id;
+//                  AL.27: what the case checks, what it expects, its file
 //   Code           the file, its language and the other requirements on it,
 //                  the commit the evidence was stamped with
 //
@@ -37,6 +40,19 @@ import type { VerifyWrite } from '../ideation/VerifyLane.js';
 import type { TraceChain } from '../ideation/useTraceData.js';
 import type { BandRequirement, RequirementBandApi } from '../ideation/useRequirementBand.js';
 import { originsLineOf, rowBrakeLine, type RequirementRecordView, type RecordTask } from './requirements-model.js';
+import { checkboxOf } from '../../../../supabase/functions/_shared/task-deltas.js';
+
+/** AL.27: `**bold**` and `code` in a work order's line, as the doc writes them. */
+function inlineMarks(text: string, codeStyle: React.CSSProperties): React.ReactNode[] {
+  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean).map((part, i) => {
+    if (part.startsWith('**') && part.endsWith('**') && part.length > 4) return <strong key={i}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) return <code key={i} style={codeStyle}>{part.slice(1, -1)}</code>;
+    return part;
+  });
+}
+
+/** How many of a work order's lines show before "Show N more lines". */
+export const WORK_ORDER_LINES_SHOWN = 3;
 
 export interface RequirementRecordProps {
   requirement: BandRequirement;
@@ -92,7 +108,12 @@ function RequirementRecordComponent(props: RequirementRecordProps) {
   const [expected, setExpected] = useState('');
   const [formCriterion, setFormCriterion] = useState<string | null>(null);
   const [taskNode, setTaskNode] = useState<string | null>(null);
-  useEffect(() => { setNote(null); setEditing(false); setNameDraft(null); setDescDraft(null); setAdding(null); setDraft(''); setExpected(''); setFormCriterion(null); setTaskNode(null); }, [requirement.id]);
+  // AL.27: the work orders opened past their first lines, and the nodes whose
+  // other work orders are showing.
+  const [openTasks, setOpenTasks] = useState<ReadonlySet<string>>(new Set());
+  const [openNodes, setOpenNodes] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => { setNote(null); setEditing(false); setNameDraft(null); setDescDraft(null); setAdding(null); setDraft(''); setExpected(''); setFormCriterion(null); setTaskNode(null); setOpenTasks(new Set()); setOpenNodes(new Set()); }, [requirement.id]);
+  const toggle = (set: ReadonlySet<string>, id: string) => { const next = new Set(set); if (next.has(id)) next.delete(id); else next.add(id); return next; };
 
   // The band's row is the lock's source of truth: setLocked re-reads it at
   // once, while the trace's copy (record.locked) arrives with its own read.
@@ -142,6 +163,20 @@ function RequirementRecordComponent(props: RequirementRecordProps) {
   const rt: React.CSSProperties = { flex: 1, minWidth: 0, fontSize: '12px', fontWeight: 500, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
   const rm: React.CSSProperties = { ...meta(muted), flexShrink: 0, whiteSpace: 'nowrap' };
   const rid: React.CSSProperties = { ...identifier(muted), width: '58px', textAlign: 'right', flexShrink: 0 };
+  const detailLine: React.CSSProperties = { ...meta(muted), fontWeight: 450, lineHeight: 1.5, overflowWrap: 'anywhere' };
+  const codeMark: React.CSSProperties = { fontFamily: identifier(muted).fontFamily, fontSize: '11px' };
+  // AL.29: a line under a work order or a test case, as the doc writes it; a
+  // step or a statement (a checkbox line) reads as a tick row.
+  const docLine = (line: string, i: number, testId: string) => {
+    const depth = Math.floor((line.length - line.trimStart().length) / 2);
+    const box = checkboxOf(line);
+    return (
+      <div key={i} data-testid={testId} data-done={box ? String(box.done) : undefined} style={{ ...detailLine, paddingLeft: `${depth * 12}px`, ...(box ? { display: 'flex', gap: '6px' } : {}) }}>
+        {box && <span data-testid="record-line-tick" aria-label={box.done ? 'done' : 'not done'} style={tick(box.done ? tones.ok : muted)}>{box.done ? '\u2713' : '\u25cb'}</span>}
+        <span>{inlineMarks(box ? box.text : line.trim(), codeMark)}</span>
+      </div>
+    );
+  };
   const testTone = (status: string) => (status === 'passed' ? tones.ok : status === 'failed' ? tones.bad : status === 'running' ? c.primary : status === 'stale' ? tones.warn : muted);
   const testGlyph = (status: string) => (status === 'passed' ? '✓' : status === 'failed' ? '✕' : '○');
   const reqHolds = holds.filter((h) => h.level === 'requirement' && h.refId === requirement.id && !h.stale);
@@ -157,6 +192,46 @@ function RequirementRecordComponent(props: RequirementRecordProps) {
     setDescDraft(null);
     if (!chain || next.trim() === chain.verify.description.trim()) return;
     void run(() => onWrite({ description: next.trim() }));
+  };
+
+  // AL.27: a task as its work order reads: the tick, the T# title in full,
+  // the criteria it serves, then the lines under it in the doc (the first
+  // few, the rest a click away).
+  const taskRow = (t: RecordTask, testId: string) => {
+    const open = openTasks.has(t.id);
+    const lines = open ? t.details : t.details.slice(0, WORK_ORDER_LINES_SHOWN);
+    const hidden = t.details.length - lines.length;
+    return (
+      <div key={t.id} data-testid={testId} data-done={t.done ? 'true' : 'false'} style={{ padding: '5px 0', borderBottom: `1px solid ${c.border}40` }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: '10px' }}>
+          <button type="button" role="checkbox" data-testid="record-task-tick" aria-checked={t.done} aria-label={`${t.displayId} done`} disabled={busy}
+            onClick={() => void run(() => onTickTask(t, !t.done))}
+            style={{ ...tick(t.done ? tones.ok : tones.warn), border: 'none', background: 'transparent', padding: 0, cursor: busy ? 'default' : 'pointer', fontFamily: 'inherit' }}>{t.done ? '✓' : '○'}</button>
+          <span data-testid="record-task-title" style={{ ...rt, whiteSpace: 'normal' }}>
+            {t.title}{t.byHand && yours('record-task-yours')}
+            {t.serves.length > 0 && <span data-testid="record-task-serves" title="The criteria of this requirement it serves" style={{ ...meta(muted), marginLeft: '6px' }}>serves {t.serves.join(', ')}</span>}
+          </span>
+          {t.live ? (
+            <span data-testid="record-task-live" style={{ ...rm, color: c.primary, fontWeight: 600 }}>{t.live}</span>
+          ) : t.done && t.commit ? (
+            <span data-testid="record-task-commit" style={rm}>ticked at {t.commit}</span>
+          ) : t.planSet !== null ? (
+            <button type="button" data-testid="record-task-plan" disabled={!onOpenPlan} onClick={() => onOpenPlan?.(t.id)} style={{ ...quietLink, flexShrink: 0 }}>Set {t.planSet}</button>
+          ) : null}
+          <span style={rid}>{t.displayId}</span>
+        </div>
+        {t.details.length > 0 && (
+          <div data-testid="record-task-details" style={{ padding: '3px 68px 0 22px', display: 'flex', flexDirection: 'column', gap: '1px' }}>
+            {lines.map((line, i) => docLine(line, i, 'record-task-line'))}
+            {(hidden > 0 || open) && t.details.length > WORK_ORDER_LINES_SHOWN && (
+              <button type="button" data-testid="record-task-more" aria-expanded={open} onClick={() => setOpenTasks((o) => toggle(o, t.id))} style={{ ...quietLink, color: muted, fontWeight: 500, alignSelf: 'flex-start', padding: '2px 0 0' }}>
+                {open ? 'Show fewer lines' : `Show ${hidden} more line${hidden === 1 ? '' : 's'}`}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const tasksDone = record?.tasks.filter((t) => t.done).length ?? 0;
@@ -269,20 +344,15 @@ function RequirementRecordComponent(props: RequirementRecordProps) {
                 ? <button type="button" data-testid="record-add-task" disabled={busy} style={handLink} onClick={() => { setAdding('task'); setDraft(''); setFormCriterion(null); setTaskNode(null); }}>Add by hand</button>
                 : undefined)}
             {record.tasks.length === 0 && adding !== 'task' && recEmpty('No task serves this requirement yet.')}
-            {record.tasks.map((t) => (
-              <div key={t.id} data-testid="record-task" data-done={t.done ? 'true' : 'false'} style={recRow}>
-                <button type="button" role="checkbox" data-testid="record-task-tick" aria-checked={t.done} aria-label={`${t.displayId} done`} disabled={busy}
-                  onClick={() => void run(() => onTickTask(t, !t.done))}
-                  style={{ ...tick(t.done ? tones.ok : tones.warn), border: 'none', background: 'transparent', padding: 0, cursor: busy ? 'default' : 'pointer', fontFamily: 'inherit' }}>{t.done ? '✓' : '○'}</button>
-                <span style={rt} title={t.title}>{t.title}{t.byHand && yours('record-task-yours')}</span>
-                {t.live ? (
-                  <span data-testid="record-task-live" style={{ ...rm, color: c.primary, fontWeight: 600 }}>{t.live}</span>
-                ) : t.done && t.commit ? (
-                  <span data-testid="record-task-commit" style={rm}>ticked at {t.commit}</span>
-                ) : t.planSet !== null ? (
-                  <button type="button" data-testid="record-task-plan" disabled={!onOpenPlan} onClick={() => onOpenPlan?.(t.id)} style={{ ...quietLink, flexShrink: 0 }}>Set {t.planSet}</button>
-                ) : null}
-                <span style={rid}>{t.displayId}</span>
+            {record.tasks.map((t) => taskRow(t, 'record-task'))}
+            {record.otherTasks.map((g) => (
+              <div key={g.nodeId} data-testid="record-other-tasks">
+                <button type="button" data-testid="record-other-tasks-toggle" aria-expanded={openNodes.has(g.nodeId)} onClick={() => setOpenNodes((o) => toggle(o, g.nodeId))} style={{ ...quietLink, color: muted, fontWeight: 500, padding: '6px 0 2px' }}>
+                  {openNodes.has(g.nodeId)
+                    ? `Hide the other work orders on ${g.nodeLabel}`
+                    : `Show the other ${g.tasks.length} work order${g.tasks.length === 1 ? '' : 's'} on ${g.nodeLabel}`}
+                </button>
+                {openNodes.has(g.nodeId) && g.tasks.map((t) => taskRow(t, 'record-other-task'))}
               </div>
             ))}
             {adding === 'task' && onAddTask && (() => {
@@ -326,14 +396,24 @@ function RequirementRecordComponent(props: RequirementRecordProps) {
               <button type="button" data-testid="record-add-test" disabled={locked || busy} title={locked ? lockNote : undefined} style={locked ? disabledLink : handLink} onClick={() => { setAdding('test'); setDraft(''); setExpected(''); setFormCriterion(null); }}>Add by hand</button>)}
             {record.tests.length === 0 && adding !== 'test' && recEmpty('Nothing proves this requirement yet.')}
             {record.tests.map((t) => (
-              <div key={t.rowId} data-testid="record-test" data-status={t.status} title={t.expected ?? undefined} style={recRow}>
-                <span data-testid="record-test-status" aria-label={t.status} style={tick(testTone(t.status))}>{testGlyph(t.status)}</span>
-                <span style={rt}>{t.name}{t.source === 'manual' && yours('record-test-yours')}</span>
-                <span style={rm}>
-                  {t.type}{t.type && t.criterion ? ' · ' : ''}
-                  {t.criterion && <span data-testid="record-test-criterion" title="The criterion this test proves">proves {t.criterion}</span>}
-                </span>
-                <span style={{ ...rid, color: testTone(t.status) }}>{t.testId}</span>
+              <div key={t.rowId} data-testid="record-test" data-status={t.status} style={{ padding: '5px 0', borderBottom: `1px solid ${c.border}40` }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: '10px' }}>
+                  <span data-testid="record-test-status" aria-label={t.status} style={tick(testTone(t.status))}>{testGlyph(t.status)}</span>
+                  <span data-testid="record-test-name" style={{ ...rt, whiteSpace: 'normal' }}>{t.name}{t.source === 'manual' && yours('record-test-yours')}</span>
+                  <span style={rm}>
+                    {t.type}{t.type && t.criterion ? ' · ' : ''}
+                    {t.criterion && <span data-testid="record-test-criterion" title="The criterion this test proves">proves {t.criterion}</span>}
+                  </span>
+                  <span style={{ ...rid, color: testTone(t.status) }}>{t.testId}</span>
+                </div>
+                {(t.description || t.expected || t.path || t.statements.length > 0) && (
+                  <div data-testid="record-test-details" style={{ padding: '3px 68px 0 22px', display: 'flex', flexDirection: 'column', gap: '1px' }}>
+                    {t.statements.map((line, i) => docLine(line, i, 'record-test-statement'))}
+                    {t.description && <div data-testid="record-test-description" style={detailLine}>{inlineMarks(t.description, codeMark)}</div>}
+                    {t.expected && <div data-testid="record-test-expected" style={detailLine}><span style={{ fontWeight: 600 }}>Expects</span> {inlineMarks(t.expected, codeMark)}</div>}
+                    {t.path && <div data-testid="record-test-path" title="The test's file" style={{ ...identifier(muted), fontWeight: 500, overflowWrap: 'anywhere' }}>{t.path}{t.framework ? ` · ${t.framework}` : ''}</div>}
+                  </div>
+                )}
               </div>
             ))}
             {adding === 'test' && (() => {
@@ -371,8 +451,9 @@ function RequirementRecordComponent(props: RequirementRecordProps) {
           <section data-testid="record-code">
             {recHead('Code', record.files.length ? `${record.files.length} file${record.files.length === 1 ? '' : 's'}` : 'none')}
             {record.files.length === 0 && recEmpty('Nothing in the repository carries this yet.')}
-            {record.files.map((f) => (
-              <div key={f.path} data-testid="record-file" style={recRow}>
+            {/* R3: the logic files bound to its nodes, then the test files its results name */}
+            {record.files.map((f, i) => (
+              <div key={f.path} data-testid="record-file" data-test-file={f.isTest ? 'true' : undefined} style={{ ...recRow, ...(f.isTest && i > 0 && !record.files[i - 1].isTest ? { borderTop: `1px solid ${c.border}` } : {}) }}>
                 <span style={tick('#c07ae0')}>{'●'}</span>
                 <span style={{ ...rt, ...identifier(c.text), fontWeight: 600 }} title={f.path}>{f.path}</span>
                 <span style={rm}>{[fileLanguage?.(f.path), f.touchedBy.join(', ')].filter(Boolean).join(' · ')}</span>

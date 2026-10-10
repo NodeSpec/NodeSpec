@@ -425,6 +425,7 @@ export async function buildBoardModel(supabase: any, projectId: string, args: {
       (args.graph.artifacts ?? {}) as Record<string, { kind: string; path?: string; metadata?: Record<string, unknown> | null }>,
       r.requirement_id,
       r.name ?? r.requirement_id,
+      r.id,
     );
     return {
       requirementId: r.requirement_id,

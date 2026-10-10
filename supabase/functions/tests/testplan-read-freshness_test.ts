@@ -54,7 +54,7 @@ const mapped = [{ nodeId: N1, label: "Camera", role: "backend-service", technolo
 
 Deno.test("fingerprint match: the stored plan serves untouched, no regeneration", () => {
   const g = graphWith(undefined);
-  const fp = computeTestContextFingerprint(REQ, mapped, [], g, undefined, CATALOGS);
+  const fp = computeTestContextFingerprint(REQ, mapped, [], g, CATALOGS);
   const stored = withStoredPlan(g, "# Test Plan: STORED BODY\n## Test Strategy\ncustom", fp);
   const r = ensureTestDocumentForRequirement(stored, CATALOGS, REQ, [N1]);
   assertEquals(r.isNew, false);
@@ -65,7 +65,7 @@ Deno.test("fingerprint match: the stored plan serves untouched, no regeneration"
 Deno.test("fingerprint moved (schema landed): the read regenerates NOW and keeps Test Strategy edits", () => {
   // Stored fingerprint was computed while the contract had NO schema...
   const before = graphWith(undefined);
-  const oldFp = computeTestContextFingerprint(REQ, mapped, [], before, undefined, CATALOGS);
+  const oldFp = computeTestContextFingerprint(REQ, mapped, [], before, CATALOGS);
   // ...then the schema landed in the live graph.
   const after = withStoredPlan(
     graphWith({ openapi: "3.1.0", paths: { "/hint": {} } }),

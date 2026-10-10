@@ -4,6 +4,8 @@
 // and the no-op path when everything is fresh.
 import { handleGenerateTaskDocs } from '../mcp-server/tools/tasks.ts';
 import { PatchOperationSchema } from '../_shared/patch-schema.ts';
+import { applyPatches } from '../_shared/core-engine/patch-engine.ts';
+import { createEmptyGraph } from '../_shared/core-engine/utils.ts';
 import { FakeSupabase, assert, assertEquals, completeRole } from './helpers.ts';
 
 const PROJECT = { id: '11111111-1111-4111-8111-111111111111', name: 'Bench' };
@@ -106,8 +108,15 @@ Deno.test('generate_task_docs: leaf AND hosting container get packets; logical g
   assertEquals(addArtifact.metadata.actorId, 'task-generator');
   assert(String(addArtifact.payload.path).startsWith('.nodespec/tasks/'), 'packet lives in the namespaced home');
 
-  const link = insert.patches.find((p) => p.patch.type === 'update_node')!.patch;
-  assertEquals(link.payload.id, N_API, 'artifact linked onto the node');
+  // AL.28: each create links its node. No whole-list update_node rides along;
+  // applied in one call, as the server's Auto accept applies it, each node holds
+  // its own doc once.
+  assertEquals(insert.patches.map((p) => p.patch.type), ['add_artifact', 'add_artifact']);
+  const boxDocId = insert.patches.find((p) => p.patch.payload.nodeId === N_BOX)!.patch.payload.id;
+  const applied = applyPatches({ ...createEmptyGraph(), nodes: graph().nodes }, insert.patches.map((p) => p.patch) as never);
+  assert(applied.success, JSON.stringify(applied.error));
+  assertEquals(applied.graph!.nodes[N_API].artifacts, [addArtifact.payload.id]);
+  assertEquals(applied.graph!.nodes[N_BOX].artifacts, [boxDocId]);
 
   for (const p of insert.patches) {
     assert(PatchOperationSchema.safeParse(p.patch).success, `${p.patch.type} valid for the apply pipeline`);

@@ -105,7 +105,7 @@ Deno.test('AD.2b: a new binding takes its content from git at accept, and never 
   assertEquals(add.payload.content, GIT_CONTENT_SENTINEL);
   assertEquals(add.payload.metadata.contentSource, { type: 'git', ref: HEAD, optional: true });
   assertEquals(GIT_CONTENT_SENTINEL, MCP_SENTINEL, 'the server\'s two sentinels agree');
-  const app = Deno.readTextFileSync(new URL('../../../src/ui/utils/proposal-git-content.ts', import.meta.url));
+  const app = Deno.readTextFileSync(new URL('../../../core/src/proposal-git-content.ts', import.meta.url));
   assert(app.includes(`export const GIT_CONTENT_SENTINEL = '${GIT_CONTENT_SENTINEL}'`), 'and the app\'s');
 });
 

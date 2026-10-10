@@ -6,46 +6,13 @@ import { withoutPorts } from '@nodespec/core/without-ports.js';
 import { conflictsSince, describeConflicts } from '@nodespec/core/patch-targets.js';
 import { acceptLeaseRefusal, leasesFromRows, type LeaseRowLite } from '../components/ideation/node-leases.js';
 import { resolveContractFields } from '@nodespec/core/interaction-resolution.js';
+import { proposeArchitectureMappings } from '@nodespec/core/architecture-mapping.js';
 
-const STOP_WORDS = new Set([
-  'the', 'a', 'an', 'and', 'or', 'is', 'are', 'was', 'were', 'be', 'been',
-  'for', 'to', 'of', 'in', 'on', 'at', 'by', 'with', 'from', 'as', 'it',
-  'that', 'this', 'can', 'will', 'should', 'must', 'may', 'all', 'each',
-  'has', 'have', 'had', 'not', 'but', 'if', 'its', 'into', 'new', 'any',
-]);
-
-function extractMatchTerms(...inputs: string[]): string[] {
-  const terms = new Set<string>();
-  for (const input of inputs) {
-    if (!input) continue;
-    const tokens = input
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, ' ')
-      .split(/\s+/)
-      .filter(t => t.length > 2 && !STOP_WORDS.has(t));
-    for (const t of tokens) terms.add(t);
-  }
-  return Array.from(terms);
-}
-
-function computeOverlapScore(nodeTerms: string[], reqTerms: string[]): number {
-  const reqSet = new Set(reqTerms);
-  let exact = 0;
-  let partial = 0;
-  for (const nt of nodeTerms) {
-    if (reqSet.has(nt)) {
-      exact++;
-    } else {
-      for (const rt of reqTerms) {
-        if ((nt.length >= 4 && rt.includes(nt)) || (rt.length >= 4 && nt.includes(rt))) {
-          partial++;
-          break;
-        }
-      }
-    }
-  }
-  return exact * 2 + partial;
-}
+/** The server's CLAIM_LAPSES_MS (mcp-server/tools/approvals.ts): a claim
+ *  older than this is a decider that died, and it lapses. */
+export const CLAIM_LAPSES_MS = 5 * 60_000;
+export const PROPOSAL_BEING_DECIDED = 'This proposal is being decided right now: Auto is applying it, or it is being accepted or rejected elsewhere. Look again in a moment.';
+const PROPOSAL_DECIDED_MEANWHILE = 'This proposal was decided meanwhile. Look again to see how.';
 
 export class ProposalService {
   constructor(private persistence: PersistenceService) {}
@@ -147,35 +114,27 @@ export class ProposalService {
   /** AE.12: a rejection in the canvas carries the person's reason. Stored as
    *  metadata.resolveNote, the key the server's resolve_proposal writes and
    *  get_proposal_status serves as reviewNote, with who decided (app). */
-  async rejectProposal(proposalId: string, reason: string): Promise<AIProposal> {
+  async rejectProposal(proposalId: string, reason: string): Promise<void> {
     const note = reason.trim();
     if (!note) throw new Error('A rejection needs a reason: the agent reads it.');
+    // AL.24: a reject takes the proposal first, so it never lands on an
+    // accept in flight (a person's elsewhere, or Auto's on the server).
+    const at = await this.claimProposal(proposalId);
     const client = this.persistence.getSupabaseClient();
     const { data } = await client
       .from('ai_proposals')
       .select('metadata')
       .eq('id', proposalId)
       .maybeSingle();
-    await client
+    const { data: done, error } = await client
       .from('ai_proposals')
-      .update({ metadata: { ...((data?.metadata as Record<string, unknown>) ?? {}), resolveNote: note, resolvedBy: 'app' } })
-      .eq('id', proposalId);
-    return this.updateProposalStatus(proposalId, 'rejected');
-  }
-
-  /** UX-1.1a: audit stamp for auto-approved proposals — merged into metadata
-   *  after acceptProposal succeeds, so the history answers "who applied this". */
-  async markAutoApproved(proposalId: string): Promise<void> {
-    const client = this.persistence.getSupabaseClient();
-    const { data } = await client
-      .from('ai_proposals')
-      .select('metadata')
-      .eq('id', proposalId)
-      .maybeSingle();
-    await client
-      .from('ai_proposals')
-      .update({ metadata: { ...((data?.metadata as Record<string, unknown>) ?? {}), autoApproved: { at: new Date().toISOString() } } })
-      .eq('id', proposalId);
+      .update({ status: 'rejected', reviewed_at: at, metadata: { ...((data?.metadata as Record<string, unknown>) ?? {}), resolveNote: note, resolvedBy: 'app' } })
+      .eq('id', proposalId).eq('status', 'pending').eq('reviewed_at', at)
+      .select('id');
+    if (error || !Array.isArray(done) || done.length === 0) {
+      await this.releaseClaim(proposalId, at);
+      throw new Error(error?.message ?? PROPOSAL_DECIDED_MEANWHILE);
+    }
   }
 
   async updateProposalPatches(proposalId: string, patches: ProposalPatch[]): Promise<AIProposal> {
@@ -722,7 +681,78 @@ export class ProposalService {
     };
   }
 
-  async acceptProposal(proposalId: string): Promise<void> {
+  /** AL.24: a person's accept takes the proposal first, as the server's
+   *  Auto accept and resolve_proposal do (the same reviewed_at claim), so
+   *  the two can never both apply it, and a reject cannot land on top of an
+   *  accept in flight. `decided` is the person's per-patch choice, written
+   *  under the claim. A failed accept lets the proposal go again. */
+  async acceptProposal(proposalId: string, decided?: ProposalPatch[]): Promise<void> {
+    const claim = { at: await this.claimProposal(proposalId) };
+    try {
+      if (decided) {
+        const { data, error } = await this.persistence.getSupabaseClient().from('ai_proposals')
+          .update({ patches: decided }).eq('id', proposalId).eq('status', 'pending').eq('reviewed_at', claim.at).select('id');
+        if (error || !Array.isArray(data) || data.length === 0) throw new Error(error?.message ?? PROPOSAL_DECIDED_MEANWHILE);
+      }
+      await this.applyClaimed(proposalId, claim);
+    } catch (err) {
+      await this.releaseClaim(proposalId, claim.at);
+      throw err;
+    }
+  }
+
+  /** AL.24: take a pending proposal to decide it: reviewed_at is set only
+   *  while it is unclaimed, or its claim is older than CLAIM_LAPSES_MS (a
+   *  decider that died). Mirrors claimProposal in the server's approvals.ts. */
+  private async claimProposal(proposalId: string): Promise<string> {
+    const client = this.persistence.getSupabaseClient();
+    const at = new Date().toISOString();
+    const take = async (current: string | null) => {
+      const q = client.from('ai_proposals').update({ reviewed_at: at }).eq('id', proposalId).eq('status', 'pending');
+      const { data, error } = await (current === null ? q.is('reviewed_at', null) : q.eq('reviewed_at', current)).select('id');
+      if (error) throw new Error(`Could not take the proposal to decide it: ${error.message}`);
+      return Array.isArray(data) && data.length > 0;
+    };
+    if (await take(null)) return at;
+    const { data: cur } = await client.from('ai_proposals').select('status, reviewed_at').eq('id', proposalId).maybeSingle();
+    const row = cur as { status?: string; reviewed_at?: string | null } | null;
+    if (!row) throw new Error('Proposal not found');
+    if (row.status !== 'pending') throw new Error(`This proposal is already ${row.status === 'merged' ? 'applied' : row.status}: it was decided meanwhile.`);
+    if (row.reviewed_at && Date.parse(row.reviewed_at) > Date.now() - CLAIM_LAPSES_MS) throw new Error(PROPOSAL_BEING_DECIDED);
+    if (await take(row.reviewed_at ?? null)) return at;
+    throw new Error(PROPOSAL_BEING_DECIDED);
+  }
+
+  /** Let a proposal go, only while this claim still holds it. */
+  private async releaseClaim(proposalId: string, at: string): Promise<void> {
+    try {
+      await this.persistence.getSupabaseClient().from('ai_proposals')
+        .update({ reviewed_at: null }).eq('id', proposalId).eq('status', 'pending').eq('reviewed_at', at);
+    } catch { /* the claim lapses on its own */ }
+  }
+
+  /** Move the claim forward before the long steps, so it never lapses under a
+   *  large accept. False when it is no longer this accept's. */
+  private async renewClaim(proposalId: string, claim: { at: string }): Promise<boolean> {
+    const next = new Date().toISOString();
+    const { data } = await this.persistence.getSupabaseClient().from('ai_proposals')
+      .update({ reviewed_at: next }).eq('id', proposalId).eq('status', 'pending').eq('reviewed_at', claim.at).select('id');
+    if (!Array.isArray(data) || data.length === 0) return false;
+    claim.at = next;
+    return true;
+  }
+
+  private async markMergedUnderClaim(proposalId: string, at: string): Promise<void> {
+    const now = new Date().toISOString();
+    const { data: marked } = await this.persistence.getSupabaseClient().from('ai_proposals')
+      .update({ status: 'merged', reviewed_at: now, merged_at: now })
+      .eq('id', proposalId).eq('status', 'pending').eq('reviewed_at', at).select('id');
+    if (!Array.isArray(marked) || marked.length === 0) {
+      console.warn('[ProposalService] the changes landed, but the proposal was decided elsewhere meanwhile; its status is left as that decision');
+    }
+  }
+
+  private async applyClaimed(proposalId: string, claim: { at: string }): Promise<void> {
     console.log('[ProposalService] Accepting proposal:', proposalId);
 
     // Get proposal
@@ -879,7 +909,7 @@ export class ProposalService {
     // fixing the ref/pushing the commit and re-accepting resumes cleanly) —
     // a bindings-only artifact must never land empty or as the sentinel.
     {
-      const { collectGitContentRequests, injectGitContent } = await import('../utils/proposal-git-content.js');
+      const { collectGitContentRequests, injectGitContent } = await import('@nodespec/core/proposal-git-content.js');
       const { requests, malformed } = collectGitContentRequests(approvedPatches);
       if (malformed.length > 0) {
         throw new Error(`Bindings-only artifacts carry no usable git reference: ${malformed.join(', ')} — resubmit the proposal with content_ref (or inline content)`);
@@ -1066,6 +1096,10 @@ export class ProposalService {
       newAddNodes: newPatches.filter(p => p.type === 'add_node').length,
     });
 
+    // AL.24: nothing has landed yet; the claim is moved forward so it holds
+    // through the writes and the rebuild.
+    if (!(await this.renewClaim(proposalId, claim))) throw new Error(PROPOSAL_BEING_DECIDED);
+
     // Insert patches in batches to avoid Supabase row limits
     if (newPatches.length > 0) {
       const APPEND_BATCH_SIZE = 500;
@@ -1125,8 +1159,8 @@ export class ProposalService {
 
     console.log('[ProposalService] Marking proposal as merged');
 
-    // Mark as merged
-    await this.updateProposalStatus(proposalId, 'merged');
+    // Mark as merged, under this accept's claim only (AL.24).
+    await this.markMergedUnderClaim(proposalId, claim.at);
 
     // V3 AD.1 (D5, D8): a baseline riding on this proposal moves now that
     // its design is on the canvas: an adopt at connect sets the branch's
@@ -1239,87 +1273,30 @@ export class ProposalService {
 
       console.log(`[ProposalService] Found ${requirements.length} requirements`);
 
-      const allNodePatches = proposal.patches.filter((p: any) => p.patch?.type === 'add_node');
-      const implementationNodeIds = allNodePatches
-        .filter((p: any) => {
-          const nodeType = p.patch.payload?.type || '';
-          const containerDef = getContainerTypeById(nodeType);
-          const isContainer = !!containerDef;
-          if (isContainer) {
-            console.log(`[ProposalService] Filtering out container node: ${p.patch.payload?.label} (${nodeType})`);
-          }
-          return !isContainer;
-        })
-        .map((p: any) => p.patch.payload?.id)
-        .filter(Boolean);
-
-      console.log(`[ProposalService] Extracted ${implementationNodeIds.length} implementation node IDs (filtered ${allNodePatches.length - implementationNodeIds.length} container nodes)`);
-      const nodeIds = implementationNodeIds;
-
       // Check for existing mappings to avoid duplicates
       const existingMappingsResult = await mappingsRepo.getBySpecification(specificationId);
-      const existingNodeIds = new Set(
+      const existingNodeIds = new Set<string>(
         existingMappingsResult.success
           ? existingMappingsResult.data.map((m: any) => m.nodeId)
           : []
       );
 
-      // Build a lookup of node payloads from proposal patches for heuristic matching
-      const nodePayloadMap = new Map<string, { label: string; type: string; technology?: string }>();
-      for (const p of allNodePatches) {
-        const payload = p.patch?.payload;
-        if (payload?.id) {
-          nodePayloadMap.set(payload.id, {
-            label: payload.label || '',
-            type: payload.type || '',
-            technology: payload.technology || '',
-          });
-        }
-      }
-
-      // Create mappings: heuristic keyword matching between nodes and requirements
-      const mappings: any[] = [];
-      for (const nodeId of nodeIds) {
-        if (existingNodeIds.has(nodeId)) continue;
-
-        const nodeInfo = nodePayloadMap.get(nodeId);
-        if (!nodeInfo) continue;
-
-        const nodeTerms = extractMatchTerms(
-          nodeInfo.label,
-          nodeInfo.type,
-          nodeInfo.technology || ''
-        );
-        if (nodeTerms.length === 0) continue;
-
-        let bestMatch: { reqId: string; score: number } | null = null;
-
-        for (const req of requirements) {
-          const reqTerms = extractMatchTerms(
-            req.name,
-            req.description || '',
-            req.category,
-            ...(req.acceptanceCriteria || []).map((ac: { text: string }) => ac.text)
-          );
-
-          const score = computeOverlapScore(nodeTerms, reqTerms);
-          if (score > 0 && (!bestMatch || score > bestMatch.score)) {
-            bestMatch = { reqId: req.id, score };
-          }
-        }
-
-        if (bestMatch && bestMatch.score >= 2) {
-          const confidence = Math.min(0.9, 0.5 + bestMatch.score * 0.1);
-          mappings.push({
-            specificationId,
-            requirementId: bestMatch.reqId,
-            nodeId,
-            mappingType: 'implements' as const,
-            confidence: Math.round(confidence * 100) / 100,
-            notes: `Auto-mapped by keyword heuristic (score: ${bestMatch.score})`,
-          });
-        }
-      }
+      // Heuristic keyword matching between nodes and requirements (AL.24: in
+      // core, so the server's Auto accept maps the same way).
+      const nodes = proposal.patches
+        .filter((p: any) => p.patch?.type === 'add_node')
+        .map((p: any) => ({
+          id: p.patch.payload?.id,
+          label: p.patch.payload?.label || '',
+          type: p.patch.payload?.type || '',
+          technology: p.patch.payload?.technology || '',
+        }));
+      const mappings = proposeArchitectureMappings(
+        nodes,
+        requirements.map((req) => ({ id: req.id, name: req.name, description: req.description, category: req.category, acceptanceCriteria: req.acceptanceCriteria })),
+        existingNodeIds,
+        (type) => !!getContainerTypeById(type),
+      ).map((m) => ({ specificationId, ...m }));
 
       if (mappings.length > 0) {
         console.log(`[ProposalService] Creating ${mappings.length} specification_mappings...`);

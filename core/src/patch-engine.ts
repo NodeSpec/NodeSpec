@@ -533,7 +533,7 @@ export function validatePatch(graph: Graph, patch: PatchOperation, options: Vali
     case 'delete_contract': {
       // Contract deletion is idempotent - if contract doesn't exist, it's a no-op
       // Check for referencing edges AND ports only if contract exists (ports keep a
-      // contract alive too — port.contractId is a first-class reference)
+      // contract alive too, port.contractId is a first-class reference)
       if (graph.contracts[validPatch.payload.id]) {
         const referencingEdges = Object.entries(graph.edges).filter(
           ([_, edge]) => edge.contractId === validPatch.payload.id
@@ -1050,7 +1050,7 @@ export function validatePatch(graph: Graph, patch: PatchOperation, options: Vali
 /**
  * Of the candidate contract ids, return those no longer referenced by any edge's
  * contractId or any node port's contractId. Scoped GC: callers pass only the contracts
- * touched by the edges they just removed — deliberately-created standalone contracts
+ * touched by the edges they just removed, deliberately-created standalone contracts
  * (add_contract awaiting wiring) are never candidates and always survive.
  */
 function collectOrphanedContracts(graph: Graph, candidateContractIds: Iterable<string>): string[] {
@@ -1101,6 +1101,10 @@ function applyPatchToGraph(graph: Graph, patch: PatchOperation): void {
 
     case 'update_node': {
       const sanitizedChanges = { ...patch.payload.changes };
+      // AL.28: the node keeps its own list, never the patch's. A file added
+      // to this node later in the same batch was pushed into the patch
+      // itself, and the server then wrote that changed patch to the log.
+      if (Array.isArray(sanitizedChanges.artifacts)) sanitizedChanges.artifacts = [...sanitizedChanges.artifacts];
       if (sanitizedChanges.ports && sanitizedChanges.ports.length > 0) {
         sanitizedChanges.ports = sanitizedChanges.ports.map(port => {
           if (port.contractId && !graph.contracts[port.contractId]) {
@@ -1152,7 +1156,7 @@ function applyPatchToGraph(graph: Graph, patch: PatchOperation): void {
       }
 
       // GC contracts orphaned by the edge cascade (no other edge or port references
-      // them). Contracts referenced elsewhere — or never referenced by these edges —
+      // them). Contracts referenced elsewhere, or never referenced by these edges,
       // are untouched.
       for (const contractId of collectOrphanedContracts(graph, removedEdgeContractIds)) {
         delete graph.contracts[contractId];
@@ -1619,6 +1623,51 @@ function topologicalSortNodes(nodePatches: PatchOperation[]): PatchOperation[] {
   return sorted;
 }
 
+/**
+ * AL.28: a link filed in the same batch as the file it links. The phase
+ * order puts every update_node (21) before every add_artifact (30), so an
+ * update_node naming a new file in changes.artifacts was checked against a
+ * graph without it: MISSING_ARTIFACT, and nothing applied. The app's replays
+ * fell back to filed order and recovered; the server's Auto accept and its
+ * replay of the branch log had no fallback, so get_test_plan's proposal
+ * could never apply there. Such an update_node now runs right after the
+ * last add_artifact in the batch that creates a file it names. Every other
+ * patch keeps its place.
+ */
+function linksAfterTheirFiles(sorted: PatchOperation[]): PatchOperation[] {
+  const createdAt = new Map<string, number>();
+  sorted.forEach((patch, i) => {
+    if (patch.type === 'add_artifact' && typeof patch.payload?.id === 'string') createdAt.set(patch.payload.id, i);
+  });
+  if (createdAt.size === 0) return sorted;
+
+  const after = new Map<number, PatchOperation[]>();
+  const held = new Set<number>();
+  sorted.forEach((patch, i) => {
+    if (patch.type !== 'update_node') return;
+    const linked = (patch.payload?.changes as { artifacts?: unknown } | undefined)?.artifacts;
+    if (!Array.isArray(linked)) return;
+    let last = -1;
+    for (const id of linked) {
+      const at = typeof id === 'string' ? createdAt.get(id) : undefined;
+      if (at !== undefined && at > last) last = at;
+    }
+    if (last <= i) return;
+    held.add(i);
+    if (!after.has(last)) after.set(last, []);
+    after.get(last)!.push(patch);
+  });
+  if (held.size === 0) return sorted;
+
+  const out: PatchOperation[] = [];
+  sorted.forEach((patch, i) => {
+    if (!held.has(i)) out.push(patch);
+    const links = after.get(i);
+    if (links) out.push(...links);
+  });
+  return out;
+}
+
 export function sortPatchesByDependencyOrder(patches: PatchOperation[]): PatchOperation[] {
   const patchOrder: Record<string, number> = {
     // Phase 0: Graph-level metadata (no entity dependencies)
@@ -1703,5 +1752,5 @@ export function sortPatchesByDependencyOrder(patches: PatchOperation[]): PatchOp
     }
   }
 
-  return sorted;
+  return linksAfterTheirFiles(sorted);
 }

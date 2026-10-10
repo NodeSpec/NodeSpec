@@ -146,7 +146,11 @@ Deno.test('AL.10 report_test_results: three moves refuse with nothing recorded; 
     sb.script('rpc', 'apply_criteria_ops', MOVED);
     sb.script('specification_requirements', 'select', reqRow([{ text: 'Pickup slots show' }], T1));
   }
+  const started = Date.now();
   const r = await report(sb);
+  // Bench 2026-10-10: the tries are spread out (at least 100 ms, then 200 ms), so
+  // another report's burst of writes ends before the last one.
+  assert(Date.now() - started >= 280, `the three tries took ${Date.now() - started} ms`);
   assertEquals(r.success, false);
   assert(String(r.error).endsWith('No result was recorded; report again.'), String(r.error));
   assertEquals(sb.callsTo('test_cases', 'update').length, 0, 'no status written');

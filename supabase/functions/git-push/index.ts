@@ -12,6 +12,7 @@ import { evaluateUnbaselinedPush, loadLatestSnapshot, computeStalePaths, runDrif
 import { readRange, foreignPaths, planAttempt, baselineAfterPush, gitBlobSha, gitLabChanges, gitLabActions, gitLabBranchMoved, type PushPlan } from "../_shared/push-plan.ts";
 import { fetchFullGitLabTree, gitlabProjectPath } from "../_shared/git-tree.ts";
 import { refreshTaskPackets } from "../_shared/packet-freshness.ts";
+import { savePushRefresh, type PushSaveResult } from "../mcp-server/tools/push-save.ts";
 import { BINDINGS_PATH } from "../_shared/binding-manifest.ts";
 import { mayUseIntegration, INTEGRATION_NOT_FOUND } from "../_shared/git-access.ts";
 import { advanceBaseline, ancestryFor } from "../_shared/baseline.ts";
@@ -381,7 +382,7 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    const { graph: snapGraph, error: snapshotError } = await loadLatestSnapshot(serviceClient, branch.id);
+    const { graph: snapGraph, error: snapshotError, patchSequence } = await loadLatestSnapshot(serviceClient, branch.id);
     if (snapshotError) throw snapshotError;
     const graph = snapGraph || {};
 
@@ -392,6 +393,14 @@ Deno.serve(async (req: Request) => {
     const packetRefresh = await refreshTaskPackets(serviceClient, projectId, graph, branch.id);
     if (packetRefresh.error) {
       console.warn(`[git-push] packet freshness gate failed (pushing snapshot content as-is): ${packetRefresh.error}`);
+    }
+    // AL.29: NodeSpec keeps what it pushes. What the gate regenerated is filed as
+    // one proposal on the sequence this push read, and applied at Auto.
+    let packetsSaved: PushSaveResult | null = null;
+    try {
+      packetsSaved = await savePushRefresh(serviceClient, { projectId, branchId: branch.id, userId, saves: packetRefresh.saves ?? [], baseSequence: patchSequence });
+    } catch (saveErr) {
+      packetsSaved = { proposalId: null, status: "not filed", reason: `The regenerated files were pushed but not saved (${saveErr instanceof Error ? saveErr.message : String(saveErr)}). Push again to save them.` };
     }
 
     const { files, diagnostics } = extractArtifactFiles(graph);
@@ -828,6 +837,7 @@ Deno.serve(async (req: Request) => {
       // C4 step 2: the freshness gate covers test plans too, in the same observability shape.
       testPlansRefreshed: packetRefresh.testPlansRefreshed,
       ...(packetRefresh.testPlansRefreshedPaths.length ? { refreshedTestPlans: packetRefresh.testPlansRefreshedPaths } : {}),
+      ...(packetsSaved ? { packetsSaved } : {}),
     });
   } catch (error: any) {
     console.error("Git push error:", error);

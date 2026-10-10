@@ -32,7 +32,7 @@ const mount = (rows: unknown[], api: Record<string, unknown> = {}) => {
   const view = render(
     <WorkflowsSpace projectId="p1" graph={f.graph} lanesApi={lanesApi as never} outcomesApi={outcomesApi as never} constraintsApi={constraintsApi as never}
       requirements={f.band} chains={f.chains} candidateActions={{ promote: ok(), settle: ok(), dismiss: ok() } as never} onDeleteRequirement={ok()}
-      team={false} proposals={{ count: 0, firstId: null }} onOpenChanges={vi.fn()} onOpenRequirement={vi.fn()} onOpenArchitecture={vi.fn()} />,
+      team={false} onOpenRequirement={vi.fn()} onOpenArchitecture={vi.fn()} />,
   );
   return { ...view, constraintsApi };
 };

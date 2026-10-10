@@ -10,9 +10,10 @@ import { loadExplodeContext, requireNodeLeases } from './explode-context.ts';
 import type { SupabaseClient } from "jsr:@supabase/supabase-js@2";
 import { PatchOperationSchema, UPDATE_CHANGE_KEYS, UNKNOWN_CHANGE_KEY_HINTS } from "../../_shared/patch-schema.ts";
 import { SpecPatchOperationSchema, SPEC_PATCH_KIND } from "../../_shared/spec-patch-schema.ts";
-import { loadAutomationPolicy, strictestRoute, pendingOverlap, overlapRefusal, requirementRefsOf } from "./change-router.ts";
-import { acceptSpecBatch, type ProposalRow } from "./approvals.ts";
-import { resolveSpecForProject } from "./requirements.ts";
+import { loadAutomationPolicy, strictestRoute, pendingOverlap, overlapRefusal } from "./change-router.ts";
+import { type ProposalRow } from "./approvals.ts";
+import { autoApply } from "./auto-apply.ts";
+import { filerFromCaller } from "./auto-filer.ts";
 import { bindHoldsToProposal, nodeLeasesOfOthers } from './checkouts.ts';
 import { getEffectiveTier, getProjectTier } from "../../_shared/deployment.ts";
 import { isWorkflowOp, requireWorkflows, workflowsAllowed, OUTCOME_ON_PROJECT_NOTE, isConstraintOp, requireConstraints } from "../../_shared/workflow-gate.ts";
@@ -25,7 +26,7 @@ import { constraintsCarried, judgeProposal, type ProposalJudgement } from "../..
 import { SIGNAL_ASKS } from "../../_shared/constraint-rules.ts";
 import { normalizeProposedNode, type NodeNormalizationNote } from "../../_shared/catalog-node-normalization.ts";
 import type { AuthResult, MCPResponse } from "../shared.ts";
-import { checkScope, resolveProjectByName, resolveBranchId, UUID_RE, memberRoleFor, roleAtLeast, actorLabel, credentialOf, canApprove } from "../shared.ts";
+import { checkScope, resolveProjectByName, resolveBranchId, UUID_RE, memberRoleFor, roleAtLeast, actorLabel, credentialOf } from "../shared.ts";
 
 // C1 (docs/WORK_LOOP_PLAN.md): content-by-reference. When the AI has already
 // pushed the file bodies to git, an add_artifact may omit `content` and pass
@@ -720,60 +721,54 @@ export function mixedPlanes(patches: ReadonlyArray<{ type?: unknown }>): string 
 }
 
 /** AL.6 (owner 2026-10-01: "if I set autonomy to Auto it doesn't still hold
- *  a requirement/outcome/constraint proposal in waiting"). A proposal used
- *  to file and wait whatever the lanes said. Now, when every lane a batch of
- *  spec changes touches is at Auto (no promotion, settle, or changed or
- *  retired constraint among them: those stay the person's), no requirement
- *  it changes is confirmed, and the filing account may decide the project
- *  (its owner), it applies as it files, through the same accept a person's
- *  would run, and reads as applied in Proposals. Null when it waits. */
+ *  a requirement/outcome/constraint proposal in waiting") and AL.24 (owner
+ *  2026-10-05: Auto must not need the app open): when every lane a batch
+ *  touches is at Auto it applies as it files, on either plane, through the
+ *  one Auto rule (auto-apply.ts), and reads as applied in Proposals. When it
+ *  waits anyway, the reason is recorded on it and the routing note says it.
+ *  Null when it waits. */
 async function autoApplyIfAllowed(
   supabase: SupabaseClient,
   auth: AuthResult,
   projectId: string,
   role: string | undefined,
-  routing: { route: string } | null,
+  routing: { route: string; note: string } | null,
+  policy: Awaited<ReturnType<typeof loadAutomationPolicy>> | null,
   row: ProposalRow,
 ): Promise<MCPResponse | null> {
-  if (routing?.route !== 'apply') return null;
-  const patches = (row.patches ?? []).map((e) => ((e ?? {}) as { patch?: { type?: unknown; payload?: unknown } }).patch ?? {});
-  if (patches.length === 0 || !patches.every((p) => isSpecOpType(p.type))) return null;
-  // the vision is the person's to confirm: a batch that sets it (the 9.6
-  // context proposal among them) waits at every autonomy level
-  if (patches.some((p) => p.type === 'update_vision')) return null;
-  // the caller's own rights: a key that may only propose, or a member's agent, waits
-  if (!checkScope(auth, 'write') || !role || !canApprove(role as never, auth.authMethod as never)) return null;
-  // a confirmed requirement always waits for the person (as on a direct write)
-  const refs = [...new Set(patches.flatMap((p) => requirementRefsOf(p as never)))];
-  if (refs.length > 0) {
-    const spec = await resolveSpecForProject(supabase, projectId);
-    if (spec) {
-      const ids = refs.filter((r) => UUID_RE.test(r)), codes = refs.filter((r) => !UUID_RE.test(r));
-      const rows: Array<{ confirmed?: boolean }> = [];
-      if (ids.length > 0) rows.push(...(((await supabase.from('specification_requirements').select('confirmed').eq('specification_id', spec.id).in('id', ids)).data ?? []) as Array<{ confirmed?: boolean }>));
-      if (codes.length > 0) rows.push(...(((await supabase.from('specification_requirements').select('confirmed').eq('specification_id', spec.id).in('requirement_id', codes)).data ?? []) as Array<{ confirmed?: boolean }>));
-      if (rows.some((r) => r.confirmed === true)) return null;
-    }
+  if (!routing || !policy) return null; // the policy could not be read: it waits as filed
+  const outcome = await autoApply(supabase, projectId, row, filerFromCaller(auth, role), policy);
+  if (!outcome || outcome.status === 'busy') return null;
+  if (outcome.status === 'waiting') {
+    routing.note = `Every lane this batch touches is at Auto, but it waits for the user: ${outcome.reason}`;
+    return null;
   }
-  const decided = await acceptSpecBatch(supabase, auth, projectId, row, { by: 'auto', note: null });
-  const data = (decided.data ?? {}) as Record<string, unknown>;
+  const n = (row.patches ?? []).length;
+  const where = outcome.plane === 'canvas' ? ' to the canvas' : '';
+  if (outcome.status === 'applied') {
+    return {
+      success: true,
+      data: {
+        ...outcome.data, proposalId: row.id, status: 'merged', routed: 'applied',
+        message: `Every lane this batch touches is at Auto, so it applied${where} as it filed (${n} change${n === 1 ? '' : 's'}); Proposals shows it as applied.`,
+      },
+    };
+  }
   return {
-    ...decided,
-    data: {
-      ...data,
-      proposalId: row.id,
-      routed: decided.success ? 'applied' : (data.status === 'partial' ? 'partial' : 'set aside'),
-      message: decided.success
-        ? `Every lane this batch touches is at Auto, so it applied as it filed (${patches.length} change${patches.length === 1 ? '' : 's'}); Proposals shows it as applied.`
-        : String(decided.error ?? 'It did not apply.'),
-    },
-  };
+    success: false,
+    error: outcome.reason,
+    data: { ...(outcome.data ?? {}), proposalId: row.id, ...(outcome.status === 'set aside' ? { status: 'rejected' } : {}), routed: outcome.status, message: outcome.reason },
+  } as MCPResponse;
 }
 
 export async function handleProposePatches(
   supabase: SupabaseClient,
   auth: AuthResult,
-  args: { project_id: string; branch_id?: string; patches?: unknown[]; intents?: unknown[]; explanations?: string[]; external_agent?: string; content_ref?: string; proposal_id?: string; finalize?: boolean; expected_patch_count?: number; base_sequence?: number }
+  args: { project_id: string; branch_id?: string; patches?: unknown[]; intents?: unknown[]; explanations?: string[]; external_agent?: string; content_ref?: string; proposal_id?: string; finalize?: boolean; expected_patch_count?: number; base_sequence?: number },
+  // AL.24: what resolve_change records on its proposal as it files (never
+  // from the tool's arguments), so an apply under Auto at filing resolves
+  // the change card it answers.
+  internal: { reconcilesChange?: { eventId: string; commitSha: string } } = {},
 ): Promise<MCPResponse> {
   if (!checkScope(auth, 'propose')) {
     return { success: false, error: 'Insufficient permissions: propose scope required' };
@@ -1088,9 +1083,10 @@ export async function handleProposePatches(
   // strictest lane among the ops), so a level-0 lane is not a surprise at
   // review time. Best-effort: a policy read failure never blocks a proposal.
   let routing: { route: string; lane: string | null; note: string } | null = null;
+  let policy: Awaited<ReturnType<typeof loadAutomationPolicy>> | null = null;
   try {
     const patchTypes = normalizedPatches.map((p) => String(p.type));
-    const policy = await loadAutomationPolicy(supabase, projectId);
+    policy = await loadAutomationPolicy(supabase, projectId);
     const strictest = strictestRoute(policy, patchTypes);
     routing = {
       route: strictest.route,
@@ -1099,7 +1095,7 @@ export async function handleProposePatches(
         ? `The ${strictest.lane} lane is at level 0 (off) for direct writes. This proposal still files for review; the owner decides.`
         : strictest.route === 'propose'
           ? `The ${strictest.lane} lane reviews every change; this proposal is the expected path.`
-          : 'Every lane this batch touches is at Auto, but this proposal waits for review: Auto applies a batch of requirement, outcome, workflow and constraint changes filed with write access by the owner\'s agent, touching no confirmed requirement and not setting the vision.',
+          : 'Every lane this batch touches is at Auto: it applies as it files when the owner\'s agent filed it with write access, unless it promotes, settles or changes a constraint, touches a confirmed requirement, or is an import or a load from git.',
     };
   } catch {
     routing = null;
@@ -1263,7 +1259,7 @@ export async function handleProposePatches(
     }
     // AL.6: a finalized session under Auto applies as one batch.
     if (finalizing) {
-      const auto = await autoApplyIfAllowed(supabase, auth, projectId, projectRole, routing,
+      const auto = await autoApplyIfAllowed(supabase, auth, projectId, projectRole, routing, policy,
         { id: sess.id, status: 'pending', source_branch_id: branchId, patches: combined as ProposalRow['patches'], metadata: { ...sess.metadata } });
       if (auto) return auto;
     }
@@ -1449,6 +1445,7 @@ export async function handleProposePatches(
     ...(isChunkedStart
       ? { chunkedSession: { startedAt: new Date().toISOString(), calls: 1, expiresAt: sessionExpiresAt } }
       : {}),
+    ...(internal.reconcilesChange ? { reconcilesChange: internal.reconcilesChange } : {}),
   };
   const { error: proposalError } = await supabase
     .from('ai_proposals')
@@ -1473,7 +1470,7 @@ export async function handleProposePatches(
 
   // AL.6: under Auto, a batch of spec changes applies as it files.
   if (!isChunkedStart) {
-    const auto = await autoApplyIfAllowed(supabase, auth, projectId, projectRole, routing,
+    const auto = await autoApplyIfAllowed(supabase, auth, projectId, projectRole, routing, policy,
       { id: proposalId, status: 'pending', source_branch_id: branchId, patches: proposalPatches as ProposalRow['patches'], metadata: insertedMetadata });
     if (auto) return auto;
   }

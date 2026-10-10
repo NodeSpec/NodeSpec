@@ -1,5 +1,5 @@
 /*
-  M6 — THE provider-inference table. Mirrored at
+  M6, THE provider-inference table. Mirrored at
   supabase/functions/_shared/provider-inference.ts (the enums.ts pattern).
 
   There were FOUR copies, and they had already drifted:
@@ -7,8 +7,8 @@
     core/src/container-types.ts                     prefixes + family  (correct)
     supabase/.../role-registry.ts                   prefixes + family  (correct; its own
                                                     comment admitted the duplication)
-    supabase/.../mcp-context-assembly.ts            prefixes ONLY      — returned `firebase`
-    supabase/.../task-document-generator.ts         prefixes ONLY      — returned `firebase`
+    supabase/.../mcp-context-assembly.ts            prefixes ONLY      (returned `firebase`)
+    supabase/.../task-document-generator.ts         prefixes ONLY      (returned `firebase`)
 
   The family mapping is not cosmetic. N4.7 merged the Firebase family INTO Google Cloud
   (owner: "firebase is part of GCP and should not be its own thing"), so a firebase-* child
@@ -26,11 +26,11 @@
 */
 
 /** Ids carrying one of these prefixes are provider-branded managed services.
- *  Every platform ROLE with a `provider` column must have its prefix here — the 4g-2
+ *  Every platform ROLE with a `provider` column must have its prefix here, the 4g-2
  *  hosting platforms shipped without theirs (recorded looseness: vercel-edge stayed
  *  droppable in foreign containers), closed 2026-08-05. */
 /*  'supabase-' is DELIBERATELY ABSENT (owner bug report 2026-08-05, applying the 4g-3
- *  two-lane ruling): supabase-* technologies are LANE-NEUTRAL — inside the
+ *  two-lane ruling): supabase-* technologies are LANE-NEUTRAL, inside the
  *  'Supabase (Managed)' platform they are the managed services; inside Docker or any
  *  self-managed container they are the OSS components (GoTrue, storage-api,
  *  edge-runtime). PLACEMENT decides the lane, so nothing may auto-parent them into a
@@ -51,13 +51,13 @@ export function normalizeProviderFamily(provider: string | null | undefined): st
   return provider ? (PROVIDER_PREFIX_FAMILY[provider] ?? provider) : null;
 }
 
-// ── N8.5″(d): DB-authority — the catalog SEEDS the family set at load ─────────────────
+// ── N8.5″(d): DB-authority, the catalog SEEDS the family set at load ─────────────────
 // KNOWN_PROVIDER_PREFIXES becomes the FLOOR, not the ceiling. At catalog load, every
 // distinct non-null `node_roles.provider` value registers its prefix, so a NEW provider
-// works with ZERO code changes — one catalog row with a stamped provider column — while
+// works with ZERO code changes, one catalog row with a stamped provider column, while
 // inference for everything the static floor covers is STRUCTURALLY unchanged (union
 // semantics: registration can only add prefixes, never remove or re-map existing ones).
-// GROWTH FENCE: do not add entries to the static list — new providers land as catalog
+// GROWTH FENCE: do not add entries to the static list, new providers land as catalog
 // rows. The static floor drops entirely once the owner's live export confirms every
 // family has a provider-stamped role (one-line SQL check; N11-adjacent).
 const registeredPrefixes = new Map<string, string>();
@@ -109,7 +109,7 @@ export const PROVIDER_ID_ALIASES: Record<string, string> = {
 };
 
 /** The provider family for an id, prefix OR registered alias. This is the one every caller
- *  wants — `inferProviderFromId` alone misses the four pre-prefix strays. */
+ *  wants, `inferProviderFromId` alone misses the four pre-prefix strays. */
 export function providerFamilyForId(id: string): string | null {
   return inferProviderFromId(id) ?? PROVIDER_ID_ALIASES[id] ?? null;
 }

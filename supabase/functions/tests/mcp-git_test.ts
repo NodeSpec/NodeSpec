@@ -100,8 +100,7 @@ Deno.test('resolve_change: accepted with patches files the proposal first; the c
   sb.script('ai_runs', 'insert', { data: null, error: null });
   sb.script('branches', 'insert', { data: null, error: null });
   sb.script('ai_proposals', 'insert', { data: null, error: null });
-  // the proposal names the change; the card records the proposal
-  sb.script('ai_proposals', 'select', { data: { metadata: { source: 'mcp-server' } }, error: null });
+  // the card records the proposal
   sb.script('git_change_events', 'update', { data: [{ id: 'e1' }], error: null });
 
   const patch = { type: 'add_node', payload: { id: '22222222-2222-2222-2222-222222222222', type: 'backend-service', label: 'API' } };
@@ -110,11 +109,13 @@ Deno.test('resolve_change: accepted with patches files the proposal first; the c
   const data = r.data as { resolution: string; proposalId: string; message: string };
   assertEquals(data.resolution, 'pending', 'the change stays pending');
   assertEquals(sb.callsTo('ai_proposals', 'insert').length, 1, 'a proposal was created via the proposals bucket');
-  const inserted = sb.callsTo('ai_proposals', 'insert')[0].payload as { id: string };
+  const inserted = sb.callsTo('ai_proposals', 'insert')[0].payload as { id: string; metadata: { reconcilesChange: unknown; source: string } };
   assertEquals(data.proposalId, inserted.id);
-  const named = sb.callsTo('ai_proposals', 'update')[0].payload as { metadata: { reconcilesChange: unknown; source: string } };
-  assertEquals(named.metadata.reconcilesChange, { eventId: 'e1', commitSha: 'abc' }, 'the proposal names the change as read');
-  assertEquals(named.metadata.source, 'mcp-server', 'and keeps its own metadata');
+  // AL.24: the proposal names the change as it files, so an apply under Auto
+  // at filing resolves the card it answers; nothing is written to it after.
+  assertEquals(inserted.metadata.reconcilesChange, { eventId: 'e1', commitSha: 'abc' }, 'the proposal names the change as read');
+  assertEquals(inserted.metadata.source, 'mcp-server', 'and keeps its own metadata');
+  assertEquals(sb.callsTo('ai_proposals', 'update').length, 0);
   const stamped = sb.callsTo('git_change_events', 'update');
   assertEquals(stamped.length, 1);
   const stamp = stamped[0].payload as Record<string, unknown>;

@@ -64,6 +64,7 @@ export const EDITS: readonly SurfaceEdit[] = [
   { tool: 'get_project_context', feature: 'workflow_space', find: 'the constraints and vision sentences that apply', replace: 'the vision sentences that apply' },
   { tool: 'propose_patches', feature: 'workflow_space', schemaFind: ' | set_contract_schema | place_on_step,', replace: ' | set_contract_schema,' },
   { tool: 'propose_patches', feature: 'workflow_space', find: 'spec ops (requirements, outcomes, workflows, constraints)', replace: 'spec ops (requirements, outcomes)' },
+  { tool: 'propose_patches', feature: 'workflow_space', find: 'a promotion, a settle, a changed or retired constraint, or a confirmed requirement still waits', replace: 'a promotion, a settle or a confirmed requirement still waits' },
   { tool: 'get_outcome_board', feature: 'workflow_space', find: '(prompt data — what a workflow should achieve)', replace: '(prompt data: what the product should achieve)' },
   { tool: 'get_outcome_board', feature: 'workflow_space', find: ', the workflow steps it maps to', replace: '' },
   {

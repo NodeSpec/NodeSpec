@@ -2,24 +2,27 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Turnstile, type TurnstileInstance } from '@marsidev/react-turnstile';
 import { AnimatedBackground } from './AnimatedBackground.js';
-import { BlueprintGrid } from './BlueprintGrid.js';
-import { ProductTourSection } from './ProductTourSection.js';
-import { TechEcosystemSection } from './TechEcosystemSection.js';
-import { OssCommunitySection } from './OssCommunitySection.js';
-import { PricingSection } from '../pricing/PricingSection.js';
+import { EnterpriseContactModal } from '../pricing/EnterpriseContactModal.js';
+import { TeamWaitlistModal } from '../pricing/TeamWaitlistModal.js';
 import { isHostedEdition, isEnterpriseEdition, editionLabel } from '../../config/edition.js';
 import { getSupabaseClient } from '../../../persistence/supabase/client.js';
 import { usePageSeo } from '../../hooks/usePageSeo.js';
-import { HOME_SEO, ORGANIZATION_JSON_LD, WEBSITE_JSON_LD, softwareApplicationJsonLd } from '../../../seo/site-meta.js';
-import logoLight from '../../assets/lightmode_nodal.png';
+import { HOME_SEO, homeJsonLd } from '../../../seo/site-meta.js';
+// The landing draws the mark at 150px at most, so it loads a 450 by 300 copy
+// (10KB) rather than the 1536 by 1024 original (195KB) that was its largest paint.
+import logoLight from '../../assets/lightmode_nodal_450.webp';
+import { HERO, NAV_LINKS, PRODUCT_VIEWS, type LandingAction, type LandingLink, type ProductView } from './landing/landing-content.js';
+import { ProductFrameDesktop, ProductFramePhone } from './landing/ProductFrame.js';
+import {
+  Cta, ControlSection, FaqSection, FinalCtaSection, HowItWorksSection, LandingFooter, LandingPricingSection,
+  OpenSourceSection, SlantEdge, SoftEdge, StartPointsSection, UseCasesSection, WaveUp,
+} from './landing/LandingSections.js';
+import './landing/landing.css';
 
 const PRIMARY = '#8B8FE6';
 const PRIMARY_LIGHT = 'rgba(139, 143, 230, 0.15)';
 const PRIMARY_BORDER = 'rgba(139, 143, 230, 0.2)';
 const PRIMARY_SHADOW = 'rgba(139, 143, 230, 0.3)';
-const FOOTER_LINK = { color: 'inherit', textDecoration: 'none' } as const;
-
-type NavItem = { label: string; path?: string; action?: () => void };
 
 interface AuthLandingPageProps {
   onSignIn: (email: string, password: string, captchaToken?: string) => Promise<{ mfaRequired: boolean; factorId?: string } | void>;
@@ -36,7 +39,12 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
   const navigate = useNavigate();
   const pendingPlan = searchParams.get('plan');
   // Self-hosted builds have no marketing hero — they boot straight to sign-in.
-  const defaultMode = pendingPlan ? 'signup' : isHostedEdition ? 'hero' : 'signin';
+  // ?signup and ?signin open those forms (AL.26): the Claude sign-in page sends
+  // someone new to sign up and a just-made account to sign in, and the template
+  // pages link to /?signup=templates.
+  const defaultMode = pendingPlan || searchParams.has('signup')
+    ? 'signup'
+    : searchParams.has('signin') || !isHostedEdition ? 'signin' : 'hero';
   const [mode, setMode] = useState<'hero' | 'signin' | 'signup' | 'forgot' | 'mfa' | 'mfa-enroll'>(defaultMode);
   // Post-2026-08-10 pricing: no purchasable SaaS plans, so a ?plan= deep link no
   // longer selects a tier — it just lands the visitor on the signup form.
@@ -54,16 +62,19 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
   const [captchaStatus, setCaptchaStatus] = useState<'loading' | 'ready' | 'solved' | 'error' | 'skipped'>('loading');
   const [captchaKey, setCaptchaKey] = useState(0);
   const [, setCaptchaFailCount] = useState(0);
-  const [navDark, setNavDark] = useState(false);
+  const [view, setView] = useState<ProductView>('flows');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [talkOpen, setTalkOpen] = useState(false);
+  const [waitlistOpen, setWaitlistOpen] = useState(false);
   const [mfaFactorId, setMfaFactorId] = useState('');
   const [mfaCode, setMfaCode] = useState('');
   const [mfaQrCode, setMfaQrCode] = useState('');
   const [mfaSecret, setMfaSecret] = useState('');
   const captchaRef = useRef<TurnstileInstance>(null);
   const heroRef = useRef<HTMLElement>(null);
-  const featuresRef = useRef<HTMLDivElement>(null);
-  const pricingRef = useRef<HTMLDivElement>(null);
-  const contactRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // The form lives at the top of the page, under the sticky nav.
+  const toTop = () => scrollRef.current?.scrollTo?.({ top: 0, behavior: 'smooth' });
   // The hardcoded fallback key is domain-locked to nodespec.io — on a
   // self-hosted origin it can only fail. There, captcha runs solely when the
   // deployment sets its own key (selfhost.env), matching config.toml where
@@ -79,33 +90,29 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
   }, [oauthMfaFactorId]);
 
   // One source with the prerendered homepage (src/seo/site-meta.ts), so a crawler
-  // that runs no script and one that does read the same page (AJ.2).
+  // that runs no script and one that does read the same page (AJ.2). Only the
+  // managed site presents itself to search engines.
   usePageSeo({
     ...HOME_SEO,
     path: '/',
-    jsonLd: [
-      { id: 'org-schema', data: ORGANIZATION_JSON_LD },
-      { id: 'website-schema', data: WEBSITE_JSON_LD },
-      { id: 'software-schema', data: softwareApplicationJsonLd() },
-    ],
+    jsonLd: isHostedEdition ? homeJsonLd().map((data, i) => ({ id: `home-schema-${i}`, data })) : [],
   });
 
-  useEffect(() => {
-    const root = document.querySelector('[data-landing-scroll]');
-    if (!root) return;
-    const onScroll = () => {
-      setNavDark(root.scrollTop > window.innerHeight * 0.7);
-    };
-    root.addEventListener('scroll', onScroll, { passive: true });
-    return () => root.removeEventListener('scroll', onScroll);
+  // Every "Get Started" and "Sign In" on the page opens the form at the top of it.
+  const openForm = useCallback((next: 'signup' | 'signin') => {
+    if (next === 'signup') setSelectedPlanId(null);
+    setMode(next);
+    setError(null);
+    setMenuOpen(false);
+    toTop();
   }, []);
 
-  const handleRequestSignUp = useCallback((planId?: string) => {
-    setSelectedPlanId(planId ?? null);
-    setMode('signup');
-    setError(null);
-    heroRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, []);
+  const onAction = useCallback((action: LandingAction) => {
+    setMenuOpen(false);
+    if (action === 'signup' || action === 'signin') openForm(action);
+    else if (action === 'talk') setTalkOpen(true);
+    else setWaitlistOpen(true);
+  }, [openForm]);
 
   useEffect(() => {
     if (!signupSuccess) return;
@@ -233,10 +240,6 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
     navigate(path);
   };
 
-  const scrollTo = (ref: React.RefObject<HTMLDivElement | null>) => {
-    ref.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
   const showForm = mode !== 'hero' || signupSuccess;
 
   const input: React.CSSProperties = {
@@ -257,146 +260,36 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
     fontWeight: 600,
   };
 
-  const renderHeroContent = () => (
-    <div className="landing-hero-content" style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: showForm ? 'flex-start' : 'center',
-      justifyContent: 'center',
-      textAlign: showForm ? 'left' : 'center',
-      maxWidth: '560px',
-    }}>
-      <img
-        src={logoLight}
-        alt="NodeSpec"
-        className="landing-hero-logo"
-        style={{
-          height: showForm ? '120px' : '160px',
-          width: 'auto',
-          marginBottom: '28px',
-          filter: `drop-shadow(0 8px 24px ${PRIMARY_SHADOW}) drop-shadow(0 4px 12px rgba(99, 102, 241, 0.15))`,
-        }}
-      />
+  // The hero's words: the managed site's headline and description, or a self-hosted
+  // build's wordmark and edition (it has no marketing). `compact` sits beside the form.
+  const renderHeroCopy = (compact: boolean) => (
+    <>
+      <img src={logoLight} alt="" className="lp-hero-logo" width={225} height={150} />
       {!isHostedEdition ? (
-        // Self-hosted editions: an elegant wordmark + edition label — no
-        // marketing copy, no tour, just the brand over the same hero backdrop.
         <>
-          <div className="landing-hero-headline" style={{
-            fontSize: '44px',
-            fontWeight: 700,
-            color: '#1f2937',
-            letterSpacing: '-0.02em',
-            lineHeight: '1.2',
-            marginBottom: '14px',
-          }}>
-            NodeSpec
-          </div>
-          <div style={{
-            fontSize: '15px',
-            fontWeight: 600,
-            color: PRIMARY,
-            letterSpacing: '0.34em',
-            textTransform: 'uppercase',
-            paddingLeft: '0.34em',
-          }}>
-            {editionLabel}
-          </div>
+          <div className="lp-hero-title">NodeSpec</div>
+          <div className="lp-edition">{editionLabel}</div>
         </>
       ) : (
-      <>
-      <h1 className="landing-hero-headline" style={{
-        fontSize: showForm ? '28px' : '36px',
-        fontWeight: 600,
-        color: '#1f2937',
-        letterSpacing: '-0.01em',
-        lineHeight: '1.3',
-        margin: '0 0 12px',
-      }}>
-        The AI System Design <span style={{ color: PRIMARY }}>Governance Platform</span> for Agents
-      </h1>
-      <p className="landing-hero-slogan" style={{
-        fontSize: showForm ? '17px' : '20px',
-        fontWeight: 600,
-        color: '#374151',
-        letterSpacing: '-0.01em',
-        margin: '0 0 20px',
-      }}>
-        <span style={{ color: PRIMARY }}>Design</span> Smarter, <span style={{ color: PRIMARY }}>Build</span> Better, <span style={{ color: PRIMARY }}>Ship</span> Faster
-      </p>
-      </>
-      )}
-      {isHostedEdition && (
-      <div className="landing-hero-subtitle" style={{
-        fontSize: showForm ? '16px' : '19px',
-        fontWeight: 400,
-        color: '#5c6474',
-        lineHeight: '1.6',
-        maxWidth: '600px',
-        marginBottom: showForm ? '0' : '40px',
-        animation: showForm ? undefined : 'ns-rise .9s cubic-bezier(.16,1,.3,1) .32s both',
-      }}>
-        One living model of your system. Requirements, architecture, deployment and tests stay connected, so your team and your AI agents build from the same source of truth.
-      </div>
-      )}
-      {isHostedEdition && !showForm && (
         <>
-          <div className="landing-hero-cta-row" style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-            <button
-              onClick={() => { setSelectedPlanId(null); setMode('signup'); setError(null); }}
-              style={{
-                padding: '16px 32px',
-                fontSize: '16px',
-                fontWeight: 700,
-                border: 'none',
-                borderRadius: '12px',
-                cursor: 'pointer',
-                background: `linear-gradient(135deg, ${PRIMARY}, #a78bfa)`,
-                color: '#ffffff',
-                transition: 'all 0.2s',
-                boxShadow: `0 4px 16px ${PRIMARY_SHADOW}`,
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.transform = 'translateY(-2px)';
-                e.currentTarget.style.boxShadow = `0 8px 24px rgba(139, 143, 230, 0.4)`;
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.transform = 'translateY(0)';
-                e.currentTarget.style.boxShadow = `0 4px 16px ${PRIMARY_SHADOW}`;
-              }}
-            >
-              Get Started Free
-            </button>
-            <button
-              onClick={() => scrollTo(pricingRef)}
-              style={{
-                padding: '16px 32px',
-                fontSize: '16px',
-                fontWeight: 600,
-                border: `1px solid ${PRIMARY_BORDER}`,
-                borderRadius: '12px',
-                cursor: 'pointer',
-                background: 'transparent',
-                color: '#374151',
-                transition: 'all 0.2s',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = PRIMARY_LIGHT;
-                e.currentTarget.style.borderColor = PRIMARY;
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-                e.currentTarget.style.borderColor = PRIMARY_BORDER;
-              }}
-            >
-              View Plans
-            </button>
-          </div>
-          <div style={{ marginTop: '16px', fontSize: '13px', color: '#9ca3af' }}>
-            No credit card required
-          </div>
+          <h1 className="lp-hero-title">{HERO.title}</h1>
+          <p className="lp-hero-slogan">
+            {HERO.slogan.map(([word, rest]) => <span key={word}><span>{word}</span>{rest}</span>)}
+          </p>
+          <p className="lp-hero-desc">{HERO.description}</p>
+          {!compact && (
+            <>
+              <div className="lp-cta-row">
+                <Cta link={HERO.primary} className="lp-btn lp-btn-primary" onAction={onAction} followLink={followLink} />
+                <Cta link={HERO.secondary} className="lp-btn lp-btn-secondary" onAction={onAction} followLink={followLink} />
+              </div>
+              <p className="lp-hero-note">{HERO.note}</p>
+              <span aria-hidden="true" className="lp-cue" />
+            </>
+          )}
         </>
       )}
-    </div>
+    </>
   );
 
   const renderMfaVerification = () => (
@@ -1159,464 +1052,108 @@ export function AuthLandingPage({ onSignIn, onSignUp, onVerifyMfa, onOAuthSignIn
     </div>
   );
 
+  // A self-hosted build has no marketing: its nav keeps the docs (and the template
+  // gallery on Enterprise), and nothing below the form renders.
+  const navLinks: LandingLink[] = isHostedEdition
+    ? NAV_LINKS
+    : [...(isEnterpriseEdition ? [{ label: 'Browse Templates', href: '/templates' }] : []), { label: 'MCP Docs', href: '/docs/mcp' }];
+
+  const form = mode === 'mfa' ? renderMfaVerification() : mode === 'mfa-enroll' ? renderMfaEnrollment() : signupSuccess ? renderConfirmation() : renderForm();
+
   return (
-    <div data-landing-scroll style={{
-      width: '100vw',
-      height: '100vh',
-      overflowY: 'auto',
-      overflowX: 'hidden',
-      background: 'linear-gradient(135deg, #f8f9fc 0%, #fafbfc 50%, #f5f6fa 100%)',
-    }}>
-      <nav className="landing-nav" style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '12px 32px',
-        zIndex: 50,
-        backgroundColor: navDark ? 'rgba(15, 17, 23, 0.92)' : 'rgba(255, 255, 255, 0.85)',
-        backdropFilter: 'blur(12px)',
-        WebkitBackdropFilter: 'blur(12px)',
-        borderBottom: navDark ? '1px solid rgba(139, 143, 230, 0.08)' : '1px solid rgba(229, 231, 235, 0.6)',
-        transition: 'background-color 0.3s ease, border-color 0.3s ease',
-      }}>
-        <div
-          style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}
-          onClick={() => { setMode(isHostedEdition ? 'hero' : 'signin'); setError(null); }}
-        >
-          <img src={logoLight} alt="NodeSpec" style={{ height: '36px', width: 'auto', filter: navDark ? 'brightness(10)' : 'none', transition: 'filter 0.3s ease' }} />
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <div className="landing-nav-links" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-            {(isHostedEdition ? [
-              { label: 'Features', action: () => scrollTo(featuresRef) },
-              { label: 'Browse Templates', path: '/templates' },
-              { label: 'Blog', path: '/blog' },
-              { label: 'MCP Docs', path: '/docs/mcp' },
-              { label: 'Pricing', action: () => scrollTo(pricingRef) },
-              { label: 'Government', path: '/government' },
-              { label: 'Contact', action: () => scrollTo(contactRef) },
-            ] as NavItem[] : [
-              // Self-hosted: no marketing pages. Enterprise keeps the gallery.
-              ...(isEnterpriseEdition ? [{ label: 'Browse Templates', path: '/templates' }] : []),
-              { label: 'MCP Docs', path: '/docs/mcp' },
-            ] as NavItem[]).map(item => (
-              // A page is a real link, so a crawler can follow it (AJ.2); a section of this page scrolls.
-              <a
-                key={item.label}
-                href={item.path ?? undefined}
-                style={{
-                  fontSize: '14px',
-                  fontWeight: 500,
-                  color: navDark ? '#8a8f9e' : '#4b5563',
-                  cursor: 'pointer',
-                  padding: '8px 16px',
-                  borderRadius: '8px',
-                  transition: 'all 0.15s ease',
-                  whiteSpace: 'nowrap',
-                  textDecoration: 'none',
-                }}
-                onClick={(e) => {
-                  if (item.path) followLink(e, item.path);
-                  else item.action?.();
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.color = navDark ? '#E6E9EF' : '#111827';
-                  e.currentTarget.style.backgroundColor = PRIMARY_LIGHT;
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.color = navDark ? '#8a8f9e' : '#4b5563';
-                  e.currentTarget.style.backgroundColor = 'transparent';
-                }}
-              >
-                {item.label}
-              </a>
-            ))}
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '8px', paddingLeft: '8px', borderLeft: navDark ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(0,0,0,0.1)' }}>
-            <a
-              href="https://github.com/NodeSpec/NodeSpec"
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="NodeSpec on GitHub"
-              style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                width: '32px', height: '32px', borderRadius: '7px', color: navDark ? '#8a8f9e' : '#6b7280',
-                textDecoration: 'none', transition: 'color 0.15s, background-color 0.15s',
-              }}
-              onMouseEnter={e => {
-                (e.currentTarget as HTMLAnchorElement).style.color = navDark ? '#E6E9EF' : '#111827';
-                (e.currentTarget as HTMLAnchorElement).style.backgroundColor = PRIMARY_LIGHT;
-              }}
-              onMouseLeave={e => {
-                (e.currentTarget as HTMLAnchorElement).style.color = navDark ? '#8a8f9e' : '#6b7280';
-                (e.currentTarget as HTMLAnchorElement).style.backgroundColor = 'transparent';
-              }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
-              </svg>
-            </a>
-            <a
-              href="https://x.com/NodeSpec"
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="NodeSpec on X"
-              style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                width: '32px', height: '32px', borderRadius: '7px', color: navDark ? '#8a8f9e' : '#6b7280',
-                textDecoration: 'none', transition: 'color 0.15s, background-color 0.15s',
-              }}
-              onMouseEnter={e => {
-                (e.currentTarget as HTMLAnchorElement).style.color = navDark ? '#E6E9EF' : '#111827';
-                (e.currentTarget as HTMLAnchorElement).style.backgroundColor = PRIMARY_LIGHT;
-              }}
-              onMouseLeave={e => {
-                (e.currentTarget as HTMLAnchorElement).style.color = navDark ? '#8a8f9e' : '#6b7280';
-                (e.currentTarget as HTMLAnchorElement).style.backgroundColor = 'transparent';
-              }}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.747l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
-              </svg>
-            </a>
-            <a
-              href="https://www.linkedin.com/company/nodespec/"
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="NodeSpec on LinkedIn"
-              style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                width: '32px', height: '32px', borderRadius: '7px', color: navDark ? '#8a8f9e' : '#6b7280',
-                textDecoration: 'none', transition: 'color 0.15s, background-color 0.15s',
-              }}
-              onMouseEnter={e => {
-                (e.currentTarget as HTMLAnchorElement).style.color = navDark ? '#E6E9EF' : '#111827';
-                (e.currentTarget as HTMLAnchorElement).style.backgroundColor = PRIMARY_LIGHT;
-              }}
-              onMouseLeave={e => {
-                (e.currentTarget as HTMLAnchorElement).style.color = navDark ? '#8a8f9e' : '#6b7280';
-                (e.currentTarget as HTMLAnchorElement).style.backgroundColor = 'transparent';
-              }}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
-              </svg>
-            </a>
-          </div>
-          <span
-            className="landing-nav-signin"
-            style={{
-              fontSize: '14px',
-              fontWeight: 600,
-              color: PRIMARY,
-              cursor: 'pointer',
-              padding: '8px 20px',
-              borderRadius: '8px',
-              border: `1px solid ${PRIMARY_BORDER}`,
-              transition: 'all 0.15s ease',
-              marginLeft: '8px',
-              backgroundColor: 'transparent',
-            }}
-            onClick={() => { setMode('signin'); setError(null); heroRef.current?.scrollIntoView({ behavior: 'smooth' }); }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = PRIMARY_LIGHT;
-              e.currentTarget.style.borderColor = PRIMARY;
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = 'transparent';
-              e.currentTarget.style.borderColor = PRIMARY_BORDER;
-            }}
+    <div ref={scrollRef} data-landing-scroll className="lp-root" style={{ width: '100vw', height: '100vh', overflowY: 'auto', overflowX: 'hidden' }}>
+      <header className="lp-nav">
+        <nav aria-label="Main" className="lp-nav-inner">
+          <a
+            href="/"
+            className="lp-nav-home"
+            aria-label="NodeSpec home"
+            onClick={(e) => { e.preventDefault(); setMode(isHostedEdition ? 'hero' : 'signin'); setError(null); setMenuOpen(false); toTop(); }}
           >
-            Sign In
-          </span>
-          <span
-            className="landing-nav-signin"
-            style={{
-              fontSize: '14px',
-              fontWeight: 700,
-              color: '#ffffff',
-              cursor: 'pointer',
-              padding: '9px 20px',
-              borderRadius: '8px',
-              marginLeft: '8px',
-              background: `linear-gradient(135deg, ${PRIMARY}, #a78bfa)`,
-              boxShadow: `0 4px 14px ${PRIMARY_SHADOW}`,
-              transition: 'transform 0.15s ease, box-shadow 0.15s ease',
-              whiteSpace: 'nowrap',
-            }}
-            onClick={() => { setSelectedPlanId(null); setMode('signup'); setError(null); heroRef.current?.scrollIntoView({ behavior: 'smooth' }); }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.transform = 'translateY(-1px)';
-              e.currentTarget.style.boxShadow = '0 8px 22px rgba(139, 143, 230, 0.45)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.transform = 'translateY(0)';
-              e.currentTarget.style.boxShadow = `0 4px 14px ${PRIMARY_SHADOW}`;
-            }}
-          >
-            Get Started
-          </span>
+            <img src={logoLight} alt="NodeSpec" width={54} height={36} />
+          </a>
+          <div className="lp-nav-links">
+            {navLinks.map((link) => <Cta key={link.label} link={link} onAction={onAction} followLink={followLink} />)}
+          </div>
+          <div className="lp-nav-actions">
+            <button type="button" className="lp-nav-signin" onClick={() => openForm('signin')}>Sign In</button>
+            <button type="button" className="lp-nav-start" onClick={() => openForm('signup')}>Get Started</button>
+            <button
+              type="button"
+              className="lp-nav-menu"
+              aria-label={menuOpen ? 'Close menu' : 'Open menu'}
+              aria-expanded={menuOpen}
+              aria-controls="lp-nav-panel"
+              onClick={() => setMenuOpen((open) => !open)}
+            >
+              <svg width="18" height="14" viewBox="0 0 18 14" aria-hidden="true"><path d="M1 1h16M1 7h16M1 13h16" stroke="#1f2937" strokeWidth="1.8" strokeLinecap="round" /></svg>
+            </button>
+          </div>
+        </nav>
+        <div id="lp-nav-panel" className="lp-nav-panel" data-open={menuOpen}>
+          {navLinks.map((link) => (
+            <Cta key={link.label} link={link} onAction={onAction} followLink={(e, path) => { setMenuOpen(false); followLink(e, path); }} />
+          ))}
+          <button type="button" className="lp-nav-signin" onClick={() => openForm('signin')}>Sign In</button>
         </div>
-      </nav>
+      </header>
 
-      <section ref={heroRef} className="landing-hero hero-mesh" style={{
-        position: 'relative',
-        width: '100%',
-        minHeight: '100vh',
-        display: 'flex',
-        overflow: 'hidden',
-        paddingTop: '56px',
-        // Explicit light gradient so the hero's bottom edge lands exactly on
-        // #f4f5fb — the tone the curved divider below picks up.
-        background: 'linear-gradient(168deg, #f8f9fc 0%, #fafbfc 50%, #f4f5fb 100%)',
-      }}>
-        {/* faint blueprint grid, masked to a soft ellipse behind the headline */}
-        <div style={{
-          position: 'absolute',
-          inset: 0,
-          backgroundImage: 'linear-gradient(rgba(139,143,230,.07) 1px, transparent 1px), linear-gradient(90deg, rgba(139,143,230,.07) 1px, transparent 1px)',
-          backgroundSize: '52px 52px',
-          maskImage: 'radial-gradient(ellipse 80% 55% at 50% 30%, #000 22%, transparent 76%)',
-          WebkitMaskImage: 'radial-gradient(ellipse 80% 55% at 50% 30%, #000 22%, transparent 76%)',
-          pointerEvents: 'none',
-        }} />
-        <div style={{
-          position: 'absolute',
-          top: '-12%',
-          left: '50%',
-          width: '880px',
-          height: '580px',
-          transform: 'translateX(-50%)',
-          background: 'radial-gradient(ellipse at center, rgba(139,143,230,.16) 0%, transparent 68%)',
-          filter: 'blur(30px)',
-          pointerEvents: 'none',
-        }} />
-        <AnimatedBackground />
-        {!showForm && (
-          <div style={{ position: 'absolute', bottom: '28px', left: '50%', transform: 'translateX(-50%)', zIndex: 1 }}>
-            <span style={{
-              display: 'block',
-              width: '1px',
-              height: '26px',
-              background: 'linear-gradient(180deg, transparent, rgba(139,143,230,.7))',
-              animation: 'ns-cue 2.2s ease-in-out infinite',
-            }} />
+      <main>
+        <section ref={heroRef} className="lp-hero" aria-label="NodeSpec">
+          <div className="lp-hero-bg" aria-hidden="true">
+            <div className="lp-hero-grid" />
+            <div className="lp-hero-glow" />
+            <AnimatedBackground />
           </div>
-        )}
+          {showForm ? (
+            <div className="lp-hero-form">
+              <div className="lp-hero-form-copy">{renderHeroCopy(true)}</div>
+              <div className="lp-hero-form-panel">{form}</div>
+            </div>
+          ) : (
+            <>
+              <div className="lp-hero-inner">{renderHeroCopy(false)}</div>
+              <div className="lp-frame-wrap">
+                <div className="lp-chips" role="group" aria-label="Product view">
+                  {PRODUCT_VIEWS.map((pv) => (
+                    <button
+                      key={pv.id}
+                      type="button"
+                      aria-pressed={view === pv.id}
+                      className={pv.id === 'arch' ? 'lp-chip-wide' : undefined}
+                      onClick={() => setView(pv.id)}
+                    >
+                      {pv.label}
+                    </button>
+                  ))}
+                </div>
+                <ProductFrameDesktop view={view} onView={setView} />
+                <ProductFramePhone view={view} onView={setView} />
+              </div>
+            </>
+          )}
+        </section>
 
-        {!showForm ? (
-          <div className="landing-hero-content-wrapper" style={{
-            flex: 1,
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'center',
-            alignItems: 'center',
-            padding: '80px 40px',
-            position: 'relative',
-            zIndex: 1,
-          }}>
-            {renderHeroContent()}
-          </div>
-        ) : (
+        {isHostedEdition && (
           <>
-            <div className="landing-hero-content-wrapper" style={{
-              flex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              justifyContent: 'center',
-              alignItems: 'center',
-              padding: '80px 60px',
-              position: 'relative',
-              zIndex: 1,
-            }}>
-              {renderHeroContent()}
-            </div>
-            <div className="landing-hero-form-panel" style={{
-              width: '520px',
-              display: 'flex',
-              flexDirection: 'column',
-              justifyContent: 'center',
-              alignItems: 'center',
-              padding: '60px',
-              position: 'relative',
-              zIndex: 1,
-            }}>
-              {mode === 'mfa' ? renderMfaVerification() : mode === 'mfa-enroll' ? renderMfaEnrollment() : signupSuccess ? renderConfirmation() : renderForm()}
-            </div>
+            <HowItWorksSection afterFrame={!showForm} />
+            <SoftEdge />
+            <UseCasesSection onAction={onAction} followLink={followLink} />
+            <SlantEdge />
+            <ControlSection />
+            <WaveUp />
+            <StartPointsSection onAction={onAction} followLink={followLink} />
+            <LandingPricingSection onAction={onAction} followLink={followLink} />
+            <FaqSection onAction={onAction} followLink={followLink} />
+            <OpenSourceSection />
+            <FinalCtaSection onAction={onAction} followLink={followLink} />
           </>
         )}
-      </section>
+      </main>
 
-      {isHostedEdition && (
-      <>
-      <div ref={featuresRef}>
-        <ProductTourSection />
-      </div>
-
-      <OssCommunitySection />
-
-      <TechEcosystemSection />
-
-      <div ref={pricingRef}>
-        <PricingSection onRequestSignUp={handleRequestSignUp} />
-      </div>
-
-      <footer ref={contactRef} style={{
-        width: '100%',
-        borderTop: '1px solid rgba(139, 143, 230, 0.06)',
-        backgroundColor: '#0f1117',
-        color: '#8a8f9e',
-        position: 'relative',
-        overflow: 'hidden',
-      }}>
-        <BlueprintGrid variant="dark" density="sparse" showGrid={false} showConnections={false} />
-        <div className="landing-footer-inner" style={{
-          maxWidth: '1100px',
-          margin: '0 auto',
-          padding: '48px 40px',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'flex-start',
-          flexWrap: 'wrap',
-          gap: '32px',
-          position: 'relative',
-          zIndex: 1,
-        }}>
-          <div>
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '10px',
-              marginBottom: '12px',
-            }}>
-              <img src={logoLight} alt="NodeSpec" style={{ height: '24px', width: 'auto', filter: 'brightness(10)' }} />
-              <span style={{ fontSize: '16px', fontWeight: 700, color: '#E6E9EF' }}>NodeSpec</span>
-            </div>
-            <p style={{ fontSize: '14px', lineHeight: 1.6, maxWidth: '300px' }}>
-              Visual architecture for modern software teams. Design, plan, and ship -- all from one canvas.
-            </p>
-            <div style={{ display: 'flex', gap: '12px', marginTop: '16px' }}>
-              <a
-                href="https://x.com/NodeSpec"
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  width: '36px',
-                  height: '36px',
-                  borderRadius: '8px',
-                  border: '1px solid rgba(255,255,255,0.1)',
-                  color: '#8a8f9e',
-                  textDecoration: 'none',
-                  transition: 'color 0.2s, border-color 0.2s',
-                }}
-                onMouseEnter={e => {
-                  (e.currentTarget as HTMLAnchorElement).style.color = '#E6E9EF';
-                  (e.currentTarget as HTMLAnchorElement).style.borderColor = 'rgba(255,255,255,0.25)';
-                }}
-                onMouseLeave={e => {
-                  (e.currentTarget as HTMLAnchorElement).style.color = '#8a8f9e';
-                  (e.currentTarget as HTMLAnchorElement).style.borderColor = 'rgba(255,255,255,0.1)';
-                }}
-                aria-label="NodeSpec on X"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.747l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
-                </svg>
-              </a>
-              <a
-                href="https://www.linkedin.com/company/nodespec/"
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  width: '36px',
-                  height: '36px',
-                  borderRadius: '8px',
-                  border: '1px solid rgba(255,255,255,0.1)',
-                  color: '#8a8f9e',
-                  textDecoration: 'none',
-                  transition: 'color 0.2s, border-color 0.2s',
-                }}
-                onMouseEnter={e => {
-                  (e.currentTarget as HTMLAnchorElement).style.color = '#E6E9EF';
-                  (e.currentTarget as HTMLAnchorElement).style.borderColor = 'rgba(255,255,255,0.25)';
-                }}
-                onMouseLeave={e => {
-                  (e.currentTarget as HTMLAnchorElement).style.color = '#8a8f9e';
-                  (e.currentTarget as HTMLAnchorElement).style.borderColor = 'rgba(255,255,255,0.1)';
-                }}
-                aria-label="NodeSpec on LinkedIn"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
-                </svg>
-              </a>
-            </div>
-          </div>
-
-          <div>
-            <div style={{ fontSize: '14px', fontWeight: 600, color: '#E6E9EF', marginBottom: '12px' }}>
-              Contact
-            </div>
-            <div style={{ fontSize: '14px', lineHeight: 2 }}>
-              <div>contact@nodespec.io</div>
-            </div>
-          </div>
-
-          <div>
-            <div style={{ fontSize: '14px', fontWeight: 600, color: '#E6E9EF', marginBottom: '12px' }}>
-              Product
-            </div>
-            <div style={{ fontSize: '14px', lineHeight: 2 }}>
-              <div style={{ cursor: 'pointer' }} onClick={() => scrollTo(featuresRef)}>Features</div>
-              <div style={{ cursor: 'pointer' }} onClick={() => scrollTo(pricingRef)}>Pricing</div>
-              <div><a href="/templates" style={FOOTER_LINK} onClick={(e) => followLink(e, '/templates')}>Templates</a></div>
-            </div>
-          </div>
-
-          <div>
-            <div style={{ fontSize: '14px', fontWeight: 600, color: '#E6E9EF', marginBottom: '12px' }}>
-              Resources
-            </div>
-            <div style={{ fontSize: '14px', lineHeight: 2 }}>
-              <div><a href="/blog" style={FOOTER_LINK} onClick={(e) => followLink(e, '/blog')}>Blog</a></div>
-              <div><a href="/docs/mcp" style={FOOTER_LINK} onClick={(e) => followLink(e, '/docs/mcp')}>MCP Documentation</a></div>
-            </div>
-          </div>
-
-          <div>
-            <div style={{ fontSize: '14px', fontWeight: 600, color: '#E6E9EF', marginBottom: '12px' }}>
-              Legal
-            </div>
-            <div style={{ fontSize: '14px', lineHeight: 2 }}>
-              <div><a href="/privacy" style={FOOTER_LINK} onClick={(e) => followLink(e, '/privacy')}>Privacy Policy</a></div>
-              <div><a href="/terms" style={FOOTER_LINK} onClick={(e) => followLink(e, '/terms')}>Terms of Service</a></div>
-            </div>
-          </div>
-        </div>
-
-        <div className="landing-footer-bottom" style={{
-          borderTop: '1px solid rgba(255, 255, 255, 0.06)',
-          padding: '20px 40px',
-          textAlign: 'center',
-          fontSize: '13px',
-          color: '#5a5f78',
-        }}>
-          © 2025-2026 NodeSpec. All rights reserved.
-        </div>
-      </footer>
-      </>
-      )}
+      {isHostedEdition && <LandingFooter onAction={onAction} followLink={followLink} />}
+      {talkOpen && <EnterpriseContactModal onClose={() => setTalkOpen(false)} />}
+      {waitlistOpen && <TeamWaitlistModal onClose={() => setWaitlistOpen(false)} />}
     </div>
   );
 }

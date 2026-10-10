@@ -142,14 +142,14 @@ Deno.test('WS3 plan: schema bodies never inline — presence line with specForma
   assert(validation.includes('[blocked by schema: contract "Payments API"'), 'with the blocked marker, not invented checks');
 });
 
-Deno.test('WS3 plan: project vision trimmed to ~400 chars', () => {
+Deno.test('AL.29 R1: a test plan carries no project vision, and its fingerprint field stays empty', () => {
   const doc = generateTestDocument({
     requirement: reqForGen(), graph: laneGraph(), catalogs: EMPTY_CATALOGS,
-    mappedNodes: MAPPED as never, sourceArtifacts: [], projectVision: 'V'.repeat(1200),
+    mappedNodes: MAPPED as never, sourceArtifacts: [],
   });
-  const contextSection = doc.slice(doc.indexOf('## Project Context'), doc.indexOf('## Acceptance Criteria'));
-  assert(contextSection.includes('V'.repeat(400) + ' …'), 'trimmed with ellipsis');
-  assert(!contextSection.includes('V'.repeat(401)), 'never the full body');
+  assert(!doc.includes('## Project Context'), 'no vision section');
+  const fp = computeTestContextFingerprint(reqForGen(), MAPPED as never, [], laneGraph());
+  assertEquals(fp.fields.visionHash, '', 'kept empty, so every stored fingerprint still matches');
 });
 
 // ── (4) fingerprint schema token ──────────────────────────────────────────────
@@ -205,6 +205,8 @@ Deno.test('WS3 get_test_plan: response carries schemaBlockedContracts (shared he
     content: 'STORED', metadata: { testContextFingerprint: { fingerprint: 'f1' }, requirementId: 'REQ-009' },
   };
   sb.script('projects', 'select', { data: { id: '11111111-1111-4111-8111-111111111111', name: 'Bench' }, error: null });
+  // AL.29: get_test_plan resolves the requirement inside the project's specification.
+  sb.script('project_specifications', 'select', { data: { id: 'spec-1' }, error: null });
   sb.script('specification_requirements', 'select', {
     data: { id: 'row-9', requirement_id: 'REQ-009', name: 'Payments', description: 'd', category: 'functional', status: 'pending', acceptance_criteria: [{ text: BLOCKED_TEXT }], specification_id: 'spec-1' },
     error: null,

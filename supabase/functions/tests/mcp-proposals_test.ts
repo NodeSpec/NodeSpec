@@ -887,9 +887,15 @@ Deno.test('propose_patches (9.6, AL.6): the mixed batch reports the strictest la
   assertEquals(a.success, true, JSON.stringify(a));
   const ar = (a.data as { routing: { route: string; note: string } }).routing;
   assertEquals(ar.route, 'apply');
-  assert(ar.note.startsWith('Every lane this batch touches is at Auto, but this proposal waits for review'), ar.note);
+  // AL.24: the note names why it waits, and so does the proposal (its card says it)
+  assertEquals(ar.note, 'Every lane this batch touches is at Auto, but it waits for the user: Its agent may only propose: the credential it used has no write access.');
   assertEquals((a.data as { status: string }).status, 'pending', 'a key with no write scope never applies');
-  assertEquals(auto.callsTo('ai_proposals', 'update').length, 0, 'nothing was claimed or applied');
+  const writes = auto.callsTo('ai_proposals', 'update');
+  assertEquals(writes.length, 1, 'nothing was claimed or applied; the reason is recorded');
+  const recorded = writes[0].payload as { status?: string; reviewed_at?: string; metadata: { autoWait: { reason: string } } };
+  assertEquals([recorded.status, recorded.reviewed_at], [undefined, undefined]);
+  assertEquals(recorded.metadata.autoWait.reason, 'Its agent may only propose: the credential it used has no write access.');
+  assert(writes[0].filters.some((f) => f.method === 'is' && f.args[0] === 'reviewed_at' && f.args[1] === null), 'only while no decider holds it');
 });
 
 Deno.test('propose_patches (9.6): with no policy row the shipped defaults route — a graph op reports the architecture lane at propose', async () => {

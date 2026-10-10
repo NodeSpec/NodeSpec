@@ -23,20 +23,20 @@
 
 import { loadCatalogs } from "./catalog-loader.ts";
 import { liveNodeIdSet, filterMappingsToLiveNodes } from "./mapping-liveness.ts";
-import { loadTaskStateByNode, preserveAddedTasksSection, reconcileTaskItemOrphans } from "./task-deltas.ts";
+import { loadTaskStateByNode, reconcileTaskItemOrphans } from "./task-deltas.ts";
 import { loadNodeConstraints, type NodeConstraint } from "./node-constraints.ts";
 import { loadServedVision, servedVisionText, type ServedVision } from "./served-vision.ts";
 import { recordFingerprint } from "./node-memory.ts";
 import {
   generateTaskDocument,
   computeTaskContextFingerprint,
-  preserveImplementationContextSection,
+  carryAgentTaskContent,
 } from "./task-document-generator.ts";
 import {
   generateTestDocument,
   computeTestContextFingerprint,
   findExistingTestArtifact,
-  preserveTestStrategySection,
+  carryAgentPlanContent,
 } from "./test-document-generator.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -64,12 +64,24 @@ export interface PacketRefreshResult {
   /** R.1b: with `checkOnly`, the managed task docs whose fingerprint moved
    *  (the next push regenerates them); nothing is regenerated or written. */
   stalePaths?: string[];
+  /** AL.29: each artifact whose content was regenerated, as the update that saves it
+   *  (git-push files these, so NodeSpec stores what it pushed). */
+  saves: PacketSave[];
   error?: string;
+}
+
+/** AL.29: one regenerated task doc or test plan, as the update_artifact changes that save it. */
+export interface PacketSave {
+  id: string;
+  path: string;
+  kind: "task" | "test-plan";
+  changes: { content: string; updatedAt: string; metadata: AnyRecord };
 }
 
 const EMPTY: PacketRefreshResult = {
   checked: 0, refreshed: 0, refreshedPaths: [], skippedUnmanaged: 0,
   testPlansChecked: 0, testPlansRefreshed: 0, testPlansRefreshedPaths: [], testPlansSkippedUnmanaged: 0,
+  saves: [],
 };
 
 /**
@@ -163,7 +175,7 @@ export async function refreshTaskPackets(
 
     const result: PacketRefreshResult = {
       ...EMPTY, skippedUnmanaged, testPlansSkippedUnmanaged,
-      refreshedPaths: [], testPlansRefreshedPaths: [],
+      refreshedPaths: [], testPlansRefreshedPaths: [], saves: [],
     };
     const now = new Date().toISOString();
 
@@ -226,13 +238,9 @@ export async function refreshTaskPackets(
       } as any);
       // N5.17: the AI-authored Implementation Context section survives regeneration
       // verbatim; the fingerprint flip that got us here flags it REVIEW NEEDED (once).
-      // Y: the person's Added Tasks section survives the same way.
-      const content = preserveAddedTasksSection(
-        preserveImplementationContextSection(
-          regeneratedDoc, String(artifact.content ?? ""), { flagReview: true },
-        ),
-        String(artifact.content ?? ""),
-      );
+      // Y: the person's Added Tasks section survives the same way. AL.29: and the
+      // steps under each work order (the same function generate_task_docs uses).
+      const content = carryAgentTaskContent(regeneratedDoc, String(artifact.content ?? ""), { flagReview: true });
       // A4: orphan-reconcile against the keys this refresh emits (flag, never
       // delete), Added Tasks included. Best-effort — must never fail the refresh.
       try {
@@ -246,6 +254,7 @@ export async function refreshTaskPackets(
         artifact.updatedAt = now;
         result.refreshed++;
         result.refreshedPaths.push(String(artifact.path ?? ""));
+        result.saves.push({ id: String(artifact.id), path: String(artifact.path ?? ""), kind: "task", changes: { content, updatedAt: now, metadata: artifact.metadata } });
       }
     }
 
@@ -283,19 +292,19 @@ export async function refreshTaskPackets(
       );
 
       // deno-lint-ignore no-explicit-any
-      const fp = computeTestContextFingerprint(requirement as any, mappedNodes as any, sourceArtifacts as any, graph as any, vision, catalogs as any);
+      const fp = computeTestContextFingerprint(requirement as any, mappedNodes as any, sourceArtifacts as any, graph as any, catalogs as any);
       result.testPlansChecked++;
       if (fp.fingerprint === artifact.metadata.testContextFingerprint.fingerprint) continue;
 
       // deno-lint-ignore no-explicit-any
       const regenerated = generateTestDocument({
         requirement, graph, catalogs, mappedNodes, sourceArtifacts,
-        projectVision: vision,
         // deno-lint-ignore no-explicit-any
       } as any);
       // The editable section gets the same respect C1 gives user-authored docs: a
-      // strategy body the user changed rides into the regenerated plan verbatim.
-      const content = preserveTestStrategySection(regenerated, String(artifact.content ?? ""));
+      // strategy body the user changed rides into the regenerated plan verbatim, and
+      // (AL.29) so do the test-case statements. No vision: plans carry none (R1).
+      const content = carryAgentPlanContent(regenerated, String(artifact.content ?? ""));
 
       artifact.metadata = { ...artifact.metadata, testContextFingerprint: fp, requirementId: humanId, stale: false };
       if (content !== artifact.content) {
@@ -303,6 +312,7 @@ export async function refreshTaskPackets(
         artifact.updatedAt = now;
         result.testPlansRefreshed++;
         result.testPlansRefreshedPaths.push(String(artifact.path ?? ""));
+        result.saves.push({ id: String(artifact.id), path: String(artifact.path ?? ""), kind: "test-plan", changes: { content, updatedAt: now, metadata: artifact.metadata } });
       }
     }
 

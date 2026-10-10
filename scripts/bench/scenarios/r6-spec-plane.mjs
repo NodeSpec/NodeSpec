@@ -334,14 +334,16 @@ export const canvasData = {
       planPatch?.payload?.metadata?.requirementId === 'REQ-002',
       JSON.stringify({ status: proposal?.status, kind: planPatch?.payload?.kind, meta: planPatch?.payload?.metadata }).slice(0, 300));
 
-    // Acceptance is a CLIENT act (the user clicks accept; patches apply into a new
-    // snapshot) — mirror its end state directly, as the c4 scenario seeds artifacts.
-    const graph2 = structuredClone(fx.graph);
-    graph2.artifacts[planPatch.payload.id] = planPatch.payload;
-    await db.insert('graph_snapshots', {
-      id: uid(), project_id: fx.ids.project, branch_id: fx.ids.branch,
-      version: 1, hash: 'benchfix-plan-accepted', patch_sequence: 1, graph_data: graph2,
-    });
+    // AL.28: this used to write the accepted end state into the snapshot itself,
+    // so nothing ever ran the apply, and under Auto the server set every such
+    // plan aside (MISSING_ARTIFACT). Apply it the way production does now: the
+    // Architecture lane at Auto and the server's sweep.
+    await db.update('projects', `id=eq.${fx.ids.project}`, { automation_policy: { architecture: 2 } });
+    const swept = parse(await mcpCall(env, 'resolve_proposal', { project_id: fx.ids.project, action: 'auto' }));
+    const [applied] = await db.select('ai_proposals', `id=eq.${plan.proposalId}&select=status,metadata`);
+    s.check('the server applies the plan under Auto: merged, nothing set aside',
+      (swept?.applied ?? []).some((a) => a.proposalId === plan.proposalId) && applied?.status === 'merged' && applied?.metadata?.resolvedBy === 'auto',
+      JSON.stringify({ swept, status: applied?.status, note: applied?.metadata?.resolveNote }).slice(0, 400));
 
     // Downstream re-report: with the plan stored, the same lane reads ALIGNED —
     // exists true at the id-only path, and the orphan warning is gone.

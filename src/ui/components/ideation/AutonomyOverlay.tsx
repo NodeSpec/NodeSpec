@@ -58,6 +58,9 @@ function AutonomyOverlayComponent({ settings, onClose }: AutonomyOverlayProps) {
         </div>
       </div>
 
+      {settings.sweepNote && (
+        <div data-testid="autonomy-sweep" role="status" style={{ fontSize: '12px', color: c.textSecondary, padding: '6px 10px', borderRadius: '8px', border: `1px solid ${c.border}` }}>{settings.sweepNote}</div>
+      )}
       {settings.error && (
         <div data-testid="autonomy-error" role="alert" style={{ fontSize: '12px', color: '#ee6b70', padding: '6px 10px', borderRadius: '8px', border: '1px solid #ee6b7055' }}>{settings.error}</div>
       )}

@@ -9,8 +9,7 @@ import { applyPatches } from '@nodespec/core/patch-engine.js';
 import type { Graph, PatchOperation } from '@nodespec/core/types.js';
 import { serializeModel, parseModel, sameDesign, type ModelAnchor } from '../../supabase/functions/_shared/model-anchor.ts';
 import { anchorLoadPatches } from '../../supabase/functions/_shared/anchor-load.ts';
-import { collectGitContentRequests, injectGitContent } from '../ui/utils/proposal-git-content.js';
-import { isAutoApprovable } from '../ui/hooks/useProposalAutoApprove.js';
+import { collectGitContentRequests, injectGitContent } from '@nodespec/core/proposal-git-content.js';
 import { loadModelMessage } from '../ui/components/panels/repoActivity.js';
 import { computeContentHash } from '@nodespec/core/utils.js';
 
@@ -154,13 +153,9 @@ describe('AD.2b: a load through the real patch engine', () => {
 });
 
 describe('AD.2b: nothing loads without a person', () => {
-  const proposal = (source: string) => ({ id: 'p', metadata: { source }, patches: [] }) as never;
 
-  it('auto-approve never accepts a load of git\'s model or the adopt at connect', () => {
-    expect(isAutoApprovable(proposal('git-load'))).toBe(false);
-    expect(isAutoApprovable(proposal('git-adopt'))).toBe(false);
-    expect(isAutoApprovable(proposal('mcp-server'))).toBe(true);
-  });
+  // AL.24: Auto is the server's; that it never applies a load or an adopt is
+  // pinned by its rule (supabase/functions/tests/al24-auto-headless_test.ts).
 
   it('the app says where the load waits, and when there is nothing to load', () => {
     expect(loadModelMessage({ status: 'filed', patchCount: 3 })).toBe(

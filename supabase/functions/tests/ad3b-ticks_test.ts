@@ -132,7 +132,9 @@ Deno.test('AD.3b: a card knows which ticked criteria expect a test result; a per
 Deno.test('AD.3b wiring: the Git panel apply passes the person; MCP never applies a criterion tick', () => {
   const pull = Deno.readTextFileSync(new URL('../git-pull/index.ts', import.meta.url));
   assert(pull.includes('return await handleApplyCriteria(integration, serviceClient, changeEventId, userId);'), 'the caller is passed');
-  assert(/applyCriterionDeltas\(serviceClient, integration\.project_id, \{[\s\S]{0,200}appliedBy: userId,/.test(pull), 'and recorded');
+  assert(pull.includes('applyCardTicks(serviceClient, integration.project_id, card, userId)'), 'and recorded');
+  const drift = Deno.readTextFileSync(new URL('../_shared/git-drift.ts', import.meta.url));
+  assert(/applyCriterionDeltas\(supabase, projectId, \{[\s\S]{0,200}appliedBy,/.test(drift), 'as the provenance\'s appliedBy');
   const git = Deno.readTextFileSync(new URL('../mcp-server/tools/git.ts', import.meta.url));
   assert(!git.includes('applyCriterionDeltas'), 'the MCP resolver has no criterion apply at all');
   const skill = Deno.readTextFileSync(new URL('../../../skills/nodespec-developer/SKILL.md', import.meta.url));

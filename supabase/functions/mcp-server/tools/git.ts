@@ -377,18 +377,38 @@ export async function handleResolveChange(
       // R.1b: a file bound here (bind_file, or add_artifact without content)
       // is the card's own commit; its bytes are pulled from git at accept.
       ...(event.commit_sha ? { content_ref: event.commit_sha as string } : {}),
-    });
+    }, { reconcilesChange: { eventId: args.change_event_id, commitSha: args.commit_sha as string } });
     // deno-lint-ignore no-explicit-any
-    const proposalId = result.success ? ((result.data as any)?.proposalId as string | undefined) : undefined;
+    const filedData = (result.data ?? {}) as any;
+    const proposalId = result.success ? (filedData.proposalId as string | undefined) : undefined;
     if (!proposalId) {
       await stampPendingCard({});
       return { success: false, error: `The reconciling proposal was not filed (${result.error ?? 'no proposal id'}); the change stays pending.${ticksNote}` };
     }
-    const { data: filed } = await supabase.from('ai_proposals').select('metadata').eq('id', proposalId).maybeSingle();
-    await supabase
-      .from('ai_proposals')
-      .update({ metadata: { ...(filed?.metadata ?? {}), reconcilesChange: { eventId: args.change_event_id, commitSha: args.commit_sha } } })
-      .eq('id', proposalId);
+    // AL.24: under Auto the reconcile applied as it filed, and the accept
+    // resolved the card it answers (or says why it could not).
+    if (filedData.routed === 'applied') {
+      const notes = Array.isArray(filedData.notes) ? filedData.notes as string[] : [];
+      const { data: card } = await supabase.from('git_change_events').select('status, metadata').eq('id', args.change_event_id).maybeSingle();
+      await supabase.from('git_change_events')
+        .update({ metadata: { ...((card?.metadata as Record<string, unknown>) ?? cardMeta), ...stamps, reconcileProposalId: proposalId } })
+        .eq('id', args.change_event_id).eq('commit_sha', args.commit_sha as string);
+      const resolved = card?.status && card.status !== 'pending';
+      return {
+        success: true,
+        data: {
+          changeEventId: args.change_event_id,
+          resolution: resolved ? card.status : 'pending',
+          proposalId,
+          routed: 'applied',
+          ...(ticksSummary ? ticksSummary : {}),
+          ...(waiting.criteria + waiting.tasks > 0 ? { waitingForPerson: waiting } : {}),
+          message: `The reconcile applied as it filed (proposal ${proposalId}): the Architecture lane is at Auto. ` +
+            (resolved ? 'The change resolved.' : (notes.join(' ') || 'The change card it answers stays pending.')) +
+            `${waitingNote}${ticksNote}`,
+        },
+      };
+    }
     const waits = await stampPendingCard({ reconcileProposalId: proposalId });
     return {
       success: true,

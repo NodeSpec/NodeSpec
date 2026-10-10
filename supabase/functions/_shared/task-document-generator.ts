@@ -5,7 +5,7 @@ import { collectInheritedScopes, effectiveInheritedValues, renderInheritedContex
 import { inferProviderFromId, isProviderBrandedId } from "./provider-inference.ts";
 import { resolveConfigChoice } from "./config-choice.ts";
 import { withholdCredentials, WITHHELD } from "./credential-withhold.ts";
-import { assignTaskKeys, getTaskDocumentPath } from "./task-deltas.ts";
+import { assignTaskKeys, getTaskDocumentPath, keepWorkOrderSteps, preserveAddedTasksSection } from "./task-deltas.ts";
 import { renderConstraintsSection, constraintsSignature, type NodeConstraint } from "./node-constraints.ts";
 import { servedVisionLines, type ServedVision } from "./served-vision.ts";
 import { isPartRole } from "./part-roles.ts";
@@ -727,7 +727,7 @@ export function generateTaskDocument(input: TaskDocumentInput): string {
     // NOT deterministic and must not be faked with templates — it is the consuming
     // AI's job, made MANDATORY here instead of an optional refine note. The scaffold
     // frames the work; the AI supplies the how.
-    lines.push("**Your first action — expand these work orders.** Each task above guarantees WHAT must be covered, not HOW. Before writing any code or configuration, expand every task with the concrete implementation steps for THIS technology in THIS project — the specific resources, settings, files, schemas, and tests — using the Configuration, Interface Contracts, Technology Guidance, and node context as your references. Record the expanded list in this section via update_artifact (propose_patches) after this doc is accepted, keeping task IDs, criterion citations, and open `[PLACEHOLDER: …]` tags intact. Resolve placeholders with the user through the proposal flow; this node is never complete while one remains open. When the work orders are implemented, verify through the test lane: run get_test_plan for each requirement this node serves, implement and run the plan's tests, and report outcomes via report_test_results — passing results are the evidence that flips criteria met.");
+    lines.push("**Your first action — expand these work orders.** Each task above guarantees WHAT must be covered, not HOW. Before writing any code or configuration, expand every task with the concrete implementation steps for THIS technology in THIS project — the specific resources, settings, files, schemas, and tests — using the Configuration, Interface Contracts, Existing Implementation, Technology Guidance, and node context as your references. Write each work order's steps under its task line as indented checkbox lines (`  - [ ] <step>`), one action each, naming the file, setting or interface it changes, and send them with update_artifact (propose_patches, passing base_sequence) after this doc is accepted, keeping task IDs, criterion citations, and open `[PLACEHOLDER: …]` tags intact; the steps stay with their work order when this doc regenerates. Resolve placeholders with the user through the proposal flow; this node is never complete while one remains open. When the work orders are implemented, verify through the test lane: run get_test_plan for each requirement this node serves, implement and run the plan's tests, and report outcomes via report_test_results — passing results are the evidence that flips criteria met.");
     lines.push("");
   }
 
@@ -1964,6 +1964,20 @@ export function implementationContextScaffold(): string[] {
     `${IMPLEMENTATION_CONTEXT_PLACEHOLDER} **Consuming AI — author this section BEFORE building.** Working from this full packet plus the repository, record the project-specific context no catalog can know: how this node's technology composes with its neighbors in THIS project, the integration specifics behind each interface contract, configuration rationale, and your intended implementation approach. Replace this placeholder (keep the heading) either by editing this file in the repo and pushing — NodeSpec surfaces the edit as a change card for the user to accept — or via an update_artifact patch through propose_patches. If a REVIEW NEEDED line appears here later, the derived context changed after you wrote this: re-verify the section, then delete that line.`,
     "",
   ];
+}
+
+/**
+ * AL.29: what an agent or a person wrote into a node's task doc, carried into
+ * its regeneration: the Implementation Context prose (flagged for review when
+ * the derived context changed), the steps under each work order, and the Added
+ * Tasks. One function for generate_task_docs and the push gate, so both write
+ * the same doc.
+ */
+export function carryAgentTaskContent(generated: string, stored: string, opts: { flagReview?: boolean } = {}): string {
+  return preserveAddedTasksSection(
+    keepWorkOrderSteps(preserveImplementationContextSection(generated, stored, opts), stored),
+    stored,
+  );
 }
 
 export function preserveImplementationContextSection(

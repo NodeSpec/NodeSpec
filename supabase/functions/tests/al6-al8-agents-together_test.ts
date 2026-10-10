@@ -5,8 +5,8 @@
 //
 //   AL.6  Under Auto a batch of spec changes from the owner's agent (write
 //         scope) applies as it files, through the same accept a person runs.
-//         A key that may only propose, a member's agent, a confirmed
-//         requirement, or a drafted vision still waits. A batch mixing canvas and spec changes is
+//         A key that may only propose, a member's agent or a confirmed
+//         requirement still waits (AL.24: a drafted vision applies too). A batch mixing canvas and spec changes is
 //         refused: it could be accepted in neither place.
 //   AL.8  A waiting proposal holds what it changes: a second one on the same
 //         requirement, outcome, constraint, workflow or step is refused at
@@ -84,7 +84,7 @@ Deno.test('AL.6 under Propose the same batch files and waits; nothing is claimed
   assertEquals(sb.callsTo('requirement_candidates', 'insert').length, 0);
 });
 
-Deno.test('AL.6 under Auto it still waits for a key that may only propose, a member\'s agent, a promotion, a confirmed requirement, and a vision', async () => {
+Deno.test('AL.6 under Auto it still waits for a key that may only propose, a member\'s agent, a promotion and a confirmed requirement', async () => {
   const waits = async (sb: FakeSupabase, auth: AuthResult, patches: unknown[]) => {
     const r = await handleProposePatches(sb as never, auth, { project_id: PROJECT.id, branch_id: BRANCH, patches });
     assertEquals(r.success, true, JSON.stringify(r));
@@ -113,12 +113,29 @@ Deno.test('AL.6 under Auto it still waits for a key that may only propose, a mem
   confirmed.script('project_specifications', 'select', { data: { id: SPEC }, error: null });
   confirmed.script('specification_requirements', 'select', { data: [{ confirmed: true }], error: null });
   await waits(confirmed, OWNER_AGENT, [{ type: 'update_requirement', payload: { requirementId: 'REQ-004', changes: { description: 'sharper' } } }]);
+});
 
-  // a drafted vision is the person's to confirm (the 9.6 context proposal)
-  const vision = new FakeSupabase();
-  scriptFiling(vision, AUTO);
-  await waits(vision, OWNER_AGENT, [{ type: 'update_vision', payload: { vision: 'Neighbours order bread ahead and collect it warm.' } }, newOutcome]);
-  assertEquals(vision.callsTo('requirement_candidates', 'insert').length, 0, 'nothing applied');
+// AL.24 (owner ruling 2026-10-05, "Apply it too"): at Auto the whole batch
+// applies, the drafted vision with it (the 9.6 context proposal was the
+// requirement and architecture backlog the owner saw sitting).
+Deno.test('AL.24 under Auto a drafted vision applies with the outcomes it came with, and reads as applied', async () => {
+  const sb = new FakeSupabase();
+  scriptFiling(sb, AUTO);
+  sb.script('projects', 'select', { data: null, error: null }); // the vision citation read at filing
+  sb.script('projects', 'select', { data: { id: PROJECT.id, name: PROJECT.name }, error: null }); // the vision write resolves the project
+  sb.script('project_specifications', 'select', { data: null, error: null }); // the project's checks read first
+  sb.script('project_specifications', 'select', { data: { id: SPEC }, error: null });
+  sb.script('requirement_candidates', 'insert', { data: { id: CAND, key: 'outcome:abcd1234' }, error: null });
+  const vision = 'Neighbours order bread ahead and collect it warm.';
+  const r = await handleProposePatches(sb as never, OWNER_AGENT, { project_id: PROJECT.id, branch_id: BRANCH, patches: [{ type: 'update_vision', payload: { vision } }, newOutcome] });
+  assertEquals(r.success, true, JSON.stringify(r));
+  const data = r.data as { status: string; routed: string };
+  assertEquals([data.status, data.routed], ['merged', 'applied']);
+  const written = sb.callsTo('project_specifications', 'update').map((c) => c.payload as { vision?: string });
+  assertEquals(written.map((w) => w.vision), [vision], 'the vision is the agent\'s draft');
+  assertEquals(sb.callsTo('requirement_candidates', 'insert').length, 1, 'and the outcome exists');
+  const done = decision(sb);
+  assertEquals([done.status, done.metadata.auto], ['merged', true]);
 });
 
 Deno.test('AL.6 a batch mixing canvas and spec changes is refused, naming both halves; nothing is filed', async () => {

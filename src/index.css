@@ -1,4 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+/* Inter and JetBrains Mono load from index.html, beside the app's stylesheet rather
+   than after it, so the first paint does not wait on a chain of two stylesheets. */
 
 :root {
   --theme-background: #fafbfc;
@@ -476,34 +477,6 @@ input, textarea, select {
   }
   .landing-form-title {
     font-size: 22px !important;
-  }
-
-  /* --- OssCommunitySection --- */
-  .oss-community {
-    padding: 56px 0 !important;
-  }
-  .oss-content {
-    padding: 0 20px !important;
-  }
-  .oss-heading {
-    font-size: 26px !important;
-  }
-  .oss-subtitle {
-    font-size: 15px !important;
-  }
-  .oss-cta-plate {
-    padding: 24px 20px !important;
-    gap: 18px !important;
-  }
-  .oss-cta-mark {
-    width: 36px !important;
-    height: 36px !important;
-  }
-  .oss-cta-title {
-    font-size: 18px !important;
-  }
-  .oss-cta-arrow {
-    display: none !important;
   }
 
   /* --- SiteFooter --- */

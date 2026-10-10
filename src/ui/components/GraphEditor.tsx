@@ -41,7 +41,7 @@ import { getSupabaseClient } from '../../persistence/supabase/client.js';
 import { isHostedEdition } from '../config/edition.js';
 import { PublishTemplateModal } from './templates/PublishTemplateModal.js';
 import { useGitAutoSync } from '../hooks/useGitAutoSync.js';
-import { useProposalAutoApprove } from '../hooks/useProposalAutoApprove.js';
+import { sweepAutoLanes, sweepLine } from '../services/autoSweep.js';
 import { useAgentPresence } from './ideation/useAgentPresence.js';
 import { nodeLeases, leasedEditRefusal } from './ideation/node-leases.js';
 import { ImportIntentPopup } from './common/ImportIntentPopup.js';
@@ -203,11 +203,10 @@ function GraphEditorInner({
   const [gitDefaultBranch, setGitDefaultBranch] = useState<string | null>(null);
   // B2: auto-sync gate — null until the integration row loads.
   const [gitAutoSync, setGitAutoSync] = useState<{ integrationId: string; enabled: boolean } | null>(null);
-  // UX-1.1a → R23: OPT-IN auto-approval of incoming canvas proposals —
-  // project-level, default OFF, stored in projects.metadata.
-  // autoApproveProposals. The ONE control is the Agents button's Autonomy
-  // settings (the architecture lane's Auto-apply writes the mirror); the
-  // editor only READS it, live via the row subscription below.
+  // UX-1.1a → R23 → AL.24: the architecture lane's Auto, mirrored in
+  // projects.metadata.autoApproveProposals. The server applies what Auto
+  // covers as it files; the editor reads the flag only to hold back the
+  // "come review" toast.
   const [autoApproveProposals, setAutoApproveProposals] = useState(false);
   const autoApproveRef = useRef(false);
   autoApproveRef.current = autoApproveProposals;
@@ -259,8 +258,12 @@ function GraphEditorInner({
 
   const [pendingProposalCount, setPendingProposalCount] = useState(0);
   const prevProposalCountRef = useRef(0);
+  const refreshGraphRef = useRef<() => unknown>(() => undefined);
   const handlePendingCountChange = useCallback((count: number) => {
     setPendingProposalCount(count);
+    // AL.24: a proposal that left the queue may have landed on the canvas
+    // (the server applies under Auto with or without the app): read it again.
+    if (count < prevProposalCountRef.current) void refreshGraphRef.current();
     if (count > prevProposalCountRef.current) {
       // A finalized repo-import lands straight in its review panel — the whole
       // point of the AI-driven lane is that the user's next act is reviewing.
@@ -309,6 +312,7 @@ function GraphEditorInner({
     branchId,
     onError: showError,
   });
+  refreshGraphRef.current = refreshGraph;
 
   const [hasSeenOnboarding, setHasSeenOnboarding] = useState<boolean | null>(null);
   const [pendingProjectCreateAfterOnboarding, setPendingProjectCreateAfterOnboarding] = useState(false);
@@ -1156,24 +1160,20 @@ function GraphEditorInner({
     onSynced: showWarning,
   });
 
-  // UX-1.1a: opt-in auto-approval — routes through acceptProposal (locked-node
-  // filtering, validation, C1 materialization all intact); import-lane
-  // finalization proposals are skipped inside the hook (human review by
-  // design); failures leave the proposal pending, once per session.
-  useProposalAutoApprove({
-    enabled: autoApproveProposals,
-    branchId: branchId ?? null,
-    listPending: (bid) => proposalService.listProposalsByBranch(bid, 'pending'),
-    accept: (proposalId) => proposalService.acceptProposal(proposalId),
-    stampAutoApproved: (proposalId) => proposalService.markAutoApproved(proposalId),
-    onApplied: (proposal) => {
-      showSuccess(`Auto-approved proposal (${proposal.patches.length} change${proposal.patches.length !== 1 ? 's' : ''}) — applied to the canvas`);
-      void refreshGraph();
-    },
-    onFailed: (_proposal, message) => {
-      showError(`Auto-approve failed (proposal left pending for manual review): ${message}`);
-    },
-  });
+  // AL.24: Auto is the server's (it applies as an agent files, app open or
+  // not). Opening a project asks it once to apply anything Auto covers that
+  // is still waiting, such as a file git had not served when it was filed.
+  useEffect(() => {
+    if (!projectId) return;
+    let live = true;
+    void sweepAutoLanes(projectId).then((sweep) => {
+      if (!live || !sweep) return;
+      if (sweep.applied.some((a) => a.plane === 'canvas')) void refreshGraphRef.current();
+      const line = sweepLine(sweep);
+      if (line) showSuccess(line);
+    });
+    return () => { live = false; };
+  }, [projectId, showSuccess]);
 
   const handleNodeExport = useCallback((nodeId: string) => {
     // UX-1.3: the export modal is a node's ONE export surface now (the gated
@@ -1297,9 +1297,8 @@ function GraphEditorInner({
       }));
 
       setImportApplyingMessage('Saving to project...');
-      await proposalService.updateProposalPatches(importProposal.id, updatedPatches);
-
-      await proposalService.acceptProposal(importProposal.id);
+      // AL.24: the choices are written under the accept's claim.
+      await proposalService.acceptProposal(importProposal.id, updatedPatches);
 
       setImportApplyingMessage('Refreshing canvas...');
       await refreshGraph();
@@ -1336,11 +1335,13 @@ function GraphEditorInner({
     try {
       // AE.12: the reason rides the proposal; the agent reads it as reviewNote.
       await proposalService.rejectProposal(importProposal.id, reason);
-    } catch {
+      showWarning('Import proposal rejected');
+    } catch (err) {
+      // AL.24: a reject that lost to a decision made meanwhile says so.
+      showError(err instanceof Error ? err.message : String(err));
     }
     setImportProposal(null);
-    showWarning('Import proposal rejected');
-  }, [importProposal, proposalService, showWarning]);
+  }, [importProposal, proposalService, showWarning, showError]);
 
   // R4: the commit subject. The self-push prefix is prepended SERVER-side — a
   // message without it would make NodeSpec read its own commit as out-of-band drift.
@@ -1402,9 +1403,8 @@ function GraphEditorInner({
         ...pp,
         status: mergedIdSet.has(pp.patch.metadata.id) ? 'approved' as const : pp.status === 'conflicted' ? 'conflicted' as const : 'rejected' as const,
       }));
-      await proposalService.updateProposalPatches(activeProposal.id, updatedPatches);
-
-      await proposalService.acceptProposal(activeProposal.id);
+      // AL.24: the choices are written under the accept's claim.
+      await proposalService.acceptProposal(activeProposal.id, updatedPatches);
       await refreshGraph();
 
       // R4: an accepted change belongs in git. Fire-and-forget by design — the
@@ -1428,9 +1428,13 @@ function GraphEditorInner({
     try {
       // AE.12: the reason rides the proposal; the agent reads it as reviewNote.
       await proposalService.rejectProposal(activeProposal.id, reason);
-    } catch {}
+    } catch (err) {
+      // AL.24: a reject that lost to a decision made meanwhile says so.
+      showError(err instanceof Error ? err.message : String(err));
+    }
     setActiveProposal(null);
-  }, [activeProposal, proposalService]);
+    void refreshGraph();
+  }, [activeProposal, proposalService, showError, refreshGraph]);
 
   const handleReviewProposal = useCallback((proposal: AIProposal) => {
     // Owner UX ruling 2026-08-12: finalized repo-import proposals review in the

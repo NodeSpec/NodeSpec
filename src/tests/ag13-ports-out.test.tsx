@@ -9,7 +9,7 @@ import { cleanup, render } from '@testing-library/react';
 import { ReactFlowProvider } from '@xyflow/react';
 import { ThemeProvider } from '../ui/theme/ThemeContext.js';
 import { nodeTypes } from '../ui/components/nodes/SpecializedNodes.js';
-import { ProposalService } from '../ui/services/ProposalService.js';
+import { ProposalService, PROPOSAL_BEING_DECIDED } from '../ui/services/ProposalService.js';
 import { buildNodePatchesFromRole } from '../ui/utils/node-creation.js';
 import type { PersistenceService } from '../ui/services/PersistenceService.js';
 import type { NodeRole } from '../persistence/supabase/catalog-repository.js';
@@ -92,7 +92,11 @@ function acceptingService(persistence: PersistenceService, onRebuild: () => void
   const internals = svc as unknown as Record<string, () => Promise<void>>;
   vi.spyOn(internals, 'rebuildSnapshot').mockImplementation(async () => { onRebuild(); });
   vi.spyOn(internals, 'createArchitectureMappings').mockResolvedValue(undefined);
-  vi.spyOn(svc, 'updateProposalStatus').mockResolvedValue({} as AIProposal);
+  // AL.24: the claim, its renewal and the merge under it are the database's
+  vi.spyOn(internals, 'claimProposal').mockResolvedValue('2026-10-05T00:00:00.000Z' as never);
+  vi.spyOn(internals, 'renewClaim').mockResolvedValue(true as never);
+  vi.spyOn(internals, 'releaseClaim').mockResolvedValue(undefined);
+  vi.spyOn(internals, 'markMergedUnderClaim').mockResolvedValue(undefined);
   return svc;
 }
 
@@ -148,6 +152,19 @@ describe('AG.13 a proposal filed with ports lands without them', () => {
 
     expect(branch.stored.length).toBe(afterFirst);
     expect(branch.appendPatches).toHaveBeenCalledTimes(1);
+  });
+
+  it('AL.24: an accept whose claim was taken over before the writes stops there; nothing lands and it is not marked', async () => {
+    const branch = memoryBranch(proposal);
+    branch.append(legacyBase());
+    const svc = acceptingService(branch.persistence, () => { branch.graphNow(); });
+    const internals = svc as unknown as Record<string, () => Promise<unknown>>;
+    vi.spyOn(internals, 'renewClaim').mockResolvedValue(false);
+    const marked = vi.spyOn(internals, 'markMergedUnderClaim');
+
+    await expect(svc.acceptProposal(proposal.id)).rejects.toThrow(PROPOSAL_BEING_DECIDED);
+    expect(branch.appendPatches).not.toHaveBeenCalled();
+    expect(marked).not.toHaveBeenCalled();
   });
 });
 

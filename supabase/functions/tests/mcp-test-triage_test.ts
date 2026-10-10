@@ -161,7 +161,10 @@ Deno.test('get_project_status: test-case totals join through requirement ROW ids
   assertEquals(data.testCoverage.staleTestPlans, 1, 'metadata.stale only — the age heuristic is gone');
   assertEquals(data.testCoverage.staleTestCases, 2);
   assertEquals(data.testCoverage.failedTestCases, 1);
-  assertEquals(data.testCoverage.requirementsWithTestPlans, 3);
+  // AL.28: none of these plans names r1 or r2, so neither requirement has one
+  // (the old count said 3 of 2, and "without" went negative).
+  assertEquals(data.testCoverage.requirementsWithTestPlans, 0);
+  assertEquals(data.testCoverage.requirementsWithoutTestPlans, 2);
 
   // Discovered #2: the join goes spec -> requirement row ids -> test_cases.
   const caseQueries = sb.callsTo('test_cases', 'select');

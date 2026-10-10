@@ -1,6 +1,6 @@
 // N9b-3: the ~6,800-line static registry (node-type-data.ts) is RETIRED. Domains are
-// DB-hydrated only (CatalogService → populateDomains); before hydration — or after a
-// failed load — every lookup returns undefined/empty, which every consumer already
+// DB-hydrated only (CatalogService → populateDomains); before hydration, or after a
+// failed load, every lookup returns undefined/empty, which every consumer already
 // handles, and the failed state is VISIBLE via the N9b-2 DegradedCatalogBanner
 // instead of silently serving stale hardcoded data.
 
@@ -35,7 +35,7 @@ export interface AIContext {
 }
 
 export interface MetadataFieldSchema {
-  /** N8.1b: 'multiselect' = checkbox list over `options`, value is string[] — the
+  /** N8.1b: 'multiselect' = checkbox list over `options`, value is string[], the
    *  "which parts of this API/service do you use" pattern (e.g. Stripe apiAreas). */
   type: 'string' | 'number' | 'boolean' | 'enum' | 'multiselect' | 'array' | 'object';
   label: string;

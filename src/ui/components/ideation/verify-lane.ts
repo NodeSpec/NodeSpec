@@ -69,6 +69,8 @@ export interface VerifyTest {
   /** test_cases.test_type and .framework, when the case names them. */
   testType?: string | null;
   framework?: string | null;
+  /** AL.27: test_cases.description, what the case checks in the agent's words. */
+  description?: string | null;
 }
 
 /** What the lane needs from a requirement row, carried on its Trace chain. */

@@ -23,3 +23,9 @@ export function handleProposeWorkPlan(_supabase: SupabaseClient, _auth: AuthResu
 export function handleAcceptWorkPlan(_supabase: SupabaseClient, _auth: AuthResult, _args: { project_id: string; plan_id: string }): Promise<MCPResponse> {
   return Promise.resolve({ success: false, error: NOT_INCLUDED });
 }
+
+/** AL.24: the sweep's half for plans; plans are not in the community edition. */
+export interface PlanSweep { planId: string; status: "accepted" | "waiting"; reason?: string }
+export function sweepPlans(_supabase: SupabaseClient, _projectId: string, _ownerId: string | null): Promise<PlanSweep[]> {
+  return Promise.resolve([]);
+}

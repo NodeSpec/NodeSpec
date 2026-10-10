@@ -130,6 +130,169 @@ export function parseTaskDocTasks(markdown: string): ParsedTaskDocTasks {
   return { tasks, flagged };
 }
 
+/**
+ * AL.27 (owner 2026-10-08): what each work order SAYS, read from the doc: the
+ * indented lines under a task line (the generator's details, or the steps the
+ * agent expanded it into), keyed by the task's anchor key. The serves-lines
+ * are left out (they are the task's criteria, read by parseTaskDocTasks), as
+ * are bare HTML comments; blank lines are skipped; the first line that is not
+ * indented ends the task. The base indent is removed and any deeper indent
+ * kept, so a nested list stays nested. A task line with no anchor has no key
+ * to carry its lines and is skipped, as parseTaskDocTasks skips it.
+ */
+export function taskDocDetails(markdown: string): Map<string, string[]> {
+  const details = new Map<string, string[]>();
+  if (!markdown) return details;
+  let inTasks = false;
+  let current: string[] | null = null;
+  for (const raw of markdown.split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    if (SECTION.test(line)) {
+      inTasks = ADDED_SECTION.test(line) || /^##\s+Implementation Tasks\b/.test(line);
+      current = null;
+      continue;
+    }
+    if (!inTasks) continue;
+    const match = TASK_LINE.exec(line);
+    if (match) {
+      const key = match[4];
+      current = key ? [] : null;
+      if (key) details.set(key, current!);
+      continue;
+    }
+    if (!current || line.trim() === '') continue;
+    if (!/^\s/.test(line)) { current = null; continue; }
+    if (/^\s*↳ serves:/.test(line) || /^\s*<!--.*-->\s*$/.test(line)) continue;
+    current.push(line.replace(/^ {1,2}/, '').replace(/^\t/, ''));
+  }
+  return details;
+}
+
+// ── AL.29 (gap 2): the steps an agent writes under a work order ───────────────
+//
+// The generator writes a work order as its task line, details and serves-lines,
+// never a checkbox under it. The agent expands it into steps: indented checkbox
+// lines under the task line ("  - [ ] ..."), with any lines indented further
+// under a step. Regeneration used to drop them (only Implementation Context and
+// Added Tasks survived). keepWorkOrderSteps carries them by the work order's
+// anchor key. The steps of a work order the regeneration no longer has (its
+// criterion was reworded or removed, so its title and key changed) go to
+// "Steps to review" at the end of the section, under the work order they were
+// written for, and stay there until someone moves or deletes them.
+const STEP_LINE = /^(\s+)- \[[ xX]\] /;
+const IMPLEMENTATION_TASKS = /^##\s+Implementation Tasks\b/;
+export const STEPS_TO_REVIEW_HEADING = "### Steps to review";
+const STEPS_REVIEW_NOTE = "Kept from a work order that was reworded or removed. Move each under a work order above, or delete it.";
+
+export interface WorkOrderSteps {
+  /** anchor key -> the work order as stored and the step lines under it, verbatim. */
+  byKey: Map<string, { displayId: string; title: string; lines: string[] }>;
+  /** The review block's lines as stored, without its heading and note. */
+  review: string[];
+}
+
+/** The steps under each work order of `## Implementation Tasks`, and the review block. */
+export function workOrderSteps(markdown: string): WorkOrderSteps {
+  const byKey: WorkOrderSteps["byKey"] = new Map();
+  const review: string[] = [];
+  let inTasks = false;
+  let inReview = false;
+  let current: { displayId: string; title: string; lines: string[] } | null = null;
+  let stepIndent: number | null = null;
+  for (const raw of (markdown ?? "").split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    if (SECTION.test(line)) {
+      inTasks = IMPLEMENTATION_TASKS.test(line);
+      inReview = false;
+      current = null;
+      continue;
+    }
+    if (!inTasks) continue;
+    if (line === STEPS_TO_REVIEW_HEADING) { inReview = true; current = null; continue; }
+    if (inReview) { if (line !== STEPS_REVIEW_NOTE) review.push(line); continue; }
+    const task = TASK_LINE.exec(line);
+    if (task) {
+      current = task[4] ? { displayId: task[2], title: task[3].trim(), lines: [] } : null;
+      if (current) byKey.set(task[4], current);
+      stepIndent = null;
+      continue;
+    }
+    if (!current || line.trim() === "") continue;
+    if (!/^\s/.test(line)) { current = null; continue; }
+    const step = STEP_LINE.exec(line);
+    if (step) { current.lines.push(line); stepIndent = step[1].length; continue; }
+    if (stepIndent !== null && line.length - line.trimStart().length > stepIndent) { current.lines.push(line); continue; }
+    stepIndent = null;
+  }
+  while (review.length > 0 && review[0].trim() === "") review.shift();
+  while (review.length > 0 && review[review.length - 1].trim() === "") review.pop();
+  return { byKey, review };
+}
+
+/**
+ * Carry the stored doc's steps into a regenerated one: under the work order
+ * with the same key, after its own lines; the steps of a work order no longer
+ * listed, and the stored review block, into "Steps to review" at the end of
+ * the section. A regeneration of an unchanged doc gives it back byte for byte.
+ */
+export function keepWorkOrderSteps(generated: string, stored: string): string {
+  const kept = workOrderSteps(stored);
+  if (kept.review.length === 0 && ![...kept.byKey.values()].some((w) => w.lines.length > 0)) return generated;
+  const lines = generated.split("\n");
+  const span = level2Span(lines, IMPLEMENTATION_TASKS);
+  if (!span) return generated;
+
+  const section: string[] = [];
+  const listed = new Set<string>();
+  for (let i = span.start; i < span.end; i++) {
+    section.push(lines[i]);
+    const task = TASK_LINE.exec(lines[i].trimEnd());
+    if (!task || !task[4]) continue;
+    listed.add(task[4]);
+    while (i + 1 < span.end && /^\s+\S/.test(lines[i + 1])) section.push(lines[++i]);
+    section.push(...(kept.byKey.get(task[4])?.lines ?? []));
+  }
+  const gone = [...kept.byKey].filter(([key, w]) => !listed.has(key) && w.lines.length > 0);
+  if (gone.length > 0 || kept.review.length > 0) {
+    while (section.length > 1 && section[section.length - 1].trim() === "") section.pop();
+    section.push("", STEPS_TO_REVIEW_HEADING, "", STEPS_REVIEW_NOTE, "",
+      ...kept.review,
+      ...gone.flatMap(([, w]) => [`Written for ${w.displayId}: ${w.title}`, ...w.lines]),
+      "");
+  }
+  return [...lines.slice(0, span.start), ...section, ...lines.slice(span.end)].join("\n");
+}
+
+/** AL.29: a checkbox line, a step under a work order or a statement under a test
+ *  case: whether it is ticked, and its text. Null for any other line. */
+export function checkboxOf(line: string): { done: boolean; text: string } | null {
+  const m = /^\s*- \[([ xX])\] (.*)$/.exec(line);
+  return m ? { done: m[1] !== " ", text: m[2] } : null;
+}
+
+/** How an agent writes a work order's steps; generate_task_docs serves it beside the gaps. */
+export const STEP_FORMAT = "Under a work order's task line, one indented checkbox line per step (\"  - [ ] <step>\"), with any detail indented further under its step. Write them into the stored doc with propose_patches update_artifact, passing base_sequence (the headSequence you read the doc at). Steps stay with their work order when the doc regenerates; the steps of a work order that was reworded or removed move to \"### Steps to review\", each group under \"Written for T<n>: <title>\": move each step under a work order, or delete it.";
+
+/**
+ * AL.29: what a task doc still asks of an agent: the open work orders of
+ * Implementation Tasks with no step under them (a ticked one is done), in the
+ * doc's order, and how many steps wait under "Steps to review".
+ */
+export function stepGaps(markdown: string): { withoutSteps: Array<{ id: string; key: string; title: string }>; toReview: number } {
+  const kept = workOrderSteps(markdown);
+  const withoutSteps: Array<{ id: string; key: string; title: string }> = [];
+  let inTasks = false;
+  for (const raw of (markdown ?? "").split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    if (SECTION.test(line)) { inTasks = IMPLEMENTATION_TASKS.test(line); continue; }
+    if (!inTasks) continue;
+    const task = TASK_LINE.exec(line);
+    if (!task || !task[4] || task[1] !== " ") continue;
+    if ((kept.byKey.get(task[4])?.lines.length ?? 0) === 0) withoutSteps.push({ id: task[2], key: task[4], title: task[3].trim() });
+  }
+  return { withoutSteps, toReview: kept.review.filter((l) => STEP_LINE.test(l)).length };
+}
+
 // ── Y (owner 2026-09-23): tasks a person adds by hand ──────────────────────────
 //
 // The task list is the agent's: generate_task_docs writes the work orders and
@@ -251,7 +414,10 @@ export function preserveAddedTasksSection(generated: string, stored: string): st
       carried.push(line.replace(TASK_ID_ON_LINE, `$1T${next}$3`));
       continue;
     }
-    if (dropping && /^\s+\S/.test(line)) continue;
+    // AL.29: a blank line inside a dropped task does not end it; only the next
+    // line that is not indented does (its later details used to land under the
+    // task before it).
+    if (dropping && (/^\s+\S/.test(line) || line.trim() === "")) continue;
     dropping = false;
     carried.push(line);
   }

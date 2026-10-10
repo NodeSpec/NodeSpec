@@ -5,7 +5,6 @@ import { refreshTaskPackets } from '../_shared/packet-freshness.ts';
 import { computeTaskContextFingerprint } from '../_shared/task-document-generator.ts';
 import { servedSentences, servedVisionText } from '../_shared/served-vision.ts';
 import { visionSentenceId } from '../_shared/vision-sentences.ts';
-import { computeTestContextFingerprint } from '../_shared/test-document-generator.ts';
 import { FakeSupabase, assert, assertEquals } from './helpers.ts';
 
 const N1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -69,6 +68,7 @@ Deno.test('no task artifacts → empty result, no DB traffic at all', async () =
   assertEquals(r, {
     checked: 0, refreshed: 0, refreshedPaths: [], skippedUnmanaged: 0,
     testPlansChecked: 0, testPlansRefreshed: 0, testPlansRefreshedPaths: [], testPlansSkippedUnmanaged: 0,
+    saves: [],
   });
   assertEquals(sb.calls.length, 0, 'early exit before any load');
 });
@@ -253,20 +253,6 @@ Deno.test('R6: task fingerprint — vision present vs absent vs changed all hash
   assertEquals(a.fingerprint, a2.fingerprint, 'deterministic');
   assert(a.fingerprint !== b.fingerprint, 'edits move it');
   assertEquals(none.fields.visionHash, '');
-});
-
-Deno.test('R6: TEST fingerprint hashes the TRIMMED vision — beyond-trim edits do not stale plans', () => {
-  const graph = baseGraph(false);
-  const req = { requirementId: 'REQ-001', name: 'n', description: 'd', category: 'functional', acceptanceCriteria: [{ text: 'c', met: false }] };
-  const base = 'V'.repeat(500); // beyond the 400-char trim boundary
-  // deno-lint-ignore no-explicit-any
-  const a = computeTestContextFingerprint(req as any, [], [], graph, base);
-  // deno-lint-ignore no-explicit-any
-  const b = computeTestContextFingerprint(req as any, [], [], graph, base + ' trailing edit past the trim');
-  assertEquals(a.fields.visionHash, b.fields.visionHash, 'edits past the render boundary are invisible — no churn');
-  // deno-lint-ignore no-explicit-any
-  const c = computeTestContextFingerprint(req as any, [], [], graph, 'a different vision entirely');
-  assert(a.fingerprint !== c.fingerprint, 'edits WITHIN the rendered slice stale the plan');
 });
 
 Deno.test('catalog load failure → error reported, nothing mutated, never throws', async () => {

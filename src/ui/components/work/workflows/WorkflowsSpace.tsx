@@ -11,9 +11,10 @@
 //   the 3D columns   space-scene.ts
 //   the inspector    whatever is picked, walked up and down the chain, with
 //                    the acts that belong to it, and the add forms
-//   Team             the workflow's owner on its pill, and the proposals
-//                    your agents left on workflows and outcomes, opened in
-//                    the one Proposals panel (decisions are made there)
+//   Team             the workflow's owner on its pill. The proposals your
+//                    agents leave are decided in the one Proposals panel,
+//                    under Agents in the header (AL.23, owner 2026-10-03:
+//                    the space's own Proposals button repeated it)
 //
 // Every write goes through the hooks Work already holds and refuses in the
 // database's words when it must; the refusal lands in the space's toast.
@@ -51,11 +52,8 @@ export interface WorkflowsSpaceProps {
   candidateActions: CandidateActions;
   /** Deletes the requirement row (its derivations go with it). null on success. */
   onDeleteRequirement: (rowId: string) => Promise<string | null>;
-  /** Team: owners on the journeys, and the proposals button. */
+  /** Team: owners on the journeys. */
   team: boolean;
-  /** Team: the proposals agents left on workflows and outcomes, still waiting. */
-  proposals: { count: number; firstId: string | null };
-  onOpenChanges?: (proposalId?: string) => void;
   /** "Open in: Requirements list" on a requirement. */
   onOpenRequirement?: (laneId: string, requirementRowId: string) => void;
   onOpenArchitecture?: (nodeId: string) => void;
@@ -95,7 +93,7 @@ const AVATAR_TONES = ['#5aa9e6', '#8B8FE6', '#5fd3c8', '#fbbf24', '#c07ae0'];
 const avatarTone = (label: string) => AVATAR_TONES[[...label].reduce((a, ch) => a + ch.charCodeAt(0), 0) % AVATAR_TONES.length];
 
 export default function WorkflowsSpace(props: WorkflowsSpaceProps) {
-  const { projectId, graph, lanesApi, outcomesApi, constraintsApi, requirements, chains, planSets, filesByReq, candidateActions, onDeleteRequirement, team, proposals, onOpenChanges, onOpenRequirement, onOpenArchitecture, lensRequest, mode = 'dark', sentences = [], firstSentenceId = null, constraintReach, requirementRows = [], viewOnly = false } = props;
+  const { projectId, graph, lanesApi, outcomesApi, constraintsApi, requirements, chains, planSets, filesByReq, candidateActions, onDeleteRequirement, team, onOpenRequirement, onOpenArchitecture, lensRequest, mode = 'dark', sentences = [], firstSentenceId = null, constraintReach, requirementRows = [], viewOnly = false } = props;
   const edit = !viewOnly;
   const lanes = lanesApi.lanes;
   // R.2b: what a constraint can hold for, from this project's own graph.
@@ -873,12 +871,6 @@ export default function WorkflowsSpace(props: WorkflowsSpaceProps) {
           </div>
         )}
       </div>
-
-      {team && (
-        <button type="button" className="b glass ns-ws-inboxbtn" data-testid="space-proposals" title="Proposals your agents left on workflows and outcomes" onClick={() => onOpenChanges?.(proposals.firstId ?? undefined)}>
-          <span className="dotlive" style={proposals.count ? { background: H.open } : undefined} /><span>Proposals</span><span className="n">{proposals.count}</span>
-        </button>
-      )}
 
       {pane && (
         <aside className="glass ns-ws-insp" data-testid="space-inspector" data-kind={form ? `form:${form.kind}` : sel?.kind}>

@@ -9,12 +9,13 @@ import { resolve } from 'node:path';
 import {
   buildJourney, outcomeState, stageState, stripLabel, chainSegments, criteriaLine, unplacedOutcomes,
   stageRemovalNote, outcomeRemovalRefusal, activeLayers, scopeOf, layerCountLine, layerOf, evidenceCommit,
-  initialsOf, shortDate, OUT_TONE, OUT_WORD, SPACE_COLOR, SPACE_COLOR_LIGHT, BANDS, LAYERS, hues, toneOf, layerColor, reqAlsoLine,
+  initialsOf, shortDate, OUT_TONE, OUT_WORD, SPACE_COLOR, SPACE_COLOR_LIGHT, BANDS, LAYERS, hues, toneOf, layerColor, reqAlsoLine, artifactOf,
 } from '../ui/components/work/workflows/space-model.js';
 import { SPACE_CSS } from '../ui/components/work/workflows/space-css.js';
 import { statusTones } from '../ui/components/ideation/status-tones.js';
 import { columns, laneXs, colWidth, focusMatch } from '../ui/components/work/workflows/space-scene.js';
 import { spaceFixture } from './helpers/space-fixture.js';
+import type { TraceChain } from '../ui/components/ideation/useTraceData.js';
 
 const read = (p: string) => readFileSync(resolve(process.cwd(), p), 'utf8');
 const journey = () => {
@@ -91,6 +92,23 @@ describe('W · one workflow as the space draws it', () => {
   it('an outcome on no stage of any workflow is listed for Requirements, never lost', () => {
     const f = spaceFixture();
     expect(unplacedOutcomes(f.outcomes, f.lanes).map((o) => o.id)).toEqual(['o9']);
+  });
+});
+
+describe('AL.29 · the file that carries a requirement is the files its tests name, not the record\'s Code (R3)', () => {
+  const sub = (id: string, tc: string, file: string, covers: string[]) => ({
+    id: `tc:${id}`, kind: 'test', title: `${tc} \u00b7 a test`, right: 'passed', state: 'ok', live: null, provenance: null,
+    detail: [['test code', file]], links: [`af:${file}`, ...covers.map((c) => `af:${c}`)],
+  });
+  const chainOf = (subs: ReturnType<typeof sub>[]) => ({ verify: { criteria: [], tests: [] }, cells: { plan: [{ down: subs }] } }) as unknown as TraceChain;
+  const pick = (subs: ReturnType<typeof sub>[]) => artifactOf({ tasks: [] }, chainOf(subs), null);
+
+  it('the first source a test covers, by path, with the tests that cover it; else the first test file; else none', () => {
+    const a = pick([sub('1', 'TC-2', 'a/test_x.py', ['c/y.py']), sub('2', 'TC-1', 'a/test_z.py', ['b/x.py', 'c/y.py'])]);
+    expect([a?.path, a?.provenBy]).toEqual(['b/x.py', ['TC-1']]);
+    expect(pick([sub('1', 'TC-1', 'a/test_x.py', [])])?.path).toBe('a/test_x.py');
+    expect(pick([])).toBeNull();
+    expect(artifactOf({ tasks: [] }, null, null)).toBeNull();
   });
 });
 

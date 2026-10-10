@@ -146,6 +146,8 @@ Deno.test('9.7: generate_task_docs and get_test_plan proceed on requirements alo
 
   const plan = new FakeSupabase();
   plan.script('projects', 'select', { data: PROJECT, error: null });
+  // AL.29: get_test_plan resolves the requirement inside the project's specification.
+  plan.script('project_specifications', 'select', { data: { id: 'spec-1' }, error: null });
   plan.script('specification_requirements', 'select', { data: REQ, error: null });
   plan.script('graph_snapshots', 'select', { data: { graph_data: graph() }, error: null });
   plan.script('specification_mappings', 'select', { data: [{ node_id: N_API }], error: null });
@@ -172,6 +174,8 @@ Deno.test('9.7: get_work_queue serves the queue and checkout_task claims with no
   sb.script('work_plans', 'select', { data: null, error: { message: 'relation "work_plans" does not exist' } });
   sb.script('branches', 'select', { data: [{ id: BRANCH, is_primary: true }], error: null });
   sb.script('branches', 'select', { data: { id: BRANCH }, error: null });
+  // AL.29: the queue reads the branch's task docs first; none here, so the rows are the open work.
+  sb.script('graph_snapshots', 'select', { data: { graph_data: { artifacts: {} } }, error: null });
   sb.script('graph_snapshots', 'select', { data: { graph_data: graph() }, error: null });
   scriptCatalogs(sb);
   scriptSpec(sb);

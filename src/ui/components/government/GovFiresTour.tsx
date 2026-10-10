@@ -19,8 +19,9 @@ import imgReact from '../../assets/react.png';
   provenance logging, and an ACAS scan export flowing out of the restricted
   subnet to a compliance vault. Layout, stage machine, and geometry are the
   landing tour's; only content differs, and no commercial-model names appear
-  in the AI connection surfaces. Derived from ProductTourSection.tsx — keep
-  structural fixes in sync between the two.
+  in the AI connection surfaces. Derived from the landing page's former tour
+  (ProductTourSection.tsx, retired with the 2026-10-07 homepage redesign); this
+  is now its only copy.
 */
 
 const STAGES: Array<{ view: string; overlay: string | null; label: string }> = [

@@ -6,6 +6,13 @@ import type { CatalogData } from "./catalog-loader.ts";
 // predicate — the same one get_build_readiness blocks on, so the plan's
 // [blocked by schema: …] markers can never disagree with readiness.
 import { isContractSchemaGap, simpleHash } from "./task-document-generator.ts";
+import {
+  criterionTextById, planStatements,
+  SCENARIO_HEADING, MANUAL_ITEM, SCENARIOS_HEADING, MANUAL_HEADING, STATEMENTS_TO_REVIEW_HEADING, REVIEW_NOTE,
+} from "./plan-cases.ts";
+// AL.29: the plan's reader and its lookup live in plan-cases.ts (the app reads plans
+// with it too); these names stay importable from here.
+export { findExistingTestArtifact, getTestDocumentPath, planCases, planStatements, statementGaps, STATEMENTS_TO_REVIEW_HEADING, type PlanCase } from "./plan-cases.ts";
 
 interface GraphNode {
   id: string;
@@ -79,7 +86,6 @@ export interface TestDocumentInput {
   catalogs: CatalogData;
   mappedNodes: MappedNode[];
   sourceArtifacts: GraphArtifact[];
-  projectVision?: string;
 }
 
 // WS3 restructure (owner-measured ~85k tokens for get_test_plan×17 — criterion text
@@ -94,7 +100,7 @@ export interface TestDocumentInput {
 // ## Test Strategy stays the ONLY editable section — its <!-- Edit --> marker and
 // fixture seed lines are pinned by the freshness suite.
 export function generateTestDocument(input: TestDocumentInput): string {
-  const { requirement, graph, catalogs, mappedNodes, sourceArtifacts, projectVision } = input;
+  const { requirement, graph, catalogs, mappedNodes, sourceArtifacts } = input;
 
   const lines: string[] = [];
 
@@ -111,12 +117,9 @@ export function generateTestDocument(input: TestDocumentInput): string {
   }
   lines.push("");
 
-  if (projectVision) {
-    lines.push("## Project Context");
-    lines.push("");
-    lines.push(trimVision(projectVision));
-    lines.push("");
-  }
+  // AL.29 R1 (owner 2026-10-09): no vision in a test plan. The read and the push
+  // gate passed different visions, so the file in git and NodeSpec's copy never
+  // agreed; the task doc carries the vision its node serves.
 
   const criteria = requirement.acceptanceCriteria.map((ac, i) => ({
     text: ac.text,
@@ -237,7 +240,7 @@ export function generateTestDocument(input: TestDocumentInput): string {
 
   lines.push("## Automated Test Scenarios");
   lines.push("");
-  lines.push("Derived section — regenerates when criteria, mappings, or contract schemas change; do not edit. Per scenario: derive the test from the cited criterion and the contract schemas, implement and run it, then report the outcome via report_test_results using the suggested test_id and the criterion's EXACT text as criterion_text (that binding is what flips met).");
+  lines.push("Each heading and the line under it are derived and regenerate when criteria, mappings, or contract schemas change. Under each heading, write the test's statements as checkbox lines (\"- [ ] Given ..., when ..., then ...\", with a then that can be observed and names the file or API it checks); they are kept with their criterion through every regeneration. Implement and run the test, then report the outcome via report_test_results using the suggested test_id and the criterion's EXACT text as criterion_text (that binding is what flips met).");
   lines.push("");
   if (automated.length === 0) {
     lines.push(criteria.length === 0
@@ -318,12 +321,6 @@ export function generateTestDocument(input: TestDocumentInput): string {
   lines.push("");
 
   return lines.join("\n");
-}
-
-// WS3 token diet: the vision is orientation, not spec — one paragraph's worth.
-const VISION_CHARS = 400;
-function trimVision(vision: string): string {
-  return vision.length <= VISION_CHARS ? vision : vision.slice(0, VISION_CHARS).trimEnd() + " …";
 }
 
 // The scenario heading's slug — deliberately NOT the verbatim criterion text (the
@@ -642,58 +639,6 @@ function buildContractValidationTests(
   return results;
 }
 
-// C4 step 5 (Discovered #4): the slug is the requirement ID ONLY — renaming a requirement
-// must not move its test plan. The 2-arg signature is kept so no call site churns; the
-// name is deliberately unused. Like the task-doc path (P0-4), this is a SEED for first
-// creation — lookups go through findExistingTestArtifact, never a recomputed path.
-export function getTestDocumentPath(requirementId: string, _requirementName: string): string {
-  const slug = requirementId
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return `.nodespec/tests/${slug}.tests.md`;
-}
-
-// The pre-C4 path formula: `{id}-{name}` slugged together. Kept ONLY so plans stored
-// before the id-only formula (and before metadata.requirementId stamping) keep being
-// found; never used to create new paths.
-function legacyTestDocumentPath(requirementId: string, requirementName: string): string {
-  const slug = `${requirementId}-${requirementName}`
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return `.nodespec/tests/${slug}.tests.md`;
-}
-
-// C4 step 5: the ONE way to find a requirement's existing test plan (the analogue of
-// findExistingTaskArtifact). Match order:
-//   1. metadata.requirementId — rename-proof, stamped on every plan written since C4;
-//   2. the id-only path — plans created with the new formula but missing metadata;
-//   3. the legacy id+name path — pre-C4 plans (only findable while the name is
-//      unchanged, which is exactly the pre-C4 status quo; once refreshed they gain
-//      metadata.requirementId and become rename-proof).
-export function findExistingTestArtifact<
-  T extends { kind: string; path?: string; metadata?: Record<string, unknown> | null },
->(
-  artifacts: Record<string, T>,
-  requirementId: string,
-  requirementName: string,
-): T | null {
-  const plans = Object.values(artifacts).filter((a) => a?.kind === "test-plan");
-  for (const artifact of plans) {
-    if (artifact.metadata?.requirementId === requirementId) return artifact;
-  }
-  const newPath = getTestDocumentPath(requirementId, requirementName);
-  for (const artifact of plans) {
-    if (artifact.path === newPath) return artifact;
-  }
-  const legacyPath = legacyTestDocumentPath(requirementId, requirementName);
-  for (const artifact of plans) {
-    if (artifact.path === legacyPath) return artifact;
-  }
-  return null;
-}
-
 // C4 step 2: the generator's "## Test Strategy" section is explicitly editable (the
 // `<!-- Edit this section ... -->` marker). A freshness regenerate must give it the
 // same respect C1 gives user-authored task docs: if the stored plan's strategy section
@@ -734,6 +679,87 @@ export function preserveTestStrategySection(generated: string, stored: string): 
     ...storedLines,
     ...generatedLines.slice(generatedSec.end),
   ].join("\n");
+}
+
+/** A regenerated plan with the stored plan's statements put back under the same
+ *  criterion; the rest under "Statements to review". Returns `generated` unchanged
+ *  when the stored plan has none. */
+export function keepAgentStatements(generated: string, stored: string): string {
+  const kept = planStatements(stored);
+  if (kept.byText.size === 0 && kept.review.length === 0) return generated;
+  const lines = generated.split("\n");
+  const textOf = criterionTextById(lines);
+  // Every criterion the regenerated plan has a place for (a scenario heading or a
+  // manual item), found before the walk: the review block is written at the end of
+  // the scenarios, before the manual items are reached.
+  const anchored = new Set<string>();
+  {
+    let sec = "";
+    for (const line of lines) {
+      if (/^## (?!#)/.test(line)) { sec = line.trim(); continue; }
+      const m = sec === SCENARIOS_HEADING ? SCENARIO_HEADING.exec(line) : sec === MANUAL_HEADING ? MANUAL_ITEM.exec(line) : null;
+      const text = m ? textOf.get(m[1]) : undefined;
+      if (text !== undefined) anchored.add(text);
+    }
+  }
+  const out: string[] = [];
+  let section = "";
+  let pending: string[] | null = null;
+  let reviewed = false;
+  const flush = () => { if (pending) { out.push(...pending); pending = null; } };
+  const emitReview = () => {
+    if (reviewed) return;
+    reviewed = true;
+    const entries = [...kept.review];
+    for (const [text, list] of kept.byText) {
+      if (anchored.has(text)) continue;
+      entries.push(`Written for: "${text}"`, ...list);
+    }
+    if (entries.length === 0) return;
+    out.push(STATEMENTS_TO_REVIEW_HEADING, "", REVIEW_NOTE, "", ...entries, "");
+  };
+  for (const line of lines) {
+    if (/^## (?!#)/.test(line)) {
+      flush();
+      if (section === SCENARIOS_HEADING) emitReview();
+      section = line.trim();
+      out.push(line);
+      continue;
+    }
+    if (section === SCENARIOS_HEADING) {
+      if (line.startsWith("#### ")) {
+        flush();
+        const m = SCENARIO_HEADING.exec(line);
+        const text = m ? textOf.get(m[1]) : undefined;
+        const list = text !== undefined ? kept.byText.get(text) : undefined;
+        if (text !== undefined && list) pending = list;
+        out.push(line);
+        continue;
+      }
+      if (line.trim() === "") flush();
+      out.push(line);
+      continue;
+    }
+    out.push(line);
+    if (section === MANUAL_HEADING) {
+      const m = MANUAL_ITEM.exec(line);
+      const text = m ? textOf.get(m[1]) : undefined;
+      const list = text !== undefined ? kept.byText.get(text) : undefined;
+      if (text !== undefined && list) out.push(...list.map((l) => `  ${l}`));
+    }
+  }
+  flush();
+  if (section === SCENARIOS_HEADING) emitReview();
+  return out.join("\n");
+}
+
+/** How an agent writes a test case's statements; get_test_plan serves it beside the gaps. */
+export const STATEMENT_FORMAT = "Under each \"#### AC-...\" test case heading, one checkbox line per statement (\"- [ ] Given ..., when ..., then ...\", with a then that can be observed and names the file or API it checks); under a manual item, the same lines indented by two spaces (the check a person performs). Write them into the stored plan with propose_patches update_artifact, passing base_sequence (the headSequence you read the plan at). Statements stay with their criterion when the plan regenerates; those of a criterion that was reworded or removed move to \"#### Statements to review\", each group under a \"Written for:\" line that quotes the criterion: move each statement under its test case, or delete it. A case blocked by a schema waits for the schema.";
+
+/** What a regeneration carries from the stored plan: the Test Strategy body and the
+ *  test-case statements. The read path and the push gate both call this. */
+export function carryAgentPlanContent(generated: string, stored: string): string {
+  return keepAgentStatements(preserveTestStrategySection(generated, stored), stored);
 }
 
 interface CriterionIssue {
@@ -811,9 +837,8 @@ export interface TestContextFingerprint {
     mappedNodeSignatures: string[];
     sourceArtifactContentHashes: string[];
     connectedTopology: string[];
-    /** R6 (Discovered #9): the plan embeds the TRIMMED vision, so the hash
-     *  covers exactly what renders — edits beyond the trim boundary change
-     *  nothing visible and must not stale the plan. */
+    /** Always empty since AL.29 R1 (plans carry no vision); kept so stored
+     *  fingerprints keep matching. */
     visionHash: string;
     /** N10(b): the plan's ONE catalog read is ai_context.testingPatterns of the mapped
      *  technologies (framework recommendation) — hashed narrowly so enrichment of any
@@ -828,7 +853,6 @@ export function computeTestContextFingerprint(
   mappedNodes: MappedNode[],
   sourceArtifacts: GraphArtifact[],
   graph: GraphData,
-  projectVision?: string,
   catalogs?: CatalogData,
 ): TestContextFingerprint {
   // WS3: verification participates — moving a criterion between the automated and
@@ -871,10 +895,9 @@ export function computeTestContextFingerprint(
     mappedNodeSignatures,
     sourceArtifactContentHashes,
     connectedTopology,
-    // R6 (Discovered #9): hash the TRIMMED text — the plan renders only
-    // trimVision's slice, so the fingerprint tracks rendered content, not
-    // the raw column. One-time re-stale round on the field-set change.
-    visionHash: projectVision ? simpleHash(trimVision(projectVision)) : "",
+    // AL.29 R1: plans carry no vision. The field stays, always empty, so every
+    // stored fingerprint (all of them made without a vision) still matches.
+    visionHash: "",
     // N10(b): narrow by design — testingPatterns is the plan's only catalog read, so
     // enriching bestPractices/apiReference/etc. must not re-stale every plan.
     catalogSignature: catalogs

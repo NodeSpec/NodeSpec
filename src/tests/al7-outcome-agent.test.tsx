@@ -102,7 +102,7 @@ describe('AL.7 · in the space', () => {
     const { getByTestId } = render(
       <WorkflowsSpace projectId="p1" graph={f.graph} lanesApi={lanesApi as never} outcomesApi={outcomesApi as never} constraintsApi={constraintsApi as never}
         requirements={f.band} chains={f.chains} candidateActions={{ promote: ok(), settle: ok(), dismiss: ok() } as never} onDeleteRequirement={ok()}
-        team proposals={{ count: 0, firstId: null }} onOpenChanges={vi.fn()} onOpenRequirement={vi.fn()} onOpenArchitecture={vi.fn()} />,
+        team onOpenRequirement={vi.fn()} onOpenArchitecture={vi.fn()} />,
     );
     await act(async () => { scene.pick!({ kind: 'step', stepId: 's1' }); });
     expect(within(getByTestId('space-inspector')).getByText(/from claude-code/)).toBeTruthy();

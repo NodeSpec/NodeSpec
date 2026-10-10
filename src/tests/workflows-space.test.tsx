@@ -42,7 +42,6 @@ const apis = () => ({
   constraintsApi: { groups: [], total: f.constraints.length, loading: false, error: null, refresh: vi.fn(async () => {}), add: ok(), remove: ok(), setMark: ok(), rows: f.constraints },
   candidateActions: { promote: ok(), settle: ok(), dismiss: ok() },
   onDeleteRequirement: ok(),
-  onOpenChanges: vi.fn(),
   onOpenRequirement: vi.fn(),
   onOpenArchitecture: vi.fn(),
 });
@@ -51,7 +50,7 @@ let a: Apis;
 const mount = (team = false, mode?: 'dark' | 'light', extra: Record<string, unknown> = {}) => render(
   <WorkflowsSpace mode={mode} projectId="p1" graph={f.graph} lanesApi={a.lanesApi as never} outcomesApi={a.outcomesApi as never} constraintsApi={a.constraintsApi as never}
     requirements={f.band} chains={f.chains} candidateActions={a.candidateActions as never} onDeleteRequirement={a.onDeleteRequirement}
-    team={team} proposals={{ count: 2, firstId: 'prop-1' }} onOpenChanges={a.onOpenChanges} onOpenRequirement={a.onOpenRequirement} onOpenArchitecture={a.onOpenArchitecture} {...extra} />,
+    team={team} onOpenRequirement={a.onOpenRequirement} onOpenArchitecture={a.onOpenArchitecture} {...extra} />,
 );
 const pick = async (p: unknown) => { await act(async () => { scene.pick!(p); }); };
 const click = async (el: Element) => { await act(async () => { fireEvent.click(el); }); };
@@ -335,7 +334,7 @@ describe('W · the strip edits the stages', () => {
     await act(async () => { rerender(
       <WorkflowsSpace projectId="p1" graph={f.graph} lanesApi={a.lanesApi as never} outcomesApi={a.outcomesApi as never} constraintsApi={a.constraintsApi as never}
         requirements={f.band} chains={f.chains} candidateActions={a.candidateActions as never} onDeleteRequirement={a.onDeleteRequirement}
-        team={false} proposals={{ count: 2, firstId: 'prop-1' }} onOpenChanges={a.onOpenChanges} onOpenRequirement={a.onOpenRequirement} onOpenArchitecture={a.onOpenArchitecture} />,
+        team={false} onOpenRequirement={a.onOpenRequirement} onOpenArchitecture={a.onOpenArchitecture} />,
     ); });
     expect(getByTestId('space-toast').textContent).toBe('Filed as a proposal: add the stage "Recover" to Incident response. The owner decides it under Proposals.');
   });
@@ -456,14 +455,15 @@ describe('W · the Constraints lens', () => {
 });
 
 describe('W · Team', () => {
-  it('the owner\'s initials on the journey and the stage pane; the proposals button opens the one Proposals panel', async () => {
-    const { getByTestId, getAllByTestId } = mount(true);
+  it('the owner\'s initials on the journey and the stage pane; proposals are decided under Agents, not from the space', async () => {
+    const { getByTestId, getAllByTestId, container } = mount(true);
     expect(getAllByTestId('space-journey')[0].querySelector('.av')!.textContent).toBe('AK');
     await click(getAllByTestId('space-stage')[0]);
     expect(getByTestId('space-inspector').textContent).toContain('Ana Kohl owns this workflow');
-    expect(getByTestId('space-proposals').textContent).toBe('Proposals2');
-    await click(getByTestId('space-proposals'));
-    expect(a.onOpenChanges).toHaveBeenCalledWith('prop-1');
+    // AL.23 (owner 2026-10-03): the space's own Proposals button repeated the
+    // Agents button in the header, and is gone on every plan.
+    expect(container.querySelector('[data-testid="space-proposals"]')).toBeNull();
+    expect([...container.querySelectorAll('button')].some((b) => /Proposals/.test(b.textContent ?? ''))).toBe(false);
     expect(lastModel().team).toBe(true);
   });
 });

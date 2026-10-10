@@ -195,6 +195,23 @@ Deno.test('requirement target with a stored plan: state summary (path/stale/fing
   assertEquals(sb.callsTo('ai_proposals').length, 0);
 });
 
+Deno.test('AL.28 requirement target: a plan an agent filed by hand under the row id is found where it lives', async () => {
+  // The production agent's hand-filed plans named the row id and their own path;
+  // the context read said no plan while get_project_status counted them.
+  const sb = new FakeSupabase();
+  // deno-lint-ignore no-explicit-any
+  const g: any = viewGraph();
+  g.artifacts.tp1 = { ...g.artifacts.tp1, path: 'docs/qa/store-tasks-plan.md', metadata: { requirementId: REQ_ROW } };
+  scriptRequirementRead(sb, g, []);
+
+  const r = await handleGetProjectContext(sb as never, READ_AUTH, { project_id: PROJECT.id, branch_id: BRANCH, target_type: 'requirement', target_id: 'REQ-001' });
+  assertEquals(r.success, true);
+  // deno-lint-ignore no-explicit-any
+  const data = r.data as any;
+  assertEquals(data.testPlan.exists, true);
+  assertEquals(data.testPlan.path, 'docs/qa/store-tasks-plan.md');
+});
+
 Deno.test('requirement target by display id: REQ-001 is found, and only inside this project\'s specification', async () => {
   const sb = new FakeSupabase();
   scriptRequirementRead(sb, viewGraph(), [{ id: 'c1', status: 'passed', stale: false }]);

@@ -18,7 +18,9 @@
 //   testplan-read-refresh (#3) a stored plan whose fingerprint no longer
 //                         matches the live graph regenerates AT READ TIME
 //                         (Test Strategy edits preserved, response says
-//                         testPlanRefreshed + note); a matching fingerprint
+//                         testPlanRefreshed + note); AL.29: the refresh is
+//                         filed as one update to that plan, and a second
+//                         read files nothing new; a matching fingerprint
 //                         serves the stored plan verbatim, untouched.
 import { callFn, rest, github, mcpCall, Scenario, parseMcp } from '../lib.mjs';
 import { createProject, connectRepo, bumpArtifactContent } from '../fixtures.mjs';
@@ -238,7 +240,7 @@ export const testplanReadRefresh = {
   name: 'testplan-read-refresh',
   boxes: [
     'DF-3 stale stored plan regenerates AT READ TIME, Test Strategy preserved',
-    'DF-3 response says testPlanRefreshed + note; nothing persisted',
+    'DF-3 response says testPlanRefreshed + note; the refresh is filed once as an update to the stored plan',
     'DF-3 matching fingerprint serves the stored plan verbatim',
   ],
   async run(env, session) {
@@ -278,11 +280,28 @@ export const testplanReadRefresh = {
       !!read1?.testPlanContent?.includes('BENCH CUSTOM STRATEGY LINE'),
       read1?.testPlanContent?.slice(0, 300) ?? '(no content)');
     s.check('DF-3: the response EXPLAINS the refresh (note present)',
-      typeof read1?.note === 'string' && read1.note.includes('fresh regeneration'),
+      typeof read1?.note === 'string' && read1.note.includes('filed as a proposal'),
       JSON.stringify(read1?.note ?? null));
-    const proposalsAfter = (await db.select('ai_proposals', `source_branch_id=eq.${fx.ids.branch}&select=id`)).length;
-    s.check('DF-3: the refresh persisted NOTHING (push gate owns the artifact)',
-      proposalsAfter === proposalsBefore, `proposals ${proposalsBefore}→${proposalsAfter}`);
+    // AL.29: a changed plan is saved the way a new one is, so the stored copy and
+    // git catch up with what the agent was served. One update to the stored plan,
+    // carrying the regenerated content; a second stale read files nothing new.
+    const after1 = await db.select('ai_proposals', `source_branch_id=eq.${fx.ids.branch}&select=id,patches,metadata`);
+    const filed = after1.find((p) => p.id === read1?.proposalId);
+    const patch = filed?.patches?.[0]?.patch;
+    s.check('DF-3: the refresh is filed as ONE update_artifact on the stored plan, with the served content',
+      after1.length === proposalsBefore + 1 && !!filed && filed.patches.length === 1 &&
+      patch?.type === 'update_artifact' && patch?.payload?.id === planId &&
+      filed.metadata?.artifactId === planId &&
+      // the response wraps the plan in the untrusted-content envelope (P0-7); the stored copy is the plan itself
+      String(read1?.testPlanContent ?? '').includes(String(patch?.payload?.changes?.content ?? '\u0000')),
+      JSON.stringify({ before: proposalsBefore, after: after1.length, proposalId: read1?.proposalId, type: patch?.type, target: patch?.payload?.id }).slice(0, 300));
+    const readAgain = parseMcp(await mcpCall(env, 'get_test_plan', {
+      project_id: fx.ids.project, branch_id: fx.ids.branch, requirement_id: fx.ids.req1,
+    }));
+    const after2 = (await db.select('ai_proposals', `source_branch_id=eq.${fx.ids.branch}&select=id`)).length;
+    s.check('DF-3: a second stale read files nothing new and names the open refresh',
+      after2 === after1.length && readAgain?.testPlanRefreshed === true && readAgain?.proposalId === read1?.proposalId,
+      `proposals ${after1.length}→${after2}, ids ${read1?.proposalId} / ${readAgain?.proposalId}`);
 
     // Stamp the CURRENT fingerprint back onto the stored artifact: the next
     // read must serve the stored plan untouched (no churn on fresh plans).

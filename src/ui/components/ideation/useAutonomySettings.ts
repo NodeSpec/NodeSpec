@@ -7,18 +7,23 @@
 // existing canvas auto-approve, never a parallel switch. Only lanes that
 // differ from the shipped default are stored (policyToStored) — an empty
 // object stays "today's routing", resolved in code on both sides.
+// AL.24: a lane raised to Auto asks the server to apply what waited under
+// the old setting (the sweep), and the panel says what it did.
 import { useCallback, useEffect, useState } from 'react';
 import { getSupabaseClient } from '../../../persistence/supabase/client.js';
 import {
   type AutonomyLane, type AutonomyLevel, type AutonomyPolicy,
-  resolveAutonomyPolicy, policyToStored, presetPolicy,
+  AUTONOMY_LANES, resolveAutonomyPolicy, policyToStored, presetPolicy,
 } from '../../utils/autonomy.js';
+import { sweepAutoLanes, sweepLine } from '../../services/autoSweep.js';
 
 export interface AutonomySettings {
   policy: AutonomyPolicy;
   loading: boolean;
   saving: boolean;
   error: string | null;
+  /** What the last sweep applied, after a lane was raised to Auto. */
+  sweepNote: string | null;
   setLane: (lane: AutonomyLane, level: AutonomyLevel) => Promise<void>;
   applyPreset: (preset: 'approve' | 'auto') => Promise<void>;
   refresh: () => Promise<void>;
@@ -29,6 +34,7 @@ export function useAutonomySettings(projectId: string | null | undefined): Auton
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sweepNote, setSweepNote] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!projectId) { setPolicy(resolveAutonomyPolicy({})); setLoading(false); return; }
@@ -74,6 +80,9 @@ export function useAutonomySettings(projectId: string | null | undefined): Auton
       // RLS: a seat below maintainer updates nothing — say so instead of pretending.
       if (!updated || (updated as unknown[]).length === 0) throw new Error('Only the project owner or a maintainer can change Autonomy settings.');
       setError(null);
+      if (AUTONOMY_LANES.some((lane) => next[lane] === 2 && previous[lane] !== 2)) {
+        setSweepNote(sweepLine(await sweepAutoLanes(projectId)));
+      }
     } catch (e) {
       setPolicy(previous);
       setError(e instanceof Error ? e.message : String(e));
@@ -91,5 +100,5 @@ export function useAutonomySettings(projectId: string | null | undefined): Auton
     await write(presetPolicy(preset));
   }, [write]);
 
-  return { policy, loading, saving, error, setLane, applyPreset, refresh };
+  return { policy, loading, saving, error, sweepNote, setLane, applyPreset, refresh };
 }

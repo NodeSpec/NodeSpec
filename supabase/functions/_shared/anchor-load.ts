@@ -20,7 +20,7 @@ import {
 import { keepWithheldFromCanvas, withholdCredentials } from "./credential-withhold.ts";
 
 /** Equals the sentinel in mcp-server/tools/proposals.ts and
- *  src/ui/utils/proposal-git-content.ts (a test pins all three). The accept
+ *  core/src/proposal-git-content.ts (a test pins all three). The accept
  *  path fetches the file at `contentSource.ref` in its place. */
 export const GIT_CONTENT_SENTINEL = "__nodespec_git_content__";
 

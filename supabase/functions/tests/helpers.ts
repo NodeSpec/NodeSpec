@@ -340,7 +340,9 @@ class MemoryQuery implements PromiseLike<MemoryResult> {
     if (!columns || columns.trim() === '*') return { ...row };
     const out: Row = {};
     for (const tok of splitColumns(columns)) {
-      const m = /^(?:([A-Za-z_]\w*):)?([A-Za-z_]\w*)(!inner|!left)?\(([\s\S]*)\)$/.exec(tok);
+      // `rel!inner(...)`, `rel!left(...)`, or a foreign-key hint
+      // `rel!some_fkey(...)` (PostgREST's disambiguation, a left embed).
+      const m = /^(?:([A-Za-z_]\w*):)?([A-Za-z_]\w*)(![A-Za-z_]\w*)?\(([\s\S]*)\)$/.exec(tok);
       if (m) {
         const [, alias, rel, mod, inner] = m;
         const target = this.db.rowsOf(rel).find((r) => r.id === row[`${singular(rel)}_id`]);
@@ -424,9 +426,12 @@ class MemoryQuery implements PromiseLike<MemoryResult> {
       case 'upsert': {
         const items = (Array.isArray(this.payload) ? this.payload : [this.payload]) as Row[];
         const conflict = String((this.opts as { onConflict?: string } | undefined)?.onConflict ?? 'id').split(',').map((s) => s.trim());
+        // PostgREST: ignoreDuplicates is ON CONFLICT DO NOTHING (the existing row is kept, and not returned).
+        const ignoreDuplicates = (this.opts as { ignoreDuplicates?: boolean } | undefined)?.ignoreDuplicates === true;
         const touched: Row[] = [];
         for (const item of items) {
           const existing = rows.find((r) => conflict.every((c) => r[c] === item[c]));
+          if (existing && ignoreDuplicates) continue;
           if (existing) { Object.assign(existing, item); touched.push(existing); continue; }
           const row: Row = { ...item };
           if (row.id === undefined) row.id = crypto.randomUUID();

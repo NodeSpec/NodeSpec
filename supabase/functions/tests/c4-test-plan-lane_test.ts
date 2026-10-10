@@ -19,6 +19,8 @@ import {
 import { refreshTaskPackets } from '../_shared/packet-freshness.ts';
 import { handleGetTestPlan } from '../mcp-server/tools/context.ts';
 import { PatchOperationSchema } from '../_shared/patch-schema.ts';
+import { applyPatches } from '../_shared/core-engine/patch-engine.ts';
+import { createEmptyGraph } from '../_shared/core-engine/utils.ts';
 import { FakeSupabase, assert, assertEquals } from './helpers.ts';
 
 const PROJECT = { id: '11111111-1111-4111-8111-111111111111', name: 'Bench' };
@@ -157,7 +159,7 @@ Deno.test('freshness: fresh test-plan fingerprint → checked, content untouched
   // catalogSignature field-set change reads as stale.
   // deno-lint-ignore no-explicit-any
   const emptyCatalogs: any = { nodeRoles: {}, technologies: {}, deploymentTargets: {}, cloudProviderPatterns: [], scopeArchetypes: {} };
-  const fp = computeTestContextFingerprint(reqForGen(criteria), MAPPED as never, [], graph, undefined, emptyCatalogs);
+  const fp = computeTestContextFingerprint(reqForGen(criteria), MAPPED as never, [], graph, emptyCatalogs);
   graph.artifacts[TP] = {
     id: TP, nodeId: N1, kind: 'test-plan', path: '.nodespec/tests/req-001.tests.md',
     content: 'CURRENT PLAN', metadata: { testContextFingerprint: fp, requirementId: 'REQ-001' },
@@ -182,14 +184,17 @@ Deno.test('freshness: unmanaged test-plan (no fingerprint = user-authored) is sk
 // ── Step 1: get_test_plan persists a fresh generation as a pending proposal ──
 
 // deno-lint-ignore no-explicit-any
-function scriptGetTestPlan(sb: FakeSupabase, g: any, opts?: { skipCatalogs?: boolean }) {
+function scriptGetTestPlan(sb: FakeSupabase, g: any, opts?: { skipCatalogs?: boolean; patchSequence?: number; openRefresh?: string }) {
   sb.script('projects', 'select', { data: PROJECT, error: null });
+  // AL.29: get_test_plan resolves the requirement inside the project's specification.
+  sb.script('project_specifications', 'select', { data: { id: 'spec-1' }, error: null });
   sb.script('specification_requirements', 'select', {
     data: { id: REQ_ROW, requirement_id: 'REQ-001', name: 'Health endpoint', description: 'The API must expose /health', category: 'functional', status: 'pending', acceptance_criteria: [{ text: 'GET /health returns 200' }], specification_id: 'spec-1' },
     error: null,
   });
-  sb.script('graph_snapshots', 'select', { data: { graph_data: g }, error: null });
+  sb.script('graph_snapshots', 'select', { data: { graph_data: g, ...(opts?.patchSequence !== undefined ? { patch_sequence: opts.patchSequence } : {}) }, error: null });
   sb.script('specification_mappings', 'select', { data: [{ node_id: N1 }], error: null });
+  if (opts?.openRefresh) sb.script('ai_proposals', 'select', { data: { id: opts.openRefresh }, error: null });
   if (!opts?.skipCatalogs) {
     for (const t of ['node_roles', 'technology_catalog', 'deployment_targets', 'legacy_type_mappings', 'cloud_provider_patterns', 'scope_archetypes']) {
       sb.script(t, 'select', { data: [], error: null });
@@ -200,7 +205,7 @@ function scriptGetTestPlan(sb: FakeSupabase, g: any, opts?: { skipCatalogs?: boo
   sb.script('test_cases', 'select', { data: [], error: null });
 }
 
-Deno.test('get_test_plan: fresh generation is parked as a proposal — add_artifact + node link, test-plan-generator actor', async () => {
+Deno.test('get_test_plan: fresh generation is parked as a proposal: one add_artifact that links its node, test-plan-generator actor', async () => {
   const sb = new FakeSupabase();
   scriptGetTestPlan(sb, baseGraph());
 
@@ -229,45 +234,82 @@ Deno.test('get_test_plan: fresh generation is parked as a proposal — add_artif
   assertEquals(meta.requirementId, 'REQ-001', 'rename-proof lookup key stamped at birth');
   assertEquals(add.metadata.actorId, 'test-plan-generator');
 
-  const link = insert.patches.find((p) => p.patch.type === 'update_node')!.patch;
-  assertEquals(link.payload.id, N1, 'companion link patch targets the primary mapped node');
-  assert((link.payload.changes as Record<string, unknown[]>).artifacts.includes(add.payload.id), 'node gains the artifact id');
+  // AL.28: the create links its node. No whole-list update_node rides along (the
+  // engine once checked it before the file existed, and every one failed under
+  // Auto); applied in one call, as the server's Auto accept applies it, the node
+  // holds the plan once.
+  assertEquals(insert.patches.map((p) => p.patch.type), ['add_artifact']);
+  const applied = applyPatches({ ...createEmptyGraph(), nodes: baseGraph().nodes }, insert.patches.map((p) => p.patch) as never);
+  assert(applied.success, JSON.stringify(applied.error));
+  assertEquals(applied.graph!.nodes[N1].artifacts, [add.payload.id]);
 
   for (const p of insert.patches) {
     assert(PatchOperationSchema.safeParse(p.patch).success, `${p.patch.type} valid for the apply pipeline`);
   }
 });
 
-Deno.test('get_test_plan: stored plan found via metadata.requirementId after a rename → refreshed when stale, NO proposal', async () => {
-  // Dogfood find 2026-09-02 (#3) changed this lane's doctrine: a stored plan
-  // whose fingerprint no longer matches the current inputs is REGENERATED at
-  // read time instead of served as-is (the old behavior kept reporting
-  // "noschema" after a schema landed). The rename-proof lookup still holds —
-  // the artifact is FOUND (isNew false, nothing parked) — and the refresh is
-  // deliberately NOT persisted: that stays the push-time gate's job.
+Deno.test('get_test_plan: a stale stored plan found after a rename is regenerated and filed as ONE refresh (AL.29)', async () => {
+  // Dogfood find 2026-09-02 (#3): a stored plan whose fingerprint no longer matches
+  // is REGENERATED at read time. AL.29: the regeneration is also filed, as one
+  // update_artifact on the stored plan, so NodeSpec's copy, the response and git
+  // agree (before, nothing saved it and git and NodeSpec drifted apart).
   const sb = new FakeSupabase();
   const g = baseGraph();
   g.artifacts[TP] = {
     id: TP, nodeId: N1, kind: 'test-plan', path: '.nodespec/tests/req-001-old-name.tests.md',
     content: 'STORED PLAN BODY', status: 'draft',
-    metadata: { testContextFingerprint: { fingerprint: 'f1' }, requirementId: 'REQ-001' },
+    metadata: { testContextFingerprint: { fingerprint: 'f1' }, requirementId: 'REQ-001', keep: 'me' },
   };
-  scriptGetTestPlan(sb, g, { skipCatalogs: true });
+  scriptGetTestPlan(sb, g, { skipCatalogs: true, patchSequence: 41 });
 
   const r = await handleGetTestPlan(sb as never, READ_AUTH, { project_id: PROJECT.id, branch_id: BRANCH, requirement_id: REQ_ROW });
   assertEquals(r.success, true);
   const data = r.data as Record<string, unknown>;
-  assertEquals(data.testPlanIsNew, false, 'the stored plan WAS found — rename did not orphan it');
+  assertEquals(data.testPlanIsNew, false, 'the stored plan WAS found: rename did not orphan it');
   assert(!String(data.testPlanContent).includes('STORED PLAN BODY'), 'stale stored content is not served');
   assert(String(data.testPlanContent).includes('# Test Plan:'), 'a fresh regeneration is served instead');
-  assertEquals(data.proposalId, undefined, 'a refresh parks NOTHING — persistence belongs to the push-time gate');
-  // #3 follow-up: the refresh must SAY so — persistNote used to ship only
-  // beside proposalId, which a refresh never has, so the caller got a
-  // silently different plan with no explanation.
   assertEquals(data.testPlanRefreshed, true, 'the response flags the read-time refresh');
-  assert(String(data.note).includes('fresh regeneration'), 'the note explains what happened and where persistence lives');
-  assertEquals(sb.callsTo('ai_proposals', 'insert').length, 0);
+  assert(typeof data.proposalId === 'string', 'the refresh is filed, and the response names it');
+  assert(String(data.note).includes('filed as a proposal'), 'the note says the stored copy and git catch up');
+
+  const inserts = sb.callsTo('ai_proposals', 'insert');
+  assertEquals(inserts.length, 1, 'one refresh');
+  const proposal = inserts[0].payload as { patches: Array<{ patch: { type: string; payload: { id: string; changes: Record<string, unknown> } } }>; metadata: Record<string, unknown> };
+  assertEquals(proposal.patches.map((p) => p.patch.type), ['update_artifact'], 'an update of the stored plan, never a second plan');
+  const change = proposal.patches[0].patch;
+  assertEquals(change.payload.id, TP);
+  assert(String(data.testPlanContent).includes(String(change.payload.changes.content)), 'what is served is what is filed (inside the transport envelope)');
+  assert(!String(change.payload.changes.content).includes('<untrusted-data>'), 'the stored copy is never enveloped');
+  const meta = change.payload.changes.metadata as Record<string, unknown>;
+  assertEquals(meta.keep, 'me', 'the plan keeps its other metadata');
+  assertEquals(meta.requirementId, 'REQ-001');
+  assert((meta.testContextFingerprint as { fingerprint: string }).fingerprint !== 'f1', 'the new fingerprint, so the next read matches');
+  assertEquals(proposal.metadata.source, 'mcp-test-plan');
+  assertEquals(proposal.metadata.artifactId, TP, 'names the plan it refreshes');
+  assertEquals(proposal.metadata.baseSequence, 41, 'built on the read it came from: an edit that lands first sets it aside');
+  for (const p of proposal.patches) {
+    assert(PatchOperationSchema.safeParse(p.patch).success, `${p.patch.type} valid for the apply pipeline`);
+  }
+});
+
+Deno.test('get_test_plan: while a refresh for the plan is open, a second read files nothing and names it (AL.29)', async () => {
+  const sb = new FakeSupabase();
+  const g = baseGraph();
+  g.artifacts[TP] = {
+    id: TP, nodeId: N1, kind: 'test-plan', path: '.nodespec/tests/req-001.tests.md',
+    content: 'STORED PLAN BODY', status: 'draft',
+    metadata: { testContextFingerprint: { fingerprint: 'f1' }, requirementId: 'REQ-001' },
+  };
+  scriptGetTestPlan(sb, g, { skipCatalogs: true, openRefresh: 'open-refresh-1' });
+  const r = await handleGetTestPlan(sb as never, READ_AUTH, { project_id: PROJECT.id, branch_id: BRANCH, requirement_id: REQ_ROW });
+  const data = r.data as Record<string, unknown>;
+  assertEquals(data.testPlanRefreshed, true);
+  assertEquals(data.proposalId, 'open-refresh-1', 'the open refresh is named');
+  assertEquals(sb.callsTo('ai_proposals', 'insert').length, 0, 'no second refresh');
   assertEquals(sb.callsTo('ai_runs', 'insert').length, 0);
+  const lookup = sb.callsTo('ai_proposals', 'select')[0];
+  const filters = JSON.stringify(lookup?.filters ?? []);
+  assert(filters.includes('pending') && filters.includes(TP) && filters.includes('mcp-test-plan'), `looked up by plan and source: ${filters}`);
 });
 
 // ── Wiring pins (jsr-403 blocks `deno check`; source pins hold the wiring) ────

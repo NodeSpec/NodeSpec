@@ -47,7 +47,7 @@ import { PlanTab, PlanLegend, type PlanFile } from './PlanTab.js';
 import type { PlanViewItem } from '../priority/plan-view.js';
 import { WORK_TABS, WORK_TAB_LABEL, loadWorkTab, saveWorkTab, type WorkTab } from './work-tabs.js';
 import { laneRowCounts, importedView } from './steps-model.js';
-import { allRequirementRows, groupedView, openOutcomes, pendingOutcomesLine, recordOf, planSetsOf, filesByRequirement, chainFilePaths, provenLine } from './requirements-model.js';
+import { allRequirementRows, groupedView, openOutcomes, pendingOutcomesLine, recordOf, planSetsOf, filesByRequirement, chainFilePaths, provenLine, planTestsByNode } from './requirements-model.js';
 import { evidenceCommit, unplacedOutcomes } from './workflows/space-model.js';
 import type { Lens } from './workflows/WorkflowsSpace.js';
 import type { PatchOperation } from '@nodespec/core/types.js';
@@ -204,6 +204,7 @@ function WorkSurfaceComponent({ projectId, branchId, graph, onOpenChanges, refre
   const chainsById = useMemo(() => new Map(trace.chains.map((ch) => [ch.reqRowId, ch])), [trace.chains]);
   const planSets = useMemo(() => planSetsOf(board.view?.graph.items), [board.view]);
   const filesByReq = useMemo(() => filesByRequirement(trace.chains), [trace.chains]);
+  const planTests = useMemo(() => planTestsByNode(trace.chains), [trace.chains]);
 
   // A focus from another surface: resolved against the rows once they have
   // loaded, applied once per clock value, and it lands on the Requirements tab.
@@ -454,15 +455,11 @@ function WorkSurfaceComponent({ projectId, branchId, graph, onOpenChanges, refre
   ) : null;
 
   // W: what the Workflows tab needs beyond the hooks: the delete through
-  // the record's guarded write, the Team proposals count, the doors out.
+  // the record's guarded write, the doors out.
   const deleteRequirement = useCallback(async (rowId: string) => {
     const ch = chainsById.get(rowId);
     return ch ? writeRequirementRow(ch, { delete: true }, writeDeps) : 'Still reading this requirement.';
   }, [chainsById, writeDeps]);
-  const spaceProposals = useMemo(() => {
-    const waiting = queue.items.filter((i) => i.pending && (i.kind === 'workflow' || i.kind === 'outcome'));
-    return { count: waiting.length, firstId: waiting[0]?.proposalId ?? null };
-  }, [queue.items]);
   const openRequirementFromSpace = useCallback((laneId: string, rowId: string) => {
     handleTab('requirements'); setFocusedLaneId(laneId); setShowOutcomes(false);
     setSelection({ kind: 'row', identity: `req:${rowId}`, outcomeId: '', requirementRowId: rowId, stepIndex: 0 });
@@ -558,8 +555,6 @@ function WorkSurfaceComponent({ projectId, branchId, graph, onOpenChanges, refre
                   candidateActions={candidateActions}
                   onDeleteRequirement={deleteRequirement}
                   team={variant === 'team'}
-                  proposals={spaceProposals}
-                  onOpenChanges={onOpenChanges}
                   onOpenRequirement={openRequirementFromSpace}
                   onOpenArchitecture={onOpenArchitecture}
                   lensRequest={lensRequest}
@@ -616,6 +611,7 @@ function WorkSurfaceComponent({ projectId, branchId, graph, onOpenChanges, refre
                 testStatus={testStatus}
                 rowFilter={laneNodeIds}
                 filesOf={filesOf}
+                planTests={planTests}
                 onOpenRequirement={openRequirement}
                 onOpenArchitecture={onOpenArchitecture ? () => onOpenArchitecture('') : undefined}
                 onTickTask={tickPlanTask}

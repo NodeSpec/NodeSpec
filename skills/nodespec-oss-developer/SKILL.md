@@ -30,11 +30,12 @@ trusted context; you supply the code. Three rules override everything else:
   them (organization only). A node has one parent; a group whose nodes all
   run on one host sits inside that host. An edge joins two nodes, never a
   container.
-- **Nothing lands without the user.** Every graph write is a proposal the
-  user accepts or rejects in the app. Spec writes (requirements, vision)
-  follow the project's Autonomy settings per lane, filed directly or in a
-  `propose_patches` batch; a batch that sets the vision waits for the user
-  at every level. A proposal is checked
+- **Every change files as a proposal.** A graph write is decided by the
+  user in the app, or applies as it files when the Architecture lane is at
+  Auto-apply. Spec writes (requirements, vision) follow the project's
+  Autonomy settings per lane, filed directly or in a `propose_patches`
+  batch; a promotion, a confirmed requirement or a locked node waits for the
+  user at every level. A proposal is checked
   where it is filed: a node placed where its parent may not hold it, an
   edge ending on a container, or a node someone else holds is refused by
   name, and nothing is created.
@@ -306,6 +307,19 @@ node's context changed: re-check it before you rely on it), with its size
 beside the whole spec's and what it left out. Keep its `fingerprint` and pass it back as `since`;
 only the sections that changed come back. `budget` caps it in tokens.
 
+Before building a work order, write its **steps** under its task line: one
+indented checkbox line per step (`  - [ ] <step>`), with any detail indented
+further under its step. Write them into the stored doc with `propose_patches`
+`update_artifact`, passing `base_sequence` (the `headSequence` you read the
+doc at); if another agent changed the doc first, yours is set aside as a stale
+read: read it again and add your lines to it. Steps stay with their work order
+when the doc regenerates. `generate_task_docs` lists the open work orders with
+no steps (`workOrdersWithoutSteps`, with the doc's `artifactId`) and the format
+(`stepFormat`). When a work order is reworded or removed, its steps move to
+`### Steps to review` at the end of Implementation Tasks, each group under
+`Written for T<n>: <title>` (`stepsToReview` counts them): move each step
+under the work order it belongs to, or delete it.
+
 ### 4. Verify (per requirement the node serves)
 Doctrine: **plans follow schemas — schemas → plans → implement → verify.**
 Test budget: **ONE binding test per acceptance criterion first** — that is
@@ -330,6 +344,17 @@ alone never flips met).
   second-guess a served plan or try to force a regeneration. If
   `schemaBlockedContracts` is non-empty, resolve those first (step 2);
   blocked scenarios in the plan are markers, not work.
+- Under each `#### AC-...` test case heading, write the test's **statements**,
+  one checkbox line each (`- [ ] Given ..., when ..., then ...`, with a then
+  that can be observed and names the file or API it checks); under a manual
+  item, the same lines indented by two spaces. Write them into the plan
+  (`testPlanArtifactId`) with `update_artifact` and `base_sequence`, as for
+  steps. They stay with their criterion when the plan regenerates.
+  `get_test_plan` lists the cases with none (`testCasesWithoutStatements`) and
+  the format (`statementFormat`). A reworded or removed criterion's statements
+  move to `#### Statements to review`, each group under a `Written for:` line
+  that quotes the criterion (`statementsToReview` counts them): move each
+  under its test case, or delete it.
 - Implement the **Automated Test Scenarios** in the project's framework —
   derive Given/When/Then from each criterion; use the suggested `TC-` ids.
 - Run them. Report EVERY outcome:
@@ -498,7 +523,7 @@ discipline above.
 |---|---|
 | `get_build_readiness` | Preflight: summary first, then ONE scoped re-call per node you will build |
 | `get_project_context` | The node brief (`view:'brief'`) when the repo's `.task.md` isn't at hand; `view:'slice'` for what moved around the node. The structured view and the slice say what the node may hold and what its parent holds |
-| `generate_task_docs` | Regenerate stale/missing task packets (doc blockers). A doc's `## Added Tasks` section holds tasks a person added by hand in the app; regeneration carries it verbatim, and you build those tasks like the generated work orders |
+| `generate_task_docs` | Regenerate stale/missing task packets (doc blockers). A doc's `## Added Tasks` section holds tasks a person added by hand in the app; regeneration carries it verbatim, and you build those tasks like the generated work orders. Lists the work orders with no steps |
 | `propose_patches` | ALL graph writes: nodes, edges, contracts, schema drafts, artifact bindings: always a proposal, never direct. See "Patch discipline" above. For files already pushed to git, omit `content` and pass `content_ref` (push code; propose bindings) |
 | `get_proposal_status` | Did the user accept what you proposed — the status reflects the settled outcome |
 | `mark_entity_complete` | Declare a node done — returns any still-unmet criteria (believe them) |
@@ -506,7 +531,7 @@ discipline above.
 **Verify — "prove it"**
 | Tool | Use when |
 |---|---|
-| `get_test_plan` | Per requirement: the scenarios to implement (schemas → plans → implement → verify; budget: one binding test per criterion first). Served plans are freshness-checked at read time — trust what you receive |
+| `get_test_plan` | Per requirement: the scenarios to implement (schemas → plans → implement → verify; budget: one binding test per criterion first). Served plans are freshness-checked at read time — trust what you receive. Lists the test cases with no statements |
 | `report_test_results` | EVERY outcome you actually ran, exact `criterion_text` — this is what flips criteria; heed the testBudget nudge |
 | `update_test_case` | Fix a mistyped `test_id`, move a case to the requirement it actually verifies (`reassign_to` — it arrives stale, re-run there), retire a superseded case (`retire` + reason — never a hard delete; a fresh report revives it), or re-bind after a criterion reword (`criterion_text`, exact text; binding alone never flips met) |
 

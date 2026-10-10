@@ -734,27 +734,8 @@ describe('AuthLandingPage templates navigation', () => {
     expect(source).toContain("label: 'Browse Templates'");
   });
 
-  it('links Browse Templates to /templates (a real link since AJ.2; the render is in seo-client-head)', () => {
-    expect(source).toContain("{ label: 'Browse Templates', path: '/templates' }");
-  });
-
-  it('positions Browse Templates between Features and Pricing', () => {
-    const featuresPos = source.indexOf("label: 'Features'");
-    const templatesPos = source.indexOf("label: 'Browse Templates'");
-    const pricingPos = source.indexOf("label: 'Pricing'");
-    expect(featuresPos).toBeGreaterThan(-1);
-    expect(templatesPos).toBeGreaterThan(featuresPos);
-    expect(pricingPos).toBeGreaterThan(templatesPos);
-  });
-
-  it('renders Browse Templates as a nav link with the same pattern as other items', () => {
-    const navItems = source.match(/label: '[^']+', (action|path):/g) || [];
-    const labels = navItems.map(item => item.match(/label: '([^']+)'/)?.[1]);
-    expect(labels).toContain('Features');
-    expect(labels).toContain('Browse Templates');
-    expect(labels).toContain('Pricing');
-    expect(labels).toContain('Contact');
-  });
+  // Where Templates sits in the hosted nav and where Browse Templates goes on an
+  // Enterprise build are rendered in landing-page.test.tsx (2026-10-07 redesign).
 });
 
 describe('ProjectExplorer Start from Template option', () => {

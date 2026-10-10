@@ -33,6 +33,9 @@ function supabaseWithUser(user: Any) {
   (fake as { auth?: unknown }).auth = {
     getUser: (_token: string) => Promise.resolve({ data: { user }, error: null }),
   };
+  // AL.26: an account the app has set up (it was handed its example project);
+  // a brand-new one is stopped before any of this (mcp-oauth-first-visit_test.ts).
+  (fake as unknown as FakeSupabase).script('user_settings', 'select', { data: { preferences: { exampleProject: { id: 'ex-1' } } }, error: null });
   return fake as unknown as Parameters<typeof handleAuthorizeGet>[1] & FakeSupabase;
 }
 

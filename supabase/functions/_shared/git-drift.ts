@@ -129,10 +129,10 @@ import { anchorLoadPatches } from "./anchor-load.ts";
 import { SPEC_ANCHOR_PATH, parseSpec, serializeSpec, loadSpecPlane, diffSpecs, capSpecDiff, adoptSpecAnchor, applySpecAnchor, type CappedSpecDiff, type SpecAnchor } from "./spec-anchor.ts";
 import { constraintsCarried } from "./node-constraints.ts";
 import {
-  parseTaskDocCriteria, computeCriterionDeltas, applyTickDeltas, applicableDeltas,
+  parseTaskDocCriteria, computeCriterionDeltas, applicableDeltas,
   type CriterionDeltaResult, type CurrentCriterion,
 } from "./criterion-deltas.ts";
-import { computeSweepTaskDeltas, type TaskDeltaResult } from "./task-deltas.ts";
+import { computeSweepTaskDeltas, applyTaskDeltas, type TaskDeltaResult } from "./task-deltas.ts";
 import { computeSweepBindingResolution } from "./binding-sweep.ts";
 import { BINDINGS_PATH, type BindingResolution } from "./binding-manifest.ts";
 import { BOARD_PATH, parseBoardMd, computeBoardTickDeltas, mergeCriterionDeltaResults, mergeTaskDeltaResults } from "./board-generator.ts";
@@ -1681,6 +1681,39 @@ export async function computeSweepBoardDeltas(supabase: any, projectId: string, 
 export interface ApplyCriterionResult {
   applied: number;
   requirementsTouched: string[];
+  /** AL.29 (gap 7): requirements whose write did not land, with why. A card is
+   *  marked applied only when this is empty. */
+  failed: Array<{ requirementId: string; reason: string }>;
+}
+
+/**
+ * AL.29 (gap 7): the ops one requirement's ticks become: set_met and a git
+ * provenance stamp for each criterion a tick names that is not met yet,
+ * selected by the criterion's id (its text when it has none). A criterion
+ * already met keeps the provenance of whatever proved it. Pure.
+ */
+export function criterionTickOps(
+  stored: unknown,
+  ticks: Array<{ text: string }>,
+  provenance: { source: "git"; commitSha?: string; actor?: string; appliedBy?: string; at: string },
+): { ops: Array<Record<string, unknown>>; count: number } {
+  const wanted = new Set(ticks.map((t) => t.text));
+  const ops: Array<Record<string, unknown>> = [];
+  let count = 0;
+  const byText = new Set<string>();
+  for (const c of Array.isArray(stored) ? stored : []) {
+    if (!c || typeof c !== "object") continue;
+    const crit = c as Record<string, unknown>;
+    if (typeof crit.text !== "string" || !wanted.has(crit.text) || crit.met === true) continue;
+    count++;
+    if (typeof crit.id === "string" && crit.id) {
+      ops.push({ op: "set_met", criterion_id: crit.id, value: true }, { op: "stamp", criterion_id: crit.id, value: { ...provenance } });
+    } else if (!byText.has(crit.text)) {
+      byText.add(crit.text);
+      ops.push({ op: "set_met", criterion_text: crit.text, value: true }, { op: "stamp", criterion_text: crit.text, value: { ...provenance } });
+    }
+  }
+  return { ops, count };
 }
 
 /**
@@ -1704,12 +1737,12 @@ export async function applyCriterionDeltas(supabase: any, projectId: string, opt
   appliedBy?: string;
 }): Promise<ApplyCriterionResult> {
   const ticks = applicableDeltas(opts.deltas);
-  if (ticks.length === 0) return { applied: 0, requirementsTouched: [] };
+  if (ticks.length === 0) return { applied: 0, requirementsTouched: [], failed: [] };
 
   const { data: spec } = await supabase
     .from("project_specifications").select("id").eq("project_id", projectId)
     .order("created_at", { ascending: false }).limit(1).maybeSingle();
-  if (!spec) return { applied: 0, requirementsTouched: [] };
+  if (!spec) return { applied: 0, requirementsTouched: [], failed: [] };
 
   const byReq = new Map<string, typeof ticks>();
   for (const t of ticks) {
@@ -1717,35 +1750,108 @@ export async function applyCriterionDeltas(supabase: any, projectId: string, opt
     byReq.get(t.requirementId)!.push(t);
   }
 
-  const at = new Date().toISOString();
+  const provenance = {
+    source: "git" as const,
+    ...(opts.commitSha ? { commitSha: opts.commitSha } : {}),
+    ...(opts.actor ? { actor: opts.actor } : {}),
+    ...(opts.appliedBy ? { appliedBy: opts.appliedBy } : {}),
+    at: new Date().toISOString(),
+  };
   let applied = 0;
   const touched: string[] = [];
+  const failed: ApplyCriterionResult["failed"] = [];
   for (const [requirementId, reqTicks] of byReq) {
-    const { data: row } = await supabase
-      .from("specification_requirements")
-      .select("id, acceptance_criteria")
-      .eq("specification_id", spec.id)
-      .eq("requirement_id", requirementId)
-      .maybeSingle();
-    if (!row) continue;
-    const result = applyTickDeltas(row.acceptance_criteria, reqTicks, {
-      source: "git",
-      ...(opts.commitSha ? { commitSha: opts.commitSha } : {}),
-      ...(opts.actor ? { actor: opts.actor } : {}),
-      ...(opts.appliedBy ? { appliedBy: opts.appliedBy } : {}),
-      at,
-    });
-    if (result.applied === 0) continue;
-    const { error } = await supabase
-      .from("specification_requirements")
-      .update({ acceptance_criteria: result.criteria, updated_at: at })
-      .eq("id", row.id);
-    if (error) {
-      console.warn(`[git-drift] criterion apply failed for ${requirementId}: ${error.message}`);
-      continue;
+    // AL.29 (gap 7): through the one locked writer, per criterion, so a test
+    // result or another tick landing on the same requirement is never
+    // overwritten by a whole-array write. The read decides which criteria
+    // flip; the row it was made on is the compare token, and a requirement
+    // that moved since is read again once.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const { data: row, error: readError } = await supabase
+        .from("specification_requirements")
+        .select("id, acceptance_criteria, updated_at")
+        .eq("specification_id", spec.id)
+        .eq("requirement_id", requirementId)
+        .maybeSingle();
+      if (readError) { failed.push({ requirementId, reason: readError.message }); break; }
+      if (!row) break;
+      const { ops, count } = criterionTickOps(row.acceptance_criteria, reqTicks, provenance);
+      if (count === 0) break;
+      const { error } = await supabase.rpc("apply_criteria_ops", {
+        p_requirement_id: row.id,
+        p_ops: ops,
+        p_expected_updated_at: row.updated_at ?? null,
+      });
+      if (error && attempt === 0 && (error.code === "40001" || /moved since you read it/.test(error.message ?? ""))) continue;
+      if (error) {
+        console.warn(`[git-drift] criterion apply failed for ${requirementId}: ${error.message}`);
+        failed.push({ requirementId, reason: error.message ?? "the write was refused" });
+        break;
+      }
+      applied += count;
+      touched.push(requirementId);
+      break;
     }
-    applied += result.applied;
-    touched.push(requirementId);
   }
-  return { applied, requirementsTouched: touched };
+  return { applied, requirementsTouched: touched, failed };
+}
+
+/**
+ * The Git panel's apply: a card's criterion ticks and task ticks, by the
+ * person applying them, in one action. AL.29 (gap 7): the card is stamped
+ * criteriaApplied only when every requirement's write landed. One that did
+ * not leaves the card's criterion ticks unapplied, so the card asks again
+ * and a second apply writes only what is still unmet. Task ticks are stamped
+ * as they apply.
+ */
+export async function applyCardTicks(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  projectId: string,
+  // deno-lint-ignore no-explicit-any
+  card: { id: string; commit_sha?: string | null; author?: string | null; metadata?: any },
+  appliedBy: string,
+): Promise<{ applied: number; tasksApplied: number; requirements: string[]; failed: ApplyCriterionResult["failed"] }> {
+  const deltas = card.metadata?.criterionDeltas;
+  const taskDeltas = card.metadata?.taskDeltas;
+  const hasCriterionDeltas = !!deltas && Array.isArray(deltas.deltas);
+  const hasTaskDeltas = !!taskDeltas && Array.isArray(taskDeltas.deltas);
+  const result: ApplyCriterionResult = hasCriterionDeltas
+    ? await applyCriterionDeltas(supabase, projectId, {
+        deltas,
+        commitSha: card.commit_sha ?? undefined,
+        actor: card.author ?? undefined,
+        appliedBy,
+      })
+    : { applied: 0, requirementsTouched: [], failed: [] };
+
+  // A4: the card's anchored-task ticks apply through the same action. Tick-only
+  // and idempotent (already-done rows are skipped), like the criterion lane.
+  let tasksApplied = 0;
+  if (hasTaskDeltas) {
+    tasksApplied = (await applyTaskDeltas(supabase, projectId, {
+      deltas: taskDeltas,
+      commitSha: card.commit_sha ?? undefined,
+      actor: card.author ?? undefined,
+      source: "git",
+    })).applied;
+  }
+
+  // One metadata write carries both stamps, so re-opening the card cannot apply
+  // the same ticks twice.
+  const at = new Date().toISOString();
+  const criteriaDone = result.failed.length === 0;
+  if (criteriaDone || hasTaskDeltas) {
+    await supabase
+      .from("git_change_events")
+      .update({
+        metadata: {
+          ...(card.metadata ?? {}),
+          ...(criteriaDone ? { criteriaApplied: { at, count: result.applied } } : {}),
+          ...(hasTaskDeltas ? { ticksApplied: { at, count: tasksApplied } } : {}),
+        },
+      })
+      .eq("id", card.id);
+  }
+  return { applied: result.applied, tasksApplied, requirements: result.requirementsTouched, failed: result.failed };
 }

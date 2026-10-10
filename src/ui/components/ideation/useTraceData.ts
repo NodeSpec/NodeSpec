@@ -10,8 +10,9 @@ import { computeArchivedRowIds } from '../board/derive-status.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Graph } from '@nodespec/core/types.js';
 import { getSupabaseClient } from '../../../persistence/supabase/client.js';
-import { parseTaskDocTasks, type ParsedTask } from '../../../../supabase/functions/_shared/task-deltas.js';
+import { parseTaskDocTasks, taskDocDetails, type ParsedTask } from '../../../../supabase/functions/_shared/task-deltas.js';
 import { taskEvidenceDone } from '../../../../supabase/functions/_shared/board-alignment.js';
+import { findExistingTestArtifact, planCases, type PlanCase } from '../../../../supabase/functions/_shared/plan-cases.js';
 import {
   assembleTierItems,
   type TierItem,
@@ -48,6 +49,8 @@ export interface TraceTestRow {
   artifact_path: string | null;
   source_artifact_ids: string[] | null;
   expected_result: string | null;
+  /** AL.27: what the case checks, in the agent's words (report_test_results, update_test_case). */
+  description?: string | null;
   updated_at: string | null;
   metadata?: Record<string, unknown> | null;
 }
@@ -68,6 +71,9 @@ export interface TraceArtifact {
   nodeId?: string | null;
   path?: string | null;
   kind?: string | null;
+  /** AL.29: a test plan's content and its requirementId, for the plan lookup. */
+  content?: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface TraceDerivationRow { candidate_id: string; requirement_row_id: string | null }
@@ -99,6 +105,11 @@ export interface TraceSub {
   links: string[];
   /** Y: a task a person added by hand (the doc's Added Tasks section). */
   byHand?: boolean;
+  /** AL.27: a task's own lines in its doc, under its T# line: the work order's content. */
+  body?: string[];
+  /** AL.29 (R2): a work order that cites no criterion at all (the scaffold, the
+   *  wiring, the final verification): every requirement on its node reads it. */
+  citesNone?: true;
 }
 
 export interface TraceCard {
@@ -138,6 +149,9 @@ export interface TraceChain {
   archived: boolean;
   /** 9.11: what the verify lane (the requirement detail surface) edits and shows. */
   verify: VerifySource;
+  /** AL.29: the requirement's test plan as the shared reader reads it (its cases
+   *  and the statements kept for review); null while it has none. */
+  plan?: { cases: PlanCase[]; review: string[] } | null;
 }
 
 export interface TraceInput {
@@ -149,7 +163,7 @@ export interface TraceInput {
   mappings: MappingItemRow[];
   tests: TraceTestRow[];
   taskItems: TraceTaskRow[];
-  docTasksByNode: Map<string, ParsedTask[]>;
+  docTasksByNode: Map<string, DocTask[]>;
   artifacts: TraceArtifact[];
   holds: AgentHold[];
   /** Paths a PENDING git change touched — drift until the card resolves. */
@@ -159,6 +173,15 @@ export interface TraceInput {
 type CriterionRow = { id?: unknown; text?: unknown; met?: boolean; evidenceStale?: unknown; verification?: string; testId?: string; provenance?: unknown };
 
 const MANUAL_TITLE = /\(manual\)/i;
+
+/** A task as its doc lists it, with the lines written under it (AL.27). */
+export type DocTask = ParsedTask & { details?: string[] };
+
+/** A task doc's list, each task with the lines under its T# line (AL.27). */
+export function docTasksOf(content: string): DocTask[] {
+  const details = taskDocDetails(content);
+  return parseTaskDocTasks(content).tasks.map((t) => (t.key && details.get(t.key)?.length ? { ...t, details: details.get(t.key) } : t));
+}
 const short = (s: string | null | undefined, n = 7) => (s ? s.slice(0, n) : '');
 
 function provenanceOf(v: unknown): TraceProvenance | null {
@@ -211,8 +234,10 @@ export function assembleTrace(input: TraceInput): TraceChain[] {
   for (const t of input.tests) testsByReq.set(t.requirement_id, [...(testsByReq.get(t.requirement_id) ?? []), t]);
   const artifactsByNode = new Map<string, TraceArtifact[]>();
   const artifactById = new Map<string, TraceArtifact>();
+  const artifactRecord: Record<string, TraceArtifact> = {};
   for (const a of input.artifacts) {
     artifactById.set(a.id, a);
+    artifactRecord[a.id] = a;
     if (a.nodeId) artifactsByNode.set(a.nodeId, [...(artifactsByNode.get(a.nodeId) ?? []), a]);
   }
   const taskStateByNodeKey = new Map<string, TraceTaskRow>();
@@ -307,7 +332,7 @@ export function assembleTrace(input: TraceInput): TraceChain[] {
       const docTasks = input.docTasksByNode.get(nodeId) ?? [];
       const seen = new Set<string>();
       const taskSubs: TraceSub[] = [];
-      const pushTask = (t: { key: string; displayId: string; title: string; done: boolean; orphaned: boolean; serves?: Array<{ reqId: string; text: string }>; provenance: Record<string, unknown> | null; rowId: string | null; added?: boolean }) => {
+      const pushTask = (t: { key: string; displayId: string; title: string; done: boolean; orphaned: boolean; serves?: Array<{ reqId: string; text: string }>; provenance: Record<string, unknown> | null; rowId: string | null; added?: boolean; details?: string[] }) => {
         const evidenceDone = taskEvidenceDone({ requirementId: req.requirement_id, criteria: criteria as never, task: t });
         const live = liveOf(t.rowId);
         const manual = MANUAL_TITLE.test(t.title);
@@ -326,13 +351,15 @@ export function assembleTrace(input: TraceInput): TraceChain[] {
           ],
           links: served.map((s) => criterionIdOf(criterionIndexByText.get(s.text)!)),
           ...(t.added ? { byHand: true } : {}),
+          ...(t.details && t.details.length > 0 ? { body: t.details } : {}),
+          ...(!t.orphaned && !(t.serves ?? []).length ? { citesNone: true as const } : {}),
         });
       };
       for (const d of docTasks) {
         if (!d.key) continue;
         seen.add(d.key);
         const state = taskStateByNodeKey.get(`${nodeId}::${d.key}`);
-        pushTask({ key: d.key, displayId: d.displayId, title: d.title, done: state?.done ?? d.checked, orphaned: false, serves: d.serves, provenance: state?.provenance ?? null, rowId: state?.id ?? null, added: d.added });
+        pushTask({ key: d.key, displayId: d.displayId, title: d.title, done: state?.done ?? d.checked, orphaned: false, serves: d.serves, provenance: state?.provenance ?? null, rowId: state?.id ?? null, added: d.added, details: d.details });
       }
       for (const row of input.taskItems) {
         if (row.node_id !== nodeId || seen.has(row.task_key)) continue;
@@ -391,7 +418,9 @@ export function assembleTrace(input: TraceInput): TraceChain[] {
           links: runs.map((t) => `tc:${t.id}`),
         };
       };
-      const sources = bound.filter((a) => a.kind !== 'test' && !testPaths.has(a.path ?? '') && a.kind !== 'task');
+      // AL.29: a node's task doc and a requirement's test plan are NodeSpec's own
+      // documents, not its code.
+      const sources = bound.filter((a) => a.kind !== 'test' && !testPaths.has(a.path ?? '') && a.kind !== 'task' && a.kind !== 'test-plan');
       const testFiles = bound.filter((a) => a.kind === 'test' || testPaths.has(a.path ?? ''));
       const sourceSubs = sources.map((a) => fileSub(a, false));
       const testFileSubs = testFiles.map((a) => fileSub(a, true));
@@ -413,6 +442,7 @@ export function assembleTrace(input: TraceInput): TraceChain[] {
     const state = rollupTraceState(subStates);
     const complete = (['outcome', 'req', 'arch', 'plan', 'code'] as TierKey[]).every((t) => cells[t].length > 0);
     const rowState: TraceRowState = codeCards.some((c) => c.up.some((s) => s.right === 'drift') || c.state === 'stale') ? 'DRIFT' : complete ? 'COMPLETE' : 'PARTIAL';
+    const planArtifact = findExistingTestArtifact(artifactRecord, req.requirement_id, req.name, req.id);
     chains.push({
       id: req.id, reqRowId: req.id, ref: req.requirement_id, title: req.name,
       groupId: originId, groupIndex: siblings.indexOf(req.id), groupSize: siblings.length, originIds,
@@ -423,10 +453,11 @@ export function assembleTrace(input: TraceInput): TraceChain[] {
         mark: req.mark ?? null,
         updatedAt: req.updated_at ?? null,
         criteria: criteria.map((c) => ({ ...c, text: String(c.text ?? '') })) as unknown as StoredCriterion[],
-        tests: reqTests.map((t) => ({ id: t.id, test_id: t.test_id, name: t.name, status: t.status, stale: t.stale, source: typeof t.metadata?.source === 'string' ? (t.metadata.source as string) : null, testType: t.test_type ?? null, framework: t.framework ?? null })),
+        tests: reqTests.map((t) => ({ id: t.id, test_id: t.test_id, name: t.name, status: t.status, stale: t.stale, source: typeof t.metadata?.source === 'string' ? (t.metadata.source as string) : null, testType: t.test_type ?? null, framework: t.framework ?? null, description: t.description ?? null })),
         description: req.description ?? '',
         archivedAt: req.archived_at ?? null,
       },
+      plan: planArtifact?.content ? planCases(planArtifact.content) : null,
     });
   }
   return chains;
@@ -493,7 +524,7 @@ export function useTraceData(
         if (requirements.length > 0) {
           const { data: testRows, error: testErr } = await supabase
             .from('test_cases')
-            .select('id, requirement_id, test_id, name, status, stale, staleness_reason, test_type, framework, artifact_path, source_artifact_ids, expected_result, updated_at, metadata')
+            .select('id, requirement_id, test_id, name, description, status, stale, staleness_reason, test_type, framework, artifact_path, source_artifact_ids, expected_result, updated_at, metadata')
             .in('requirement_id', requirements.map((r) => r.id))
             .is('retired_at', null);
           if (testErr) throw new Error(testErr.message);
@@ -532,12 +563,14 @@ export function useTraceData(
   }, [refresh]);
 
   // The task LIST comes from the docs (the A-series doctrine), parsed with
-  // the server's own parser and memoized on the doc contents.
+  // the server's own parser and memoized on the doc contents. AL.27: each
+  // task carries the lines written under it, so the record shows what the
+  // work order says without opening the doc.
   const docTasksByNode = useMemo(() => {
-    const byNode = new Map<string, ParsedTask[]>();
+    const byNode = new Map<string, DocTask[]>();
     for (const artifact of Object.values(graph?.artifacts ?? {})) {
       if (artifact.kind !== 'task' || !artifact.content || !artifact.nodeId) continue;
-      byNode.set(artifact.nodeId, parseTaskDocTasks(artifact.content).tasks);
+      byNode.set(artifact.nodeId, docTasksOf(artifact.content));
     }
     return byNode;
   }, [graph?.artifacts]);

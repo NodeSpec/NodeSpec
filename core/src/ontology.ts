@@ -1,6 +1,6 @@
 /*
-  N1 — the canonical node identity model, as code (V2_PLAN §1.C).
-  M1b — collapsed onto `nature` (docs/NODE_REFERENCE.md §1).
+  N1, the canonical node identity model, as code (V2_PLAN §1.C).
+  M1b, collapsed onto `nature` (docs/NODE_REFERENCE.md §1).
 
   A node = ROLE (identity; open set) + optional TECHNOLOGY (open set, bound via
   role_affinities) + graph position.
@@ -12,12 +12,12 @@
   Everything else about that question DERIVES from it:
   - TREATMENT (leaf | container | boundary) = nature + is_container. `build` is the only
     nature you author, so it is the only leaf; a container is structural regardless.
-  - OWNERSHIP (build | integrate | host | call) — in-graph it also folds in structure (who
+  - OWNERSHIP (build | integrate | host | call), in-graph it also folds in structure (who
     parents/hosts the node); at palette time it falls straight out of nature.
 
   `nature` replaces the former `kind` (13 values) + `treatment_mode` (3). Only four of the
-  thirteen kinds were ever read by a consumer; the other nine — including `app_service`,
-  which was 51 of 109 live roles — keyed off nothing that `interface_kind` + `is_container`
+  thirteen kinds were ever read by a consumer; the other nine, including `app_service`,
+  which was 51 of 109 live roles, keyed off nothing that `interface_kind` + `is_container`
   did not already say. The collapse was verified lossless against the live catalog before it
   shipped: nature + is_container reproduced treatment_mode on 125/125 rows, and nature
   reproduced the old kind-based ownership default on 125/125.
@@ -28,19 +28,19 @@
 
   OWNERSHIP IS STILL DERIVED, NEVER STORED. The same technology shifts ownership per project
   (Airflow self-hosted = build vs Cloud Composer = integrate) and multi-domain products
-  (Supabase) make any single stored value wrong. Derived values cannot drift — and they
+  (Supabase) make any single stored value wrong. Derived values cannot drift, and they
   survive the git anchor, because STRUCTURE crosses into model.json while metadata does not.
 
   This module is mirrored at supabase/functions/_shared/ontology.ts (Deno). The two
   implementations are pinned to the same golden fixture (supabase/functions/tests/fixtures/
-  ontology-golden.json) — change one, and the other side's suite tells you.
+  ontology-golden.json), change one, and the other side's suite tells you.
 */
 
 /** What a node IS, and therefore who runs it and whether you author its internals. */
 export type NodeNature = 'build' | 'integrate' | 'host' | 'engine' | 'call';
 
 /**
- * What an edge INTO this node MEANS — the connect-time contract-birth axis (N8.6A).
+ * What an edge INTO this node MEANS, the connect-time contract-birth axis (N8.6A).
  * Replaces `functional_kind`, dropping the five values (compute, edge_runtime, deployment,
  * ai_runtime, infrastructure) that all resolved to the same rest/request_response fallback
  * and therefore made a filing distinction the system did not actually have.
@@ -50,7 +50,7 @@ export type InterfaceKind =
 
 /**
  * Who runs the thing, in-graph. `engine` is deliberately absent: an engine you configure is
- * still yours to operate, so it owns as `build` — the engine-ness shows up in TREATMENT
+ * still yours to operate, so it owns as `build`, the engine-ness shows up in TREATMENT
  * (you never author its internals), not in ownership.
  */
 export type OwnershipMode = 'build' | 'integrate' | 'host' | 'call';
@@ -58,7 +58,7 @@ export type OwnershipMode = 'build' | 'integrate' | 'host' | 'call';
 export type TreatmentMode = 'leaf' | 'container' | 'boundary';
 
 export interface RoleAxesInput {
-  /** The role's stored nature. Absent is treated as 'build' — the column default. */
+  /** The role's stored nature. Absent is treated as 'build', the column default. */
   nature?: NodeNature | string | null;
   is_container?: boolean | null;
 }
@@ -83,7 +83,7 @@ export function treatmentForRole(r: RoleAxesInput): TreatmentMode {
  * The role carries the DEFAULT; a boundary-engine TECHNOLOGY can raise it.
  *
  * Rules: a container role is structural and never overridden; otherwise the technology
- * override wins, else the role default, else leaf. The override only expresses `boundary` —
+ * override wins, else the role default, else leaf. The override only expresses `boundary`,
  * a technology never demotes an intrinsically-boundary role (an `integrate` or `call` role)
  * to a leaf.
  */
@@ -110,7 +110,7 @@ export function paletteOwnershipDefault(nature?: NodeNature | string | null): Ow
     case 'host': return 'host';
     case 'integrate': return 'integrate';
     case 'call': return 'call';
-    // 'engine' and 'build' both own as build — see OwnershipMode.
+    // 'engine' and 'build' both own as build, see OwnershipMode.
     default: return 'build';
   }
 }

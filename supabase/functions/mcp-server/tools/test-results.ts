@@ -319,6 +319,10 @@ export async function handleReportTestResults(
     if (!movedMeanwhile(bindError) || attempt === 3) {
       return { success: false, error: `Failed to bind criteria to test cases: ${bindError.message}${movedMeanwhile(bindError) ? ' No result was recorded; report again.' : ''}` };
     }
+    // Bench 2026-10-10: another report writes the row in a burst (its bind, the
+    // status trigger's set_met, its stamp); three tries at once all landed inside
+    // it. Spread out, the tries outlast it; the jitter parts two that collide.
+    await new Promise((done) => setTimeout(done, attempt * 100 + Math.random() * 100));
     const again = await resolveRequirementRow(supabase, spec.id, requirement.id);
     if (!again) return { success: false, error: `Requirement not found in this project: ${args.requirement_id}` };
     preCriteria.splice(0, preCriteria.length, ...asCriteria(again.acceptance_criteria));
@@ -572,7 +576,7 @@ export async function handleReportTestResults(
         string,
         { kind: string; path?: string; metadata?: Record<string, unknown> | null }
       >;
-      const stored = findExistingTestArtifact(artifacts, String(requirement.requirement_id), String(requirement.name ?? ''));
+      const stored = findExistingTestArtifact(artifacts, String(requirement.requirement_id), String(requirement.name ?? ''), String(requirement.id));
       testPlan = stored
         ? { exists: true, ...(stored.path ? { path: String(stored.path) } : {}) }
         : { exists: false };

@@ -1,17 +1,21 @@
 // The homepage's meta and structured data, read by the build-time prerender and by
 // the landing page itself, so a crawler that runs no script and one that does see the
 // same title, description and schema (AJ.2, owner 2026-09-30). Offers follow the
-// pricing page's tiers rather than a copy of them.
+// pricing page's tiers rather than a copy of them, and the FAQ schema is the page's
+// own questions (landing-content.ts).
 import { deploymentTiers } from '../ui/components/pricing/pricing-data.js';
+import { FAQ, FOOTER, OPEN_SOURCE } from '../ui/components/auth/landing/landing-content.js';
 import { BASE_URL, LOGO, SITE_NAME } from './page-head.ts';
 
 export const HOME_SEO = {
-  // The headline, the owner's (2026-09-30): "The AI System Design Governance Platform for Agents".
-  title: 'NodeSpec - AI System Design Governance Platform for Agents',
+  // The owner's positioning (2026-10-07): "System design and governance platform for
+  // developers and the AI agents they run." Title under 60 characters, description
+  // under 160, so neither is cut in a result.
+  title: 'NodeSpec: AI System Design and Governance Platform',
   description:
-    'Design your architecture visually, govern what your AI builds. NodeSpec gives Claude, Cursor, and any MCP agent scoped task context with git provenance, requirements traceability, and verified tests.',
+    'System design and governance for developers and the AI agents they run. Plug in Claude Code, Cursor or Codex, see how each change fits, and prove it with tests.',
   keywords:
-    'AI system design governance platform, AI governance platform for agents, AI system design, AI governance, AI architecture governance, software architecture for AI agents, AI software design, spec-driven development, MCP context server, Model Context Protocol architecture, AI development governance, architecture provenance, AI coding context, Cursor architecture context, Claude code context, system design for AI, software architecture tool, prevent AI hallucination',
+    'AI system design, AI governance platform, system design and governance, AI coding agents, multi-agent development, Claude Code architecture, Cursor architecture context, Codex, MCP server, Model Context Protocol, spec-driven development, requirements traceability, acceptance criteria tests, GitOps, architecture as code, software architecture tool',
 } as const;
 
 export const ORGANIZATION_JSON_LD = {
@@ -20,7 +24,9 @@ export const ORGANIZATION_JSON_LD = {
   name: SITE_NAME,
   url: BASE_URL,
   logo: LOGO,
-  sameAs: ['https://x.com/NodeSpec', 'https://www.linkedin.com/company/nodespec/'],
+  email: FOOTER.email,
+  contactPoint: { '@type': 'ContactPoint', email: FOOTER.email, contactType: 'sales' },
+  sameAs: [OPEN_SOURCE.repoUrl, 'https://x.com/NodeSpec', 'https://www.linkedin.com/company/nodespec/'],
 } as const;
 
 export const WEBSITE_JSON_LD = {
@@ -58,22 +64,36 @@ export function softwareApplicationJsonLd(): object {
     operatingSystem: 'Web',
     url: BASE_URL,
     description:
-      'Architecture, governance and design platform for AI-built software. Your AI connects over MCP and builds from scoped, provenance-tracked task context instead of guessing.',
+      'System design and governance platform for developers and the AI agents they run. Agents connect over MCP and build from one living model of the system; every change is checked against the architecture and every requirement is proven by a test.',
     offers: hostedOffers(),
     featureList: [
       'Visual architecture canvas',
-      'Technology catalog with curated AI context',
-      'Requirements, acceptance criteria and traceability',
-      'Deterministic task packets and criteria-linked test plans',
-      'MCP server for Claude, Cursor, and any AI agent or IDE',
-      'Git-native provenance: the model and task packets commit to your repo',
-      'Repo import with review-first proposals',
-      'Self-hosted Enterprise and Government deployments',
+      'Workflows traced from outcome to requirement to service to code',
+      'Requirements with acceptance criteria proven by tests against real commits',
+      'MCP server for Claude Code, Cursor, Codex and any MCP client',
+      'Per-lane autonomy: ask first, propose or auto-apply',
+      'Git-native: design files commit to your repository, outside commits come back as change cards',
+      'Repository import with review-first proposals',
+      'Technology catalog with guidance for 300+ technologies',
+      'Self-hosted Community, Enterprise and Government editions',
     ],
     publisher: { '@type': 'Organization', name: SITE_NAME, url: BASE_URL, logo: LOGO },
   };
 }
 
+/** The page's questions and answers, word for word, as a FAQPage. */
+export function faqJsonLd(): object {
+  return {
+    '@context': 'https://schema.org',
+    '@type': 'FAQPage',
+    mainEntity: FAQ.items.map(({ q, a }) => ({
+      '@type': 'Question',
+      name: q,
+      acceptedAnswer: { '@type': 'Answer', text: a },
+    })),
+  };
+}
+
 export function homeJsonLd(): object[] {
-  return [ORGANIZATION_JSON_LD, WEBSITE_JSON_LD, softwareApplicationJsonLd()];
+  return [ORGANIZATION_JSON_LD, WEBSITE_JSON_LD, softwareApplicationJsonLd(), faqJsonLd()];
 }

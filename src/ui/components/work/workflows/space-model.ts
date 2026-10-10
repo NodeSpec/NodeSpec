@@ -28,7 +28,7 @@ import type { BandRequirement } from '../../ideation/useRequirementBand.js';
 import type { TraceChain } from '../../ideation/useTraceData.js';
 import type { ConstraintRow } from '../../ideation/useConstraints.js';
 import { describeScope, type ScopeKind } from '../../../../../supabase/functions/_shared/constraint-rules.js';
-import { recordOf, type RequirementRecordView } from '../requirements-model.js';
+import { recordOf, chainFilePaths, type RequirementRecordView } from '../requirements-model.js';
 import { initialsOf as rosterInitials } from '../../ideation/agent-roster.js';
 
 /** X (owner 2026-09-23): the space follows the app's light or dark setting. */
@@ -262,18 +262,22 @@ function splitPath(path: string): { dir: string; file: string } {
 }
 
 /** The file that carries a requirement: the first source its tests cover,
- *  else the first test file. Hash, language and kind come from the graph's
- *  artifact of the same path, when it has one. */
-export function artifactOf(record: Pick<RequirementRecordView, 'files' | 'tasks'>, chain: Pick<TraceChain, 'verify'> | null, graph: Graph | null | undefined): SpaceArtifact | null {
-  const f = record.files.find((x) => !x.isTest) ?? record.files[0];
-  if (!f) return null;
-  const art = graph ? Object.values(graph.artifacts ?? {}).find((a) => a.path === f.path) ?? null : null;
+ *  else the first test file (the files the tests name, as the Plan rail reads
+ *  them; AL.29 R3 changed the record's Code only). Hash, language and kind come
+ *  from the graph's artifact of the same path, when it has one. */
+export function artifactOf(record: Pick<RequirementRecordView, 'tasks'>, chain: Pick<TraceChain, 'verify' | 'cells'> | null, graph: Graph | null | undefined): SpaceArtifact | null {
+  const subs = chain?.cells.plan.flatMap((p) => p.down) ?? [];
+  const testFiles = new Set(subs.map((s) => s.detail.find(([k]) => k === 'test code')?.[1]));
+  const paths = chain ? chainFilePaths(chain).sort((a, b) => a.localeCompare(b)) : [];
+  const path = paths.find((p) => !testFiles.has(p)) ?? paths[0];
+  if (!path) return null;
+  const art = graph ? Object.values(graph.artifacts ?? {}).find((a) => a.path === path) ?? null : null;
   const taskCommit = record.tasks.find((t) => t.commit)?.commit ?? null;
   return {
-    path: f.path, ...splitPath(f.path),
+    path, ...splitPath(path),
     sha: evidenceCommit(chain) ?? taskCommit,
     hash: SHORT(art?.contentHash, 12), language: art?.language ?? null, kind: art?.kind ?? null,
-    provenBy: f.touchedBy,
+    provenBy: subs.filter((s) => s.links.includes(`af:${path}`)).map((s) => s.title.split(' \u00b7 ')[0]).sort(),
   };
 }
 

@@ -540,6 +540,19 @@ describe('AD.3c: staleness on every lane', () => {
     ], before)).toEqual(['N1']);
   });
 
+  it('AL.29: a regenerated task document or test plan is not the code a test proved, so it flags nothing', () => {
+    const docs = {
+      D1: { nodeId: 'N1', kind: 'task', content: 'old doc' },
+      D2: { nodeId: 'N2', kind: 'test-plan', content: 'old plan' },
+      S1: { nodeId: 'N3', kind: 'source', content: 'old code' },
+    };
+    expect(nodesWithChangedFiles([
+      { type: 'update_artifact', payload: { id: 'D1', changes: { content: 'new doc' } } },
+      { type: 'update_artifact', payload: { id: 'D2', changes: { content: 'new plan' } } },
+      { type: 'update_artifact', payload: { id: 'S1', changes: { content: 'new code' } } },
+    ], docs)).toEqual(['N3']);
+  });
+
   it('a file moved to another node with new content flags the node it now belongs to', () => {
     expect(nodesWithChangedFiles([{ type: 'update_artifact', payload: { id: 'A1', changes: { content: 'new', nodeId: 'N5' } } }], before)).toEqual(['N5']);
   });

@@ -25,6 +25,7 @@ import type { WorkflowLane } from '../ideation/useWorkflowLanes.js';
 import { outcomeRows, stepIndicesOf, type StepItem, type StepRequirement, type PendingPromotion } from './steps-model.js';
 import type { VisionSentence } from '../../utils/vision-sentences.js';
 import { servesLine } from './chain-model.js';
+import { checkboxOf } from '../../../../supabase/functions/_shared/task-deltas.js';
 
 export type RequirementStateWord = 'Confirmed' | 'Unconfirmed';
 
@@ -198,6 +199,19 @@ export interface RecordTask {
   live: string | null;
   /** Y: a person added it by hand; the rest are the agent's work orders. */
   byHand: boolean;
+  /** AL.27: what the work order says, the lines under its T# line in the doc. */
+  details: string[];
+  /** AL.27: the criteria of THIS requirement it serves, as the record numbers them ("AC2"). */
+  serves: string[];
+}
+
+/** AL.27: a serving node's work orders that serve none of this requirement's
+ *  criteria (the scaffold, the wiring, the final verification), so the whole
+ *  work order reads here without opening the doc. */
+export interface RecordNodeTasks {
+  nodeId: string;
+  nodeLabel: string;
+  tasks: RecordTask[];
 }
 
 export interface RecordTest {
@@ -215,9 +229,14 @@ export interface RecordTest {
   /** The case's type (unit, integration, e2e) and framework, when it names them. */
   type: string | null;
   framework: string | null;
+  /** AL.27: what the case checks, in the agent's words; null when it says nothing the name does not. */
+  description: string | null;
+  /** AL.29: the statements under the case in the requirement's test plan, as written. */
+  statements: string[];
 }
 
 export interface RecordFile {
+  /** AL.29 (R3): a logic file bound to a node the requirement lives on, or a test file a result names. */
   path: string;
   /** The tests that run in or cover this file, by TC id; empty for a bound source no test names. */
   touchedBy: string[];
@@ -237,6 +256,8 @@ export interface RequirementRecordView {
   criteria: RecordCriterion[];
   /** The tasks that serve this requirement (a serves-line names one of its criteria). */
   tasks: RecordTask[];
+  /** AL.27: the serving nodes' other work orders, node by node, in doc order. */
+  otherTasks: RecordNodeTasks[];
   /** How many tasks the serving nodes hold in all: "3 of S03's 8 serve this". */
   nodeTaskTotal: number;
   nodeLabel: string | null;
@@ -296,7 +317,7 @@ export function filesByRequirement(chains: readonly TraceChain[]): Map<string, S
  *  cover; the node's bound sources only when a test names them (a node's
  *  whole file list is the Architecture rail's, not the requirement's).
  *  6.3: the Plan rail's Code section reads the same list per item. */
-export function chainFilePaths(ch: TraceChain): string[] {
+export function chainFilePaths(ch: Pick<TraceChain, 'cells'>): string[] {
   const paths = new Set<string>();
   for (const plan of ch.cells.plan) {
     for (const t of plan.down) for (const l of t.links) if (l.startsWith('af:')) paths.add(l.slice(3));
@@ -305,6 +326,77 @@ export function chainFilePaths(ch: TraceChain): string[] {
 }
 
 const TEST_LINK = /^tc:(.+)$/;
+
+/** A result row as the record reads it. */
+function resultRow(chain: TraceChain, t: TraceChain['verify']['tests'][number], sub: TraceSub | null, statements: string[]): RecordTest {
+  const expects = sub?.detail.find(([k]) => k === 'expects')?.[1] ?? null;
+  const path = sub?.detail.find(([k]) => k === 'test code')?.[1] ?? null;
+  const boundIdx = chain.verify.criteria.findIndex((c) => c.testId === t.id);
+  return {
+    rowId: t.id, testId: t.test_id, name: t.name,
+    status: t.stale ? 'stale' : t.status.replace('_', ' '),
+    expected: expects && expects !== '\u2014' ? expects : null,
+    path: path && path !== '\u2014' ? path : null,
+    criterion: boundIdx >= 0 ? `AC${boundIdx + 1}` : null,
+    source: t.source === 'manual' ? 'manual' : null,
+    type: t.testType ?? null,
+    framework: t.framework ?? null,
+    description: t.description && t.description.trim() && t.description.trim() !== t.name.trim() ? t.description.trim() : null,
+    statements,
+  };
+}
+
+/** AL.29 (4.2): the requirement's tests, one row per test case in its plan
+ *  (automated and manual), each joined to its result through the criterion's
+ *  test binding (never by test_id text, which is free-form), then any result
+ *  no case reaches. With no plan, the results alone, as before. The record and
+ *  the Plan board both read this. Pure. */
+export function testRowsOf(chain: TraceChain): RecordTest[] {
+  const subByRowId = new Map(chain.cells.plan.flatMap((p) => p.down).map((s) => [s.id.replace(TEST_LINK, '$1'), s]));
+  const resultById = new Map(chain.verify.tests.map((t) => [t.id, t]));
+  const rows: RecordTest[] = [];
+  const joined = new Set<string>();
+  for (const pc of chain.plan?.cases ?? []) {
+    const idx = pc.criterion === null ? -1 : chain.verify.criteria.findIndex((c) => c.text === pc.criterion);
+    const crit = idx >= 0 ? chain.verify.criteria[idx] : null;
+    const result = crit && typeof crit.testId === 'string' ? resultById.get(crit.testId) ?? null : null;
+    if (result) {
+      joined.add(result.id);
+      rows.push(resultRow(chain, result, subByRowId.get(result.id) ?? null, pc.statements));
+      continue;
+    }
+    rows.push({
+      rowId: `plan:${pc.id}`, testId: pc.testId ?? pc.id, name: pc.criterion ?? pc.id,
+      // a manual case is proven by the person's tick, which the criterion carries
+      status: pc.lane === 'manual' && crit?.met === true ? 'passed' : 'not run',
+      expected: null, path: null,
+      criterion: idx >= 0 ? `AC${idx + 1}` : null,
+      source: null, type: pc.lane === 'manual' ? 'manual' : null, framework: null, description: null,
+      statements: pc.statements,
+    });
+  }
+  for (const t of chain.verify.tests) if (!joined.has(t.id)) rows.push(resultRow(chain, t, subByRowId.get(t.id) ?? null, []));
+  return rows;
+}
+
+/** AL.29 (4.3): per node, the test cases the plans of the requirements mapped
+ *  there hold, how many of them pass (read as the record reads them), and the
+ *  statements their plans keep for review. Plan items are not touched. Pure. */
+export function planTestsByNode(chains: readonly TraceChain[]): Map<string, { planned: number; passing: number; review: number }> {
+  const out = new Map<string, { planned: number; passing: number; review: number }>();
+  for (const ch of chains) {
+    if (!ch.plan || ch.archived) continue;
+    const planned = ch.plan.cases.length;
+    const rows = testRowsOf(ch).slice(0, planned);
+    const passing = rows.filter((r) => r.status === 'passed').length;
+    const review = ch.plan.review.filter((l) => checkboxOf(l) !== null).length;
+    for (const n of ch.cells.arch) {
+      const cur = out.get(n.id) ?? { planned: 0, passing: 0, review: 0 };
+      out.set(n.id, { planned: cur.planned + planned, passing: cur.passing + passing, review: cur.review + review });
+    }
+  }
+  return out;
+}
 
 export function recordOf(
   chain: TraceChain,
@@ -320,7 +412,6 @@ export function recordOf(
 ): RequirementRecordView {
   const testSubs: TraceSub[] = chain.cells.plan.flatMap((p) => p.down);
   const testByRowId = new Map(chain.verify.tests.map((t) => [t.id, t]));
-  const testSubByRowId = new Map(testSubs.map((s) => [s.id.replace(TEST_LINK, '$1'), s]));
 
   const criteria: RecordCriterion[] = chain.verify.criteria.map((c, i) => {
     const bound = typeof c.testId === 'string' ? testByRowId.get(c.testId) ?? null : null;
@@ -336,67 +427,62 @@ export function recordOf(
   });
 
   // Tasks: the plan cards' up subs, one per task on a serving node; the
-  // ones that serve this requirement carry a criterion link.
+  // ones that serve this requirement carry a criterion link. AL.27: the
+  // rest of each node's work order is kept beside them, and every task
+  // carries what its doc says under its T# line.
   const tasks: RecordTask[] = [];
+  const otherTasks: RecordNodeTasks[] = [];
   let nodeTaskTotal = 0;
   const seenTasks = new Set<string>();
+  const acOfLink = new Map(chain.verify.criteria.map((_, i) => [`${chain.reqRowId}:c${i}`, `AC${i + 1}`]));
   for (const plan of chain.cells.plan) {
+    const nodeId = plan.id.replace(/^plan:/, '');
+    const others: RecordTask[] = [];
     for (const t of plan.up) {
       if (seenTasks.has(t.id)) continue;
       seenTasks.add(t.id);
       nodeTaskTotal += 1;
-      if (t.links.length === 0) continue;
       const [displayId, ...rest] = t.title.split(' · ');
-      tasks.push({
+      const task: RecordTask = {
         id: t.id, displayId: displayId ?? '', title: rest.join(' · ') || t.title,
         done: t.state === 'ok' || t.right === 'done' || t.right === 'done · evidence',
         commit: short(t.provenance?.commitSha),
         planSet: input.planSets?.get(t.id) ?? null,
         live: t.live,
         byHand: t.byHand === true,
-      });
+        details: t.body ?? [],
+        serves: t.links.map((l) => acOfLink.get(l)).filter((ac): ac is string => !!ac),
+      };
+      // R2 (owner 2026-10-09): this requirement's work orders and the node's
+      // setup orders (they cite no criterion); other requirements' orders wait
+      // behind "Show the other N".
+      if (t.links.length === 0 && !t.citesNone) others.push(task);
+      else tasks.push(task);
     }
+    if (others.length > 0) otherTasks.push({ nodeId, nodeLabel: plan.label.replace(/ · tasks$/, ''), tasks: others });
   }
 
-  const tests: RecordTest[] = chain.verify.tests.map((t) => {
-    const sub = testSubByRowId.get(t.id) ?? null;
-    const expects = sub?.detail.find(([k]) => k === 'expects')?.[1] ?? null;
-    const path = sub?.detail.find(([k]) => k === 'test code')?.[1] ?? null;
-    const boundIdx = chain.verify.criteria.findIndex((c) => c.testId === t.id);
-    return {
-      rowId: t.id, testId: t.test_id, name: t.name,
-      status: t.stale ? 'stale' : t.status.replace('_', ' '),
-      expected: expects && expects !== '—' ? expects : null,
-      path: path && path !== '—' ? path : null,
-      criterion: boundIdx >= 0 ? `AC${boundIdx + 1}` : null,
-      source: t.source === 'manual' ? 'manual' : null,
-      type: t.testType ?? null,
-      framework: t.framework ?? null,
-    };
-  });
+  const tests = testRowsOf(chain);
 
-  // Code: the test files and the files those tests cover, each with the
-  // TC ids touching it and the other requirements on the same path.
-  const touched = new Map<string, { tests: Set<string>; isTest: boolean }>();
+  // Code (R3, owner 2026-10-09): the logic files bound to the nodes this
+  // requirement lives on, then the test files its results name, each with the
+  // TC ids touching it and the other requirements on the same path. Only the
+  // record reads it this way; the Plan rail keeps chainFilePaths.
+  const touching = new Map<string, Set<string>>();
+  const testFiles = new Set<string>();
   for (const s of testSubs) {
-    const tc = s.title.split(' · ')[0];
-    for (const l of s.links) {
-      if (!l.startsWith('af:')) continue;
-      const path = l.slice(3);
-      const entry = touched.get(path) ?? { tests: new Set<string>(), isTest: false };
-      entry.tests.add(tc);
-      const own = s.detail.find(([k]) => k === 'test code')?.[1];
-      if (own === path) entry.isTest = true;
-      touched.set(path, entry);
-    }
+    const own = s.detail.find(([k]) => k === 'test code')?.[1];
+    if (own && own !== '\u2014') testFiles.add(own);
+    for (const l of s.links) if (l.startsWith('af:')) touching.set(l.slice(3), (touching.get(l.slice(3)) ?? new Set<string>()).add(s.title.split(' \u00b7 ')[0]));
   }
-  const files: RecordFile[] = [...touched.entries()]
-    .sort((a, b) => Number(a[1].isTest) - Number(b[1].isTest) || a[0].localeCompare(b[0]))
-    .map(([path, e]) => ({
-      path, isTest: e.isTest,
-      touchedBy: [...e.tests].sort(),
-      also: [...(input.filesByReq?.get(path) ?? [])].filter((r) => r !== chain.ref).sort(),
-    }));
+  // A code card's sources never hold a path a result names (the trace files it as a test).
+  const logicFiles = new Set(chain.cells.code.flatMap((card) => card.up.map((f) => f.title)));
+  const fileOf = (path: string, isTest: boolean): RecordFile => ({
+    path, isTest,
+    touchedBy: [...(touching.get(path) ?? [])].sort(),
+    also: [...(input.filesByReq?.get(path) ?? [])].filter((r) => r !== chain.ref).sort(),
+  });
+  const files: RecordFile[] = [...[...logicFiles].sort().map((p) => fileOf(p, false)), ...[...testFiles].sort().map((p) => fileOf(p, true))];
 
   const nodes = chain.cells.arch.map((n) => ({ id: n.id, label: n.label }));
 
@@ -432,7 +518,7 @@ export function recordOf(
     ref: chain.ref, name: chain.title, description: chain.verify.description,
     state: stateWordOf(input.requirement), locked: chain.verify.locked,
     proven: input.requirement.metCount, total: input.requirement.criteriaCount,
-    criteria, tasks, nodeTaskTotal, nodeLabel: nodes[0]?.label ?? null, tests, files, nodes, step, steps,
+    criteria, tasks, otherTasks, nodeTaskTotal, nodeLabel: nodes[0]?.label ?? null, tests, files, nodes, step, steps,
     origin: origin
       ? { kind: 'outcome', outcomeId: origin.outcomeId, name: origin.name, by: origin.by, at: origin.at, serves: origin.serves }
       : input.requirement.backfilled ? { kind: 'import' } : null,

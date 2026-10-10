@@ -23,7 +23,7 @@ export interface RoleInfo {
   /** N2.3: ontology treatment axis; absent = derived from nature + is_container. */
   treatmentMode?: TreatmentMode;
   isContainer?: boolean;
-  /** M1b: 'logical-boundary' marks a PURELY ORGANIZATIONAL container — the only kind that
+  /** M1b: 'logical-boundary' marks a PURELY ORGANIZATIONAL container, the only kind that
    *  may hold a `host` node (N8.4g-3). Every other container carries hosting semantics. */
   containerStyle?: 'hosting' | 'logical-boundary' | null;
   /** AA.3: the role's can_contain. On a role that is not a container it lists the parts a
@@ -107,21 +107,21 @@ export function getContainerTypeById(id: string): ContainerTypeDefinition | unde
   const index = ensureIndex();
   const direct = index.get(id);
   if (direct) return direct;
-  // M4: table-free dotted tolerance — a replayed hash-chained patch can still carry
+  // M4: table-free dotted tolerance, a replayed hash-chained patch can still carry
   // `cloud.vpc`, whose last segment IS the role id under the retired grammar.
   if (id.includes('.')) return index.get(id.split('.').pop()!);
   return undefined;
 }
 
 /** M4: node.type IS the role id. Dotted values from replayed patches resolve by their last
- *  segment — table-free tolerance, the same rule the rest of the read boundary uses. */
+ *  segment, table-free tolerance, the same rule the rest of the read boundary uses. */
 export function resolveContainerRoleId(id: string): string {
   if (!id.includes('.')) return id;
   const tail = id.split('.').pop()!;
   return ensureIndex().has(tail) ? tail : id;
 }
 
-/** N8.4b-1c: the provider a node belongs to — its technology's prefix wins (aws-vpc →
+/** N8.4b-1c: the provider a node belongs to, its technology's prefix wins (aws-vpc →
  *  aws), else the role's own provider column (the platform roles carry it). */
 export function providerOfNode(info: { provider?: string | null } | null | undefined, technology?: string): string | null {
   if (technology) {
@@ -145,7 +145,7 @@ export function canContainerHoldNode(
   const containerDef = getContainerTypeById(containerId);
 
   // M4: node.type IS the role id (N9a). Dotted values can still arrive from a replayed
-  // hash-chained patch, so the last segment is tried — table-free tolerance, no map.
+  // hash-chained patch, so the last segment is tried, table-free tolerance, no map.
   const resolvedType = nodeType.includes('.') ? nodeType.split('.').pop()! : nodeType;
   const resolver = roleResolver || _roleResolver;
   const info = resolver ? (resolver(resolvedType) || resolver(nodeType)) : null;
@@ -156,13 +156,13 @@ export function canContainerHoldNode(
   // as children within aws nodes like AWS-VPC."
   // Evaluated BEFORE any enumeration and before the unknown-container permissive
   // fallback, so no path can bypass it. Two parts:
-  //   (a) cross-provider containment is refused at ANY depth — an azure-* node cannot
+  //   (a) cross-provider containment is refused at ANY depth, an azure-* node cannot
   //       live inside an aws-* container. The generic container ROLES (vpc, subnet,
   //       k8s-cluster…) enumerate role ids with no provider awareness whatsoever, so
   //       `vpc` happily admitted a `k8s-cluster` regardless of whose cloud each was in;
   //       the provider now comes from the NODES' technologies, not the roles.
   //   (b) N8.4g-3 (owner ruling, supersedes the platform-in-platform special case):
-  //       a platform is operated by its VENDOR — nothing HOSTS it. A platform child
+  //       a platform is operated by its VENDOR, nothing HOSTS it. A platform child
   //       is refused in EVERY container except a purely organizational logical group
   //       (N5.16: only logical Structure is organizational; every other container
   //       carries hosting semantics). Covers Supabase (Managed) inside Docker, an
@@ -172,7 +172,7 @@ export function canContainerHoldNode(
   if (childProvider && containerProvider && childProvider !== containerProvider) return false;
   // M1b: keyed on containerStyle, NOT on the container's nature. A deployment_container
   // (docker, vpc, k8s) is nature='build' just like a logical group is, so testing nature
-  // here would have let a platform nest inside Docker — the exact case N8.4g-3 refuses.
+  // here would have let a platform nest inside Docker, the exact case N8.4g-3 refuses.
   // "Purely organizational" IS containerStyle='logical-boundary' (N5.16).
   if (info?.nature === 'host' && containerInfo && containerInfo.containerStyle !== 'logical-boundary') return false;
 
@@ -183,9 +183,9 @@ export function canContainerHoldNode(
 
   if (!containerDef) return true;
 
-  // N2.3 precedence — treatment BEFORE any enumeration (V2_TASKS N2.3; §1.F.1). A child
+  // N2.3 precedence, treatment BEFORE any enumeration (V2_TASKS N2.3; §1.F.1). A child
   // whose EFFECTIVE treatment is boundary (role default, or raised by a boundary-engine
-  // technology like n8n/NiFi) is an engine NodeSpec places — hand-enumerated canContain
+  // technology like n8n/NiFi) is an engine NodeSpec places, hand-enumerated canContain
   // lists never get to veto it. Placement inference then decides scopes vs hosts.
   // Leaf and container children fall through to the existing rules unchanged.
   if (info?.treatmentMode !== 'container') {
@@ -277,7 +277,7 @@ export function depthRuleRefusal(parentType: string, childType: string, roleReso
     : `"${parent}" is not a container and lists no parts, so nothing can be placed inside it.`;
 }
 
-// M6: the prefix + family tables moved to provider-inference.ts — this file held one of
+// M6: the prefix + family tables moved to provider-inference.ts, this file held one of
 // FOUR copies, two of which were missing the family mapping. See that file for the two
 // defects the duplication caused.
 
@@ -285,7 +285,7 @@ export function setRoleResolver(resolver: RoleResolver | null): void {
   _roleResolver = resolver;
 }
 
-/** N8.6(A): read access to the registered role resolver — the connect-time contract
+/** N8.6(A): read access to the registered role resolver, the connect-time contract
  *  inference needs the target role's interfaceKind. Null before catalog hydration
  *  (callers fall back to the generic rest/request_response inference). */
 export function resolveRoleInfo(roleId: string): RoleInfo | null {

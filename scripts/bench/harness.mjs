@@ -211,7 +211,7 @@ export async function preflight(env, { github: gh = null, log = console.log } = 
       info.tier = conn.tier;
       info.connections = conn;
       if (typeof conn.limit === 'number' && typeof conn.used === 'number' && conn.limit - conn.used < 2) {
-        warnings.push(`The bench account uses ${conn.used} of ${conn.limit} agent connections; v3-connections and checkout-loop each mint one more. Revoke one in the app (Agents, Connected).`);
+        warnings.push(`The bench account uses ${conn.used} of ${conn.limit} agent connections; v3-connections, checkout-loop and chain-build-verify each mint one more. Revoke one in the app (Agents, Connected).`);
       }
       if (!['team', 'enterprise', 'government'].includes(conn.tier)) {
         warnings.push(`The bench account is on ${conn.tier}. Scenarios written for a Team seat report SKIP for what this plan cannot do; \`npx supabase db reset\` restores the seeded Team account.`);

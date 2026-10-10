@@ -16,6 +16,7 @@ import { assessTestBudget, formatTestBudgetNudge } from "../../_shared/derive-st
 // MCP/git-driven projects — the phase is DERIVED from live progress now.
 import { deriveProjectPhase } from "../../_shared/project-phase.ts";
 import { getPrimaryBranch } from "../../_shared/primary-branch.ts";
+import { findExistingTestArtifact } from "../../_shared/test-document-generator.ts";
 import { liveStagedExplodes, loadPendingProposals, readStagedExplodes, stagedExplodeLead, type LiveStagedExplode } from "../../_shared/staged-explodes.ts";
 import { importIntentLead, loadImportIntentState, readImportIntent, type ImportIntentState } from "../../_shared/staged-import-intent.ts";
 import type { AuthResult, MCPResponse } from "../shared.ts";
@@ -161,8 +162,9 @@ export async function handleGetProjectStatus(
   const branches = await getPrimaryBranch(supabase, projectId, 'id, name, is_primary');
 
   let archNodeCount = 0;
-  let testPlanArtifactCount = 0;
   let staleTestPlanCount = 0;
+  // AL.28: the artifacts, for the plan count below.
+  let graphArtifacts: Record<string, { kind: string; path?: string; metadata?: Record<string, unknown> | null }> = {};
   // AE.6: the nodes, kept for the staged explode requests below.
   let graphNodes: Record<string, { id?: string; label?: string; parentId?: string | null }> | null = null;
   if (branches) {
@@ -180,9 +182,9 @@ export async function handleGetProjectStatus(
       graphNodes = snapshot.graph_data.nodes;
     }
     if (snapshot?.graph_data?.artifacts) {
+      graphArtifacts = snapshot.graph_data.artifacts;
       for (const artifact of Object.values(snapshot.graph_data.artifacts) as Array<{ kind?: string; metadata?: { stale?: boolean } }>) {
         if (artifact.kind === 'test-plan') {
-          testPlanArtifactCount++;
           // C4 Discovered #3: plan staleness truth is metadata.stale — owned by the
           // freshness lane and the source-change triggers. The old read looked for a
           // metadata.fingerprint key the generator never writes (it stamps
@@ -202,13 +204,21 @@ export async function handleGetProjectStatus(
   let failedTestCaseCount = 0;
   const { data: reqRows } = await supabase
     .from('specification_requirements')
-    .select('id, requirement_id, acceptance_criteria')
+    .select('id, requirement_id, name, acceptance_criteria')
     .eq('specification_id', spec?.id || '00000000-0000-0000-0000-000000000000');
   const specReqRows = (reqRows ?? []) as Array<{
     id: string;
     requirement_id: string;
+    name?: string | null;
     acceptance_criteria: unknown;
   }>;
+  // AL.28: a requirement has a plan when the lookup get_test_plan and
+  // report_test_results use finds one. Counting every test-plan file said 16
+  // while get_test_plan found none of them, and a second plan for one
+  // requirement counted twice.
+  const requirementsWithTestPlans = specReqRows.filter((r) =>
+    !!r.requirement_id && !!findExistingTestArtifact(graphArtifacts, String(r.requirement_id), String(r.name ?? ''), String(r.id))
+  ).length;
   const reqRowIds = specReqRows.map((r) => r.id);
   const testsByReqRow = new Map<string, number>();
   if (reqRowIds.length > 0) {
@@ -443,8 +453,8 @@ export async function handleGetProjectStatus(
         testCases: testCount || 0,
       },
       testCoverage: {
-        requirementsWithTestPlans: testPlanArtifactCount,
-        requirementsWithoutTestPlans: (reqCount || 0) - testPlanArtifactCount,
+        requirementsWithTestPlans,
+        requirementsWithoutTestPlans: Math.max(0, (reqCount || 0) - requirementsWithTestPlans),
         requirementsWithGeneratedTests: testCount,
         staleTestPlans: staleTestPlanCount,
         staleTestCases: staleTestCaseCount,

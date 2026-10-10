@@ -55,9 +55,9 @@ export function inferArtifactKindFromPath(path: string): ArtifactKind {
  * path, so the file stops reading as residue.
  *
  * APPLY SEQUENTIALLY, IN ORDER (one proposePatches call per patch, the workbench
- * pattern): the engine's sortPatchesByDependencyOrder puts update_node BEFORE
- * add_artifact within one batch, so the link's artifact-reference check would fail
- * against the pre-batch graph.
+ * pattern). Before AL.28 the engine's sortPatchesByDependencyOrder put update_node
+ * BEFORE add_artifact within one batch, so the link's artifact-reference check
+ * failed against the pre-batch graph; it now runs a link after the file it names.
  *
  * Owner bench 2026-07-29 (bind silently failed): applyPatches runs a WHOLE-GRAPH
  * validation after every patch — a stale dangling artifact id already sitting on

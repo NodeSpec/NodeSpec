@@ -1,16 +1,17 @@
-// C1 (docs/WORK_LOOP_PLAN.md): content-by-reference materialization — the
+// C1 (docs/WORK_LOOP_PLAN.md): content-by-reference materialization, the
 // accept-time half. propose_patches (server) stamps bindings-only add_artifact
 // patches with a sentinel content string plus payload.metadata.contentSource
 // = { type: 'git', ref }; THIS module finds those patches and swaps the real
 // file bytes in before any patch lands, mirroring the residue-bind lane's
 // stamping convention (contentHash + sourceProvenance + metadata.provenance).
 //
-// Pure functions — the fetch itself stays in ProposalService (GitService →
-// git-pull edge function), so every decision here is unit-testable offline.
-import type { PatchOperation } from '@nodespec/core/types.js';
-import { computeContentHash } from '@nodespec/core/utils.js';
+// Pure functions: the fetch itself stays with the caller (the app's
+// ProposalService through git-pull, or the server's Auto accept through
+// readRepoFilesAtRef), so every decision here is unit-testable offline.
+import type { PatchOperation } from './types.js';
+import { computeContentHash } from './utils.js';
 
-/** MUST equal the server's sentinel (mcp-server/tools/proposals.ts) — pinned
+/** MUST equal the server's sentinel (mcp-server/tools/proposals.ts), pinned
  *  by a cross-runtime parity test. */
 export const GIT_CONTENT_SENTINEL = '__nodespec_git_content__';
 
@@ -27,7 +28,7 @@ export interface GitContentRequest {
 
 /**
  * Find the patches whose content must be pulled from git. Only patches that
- * carry BOTH the sentinel and a well-formed contentSource marker qualify — a
+ * carry BOTH the sentinel and a well-formed contentSource marker qualify, a
  * sentinel without a ref (impossible via the server, conceivable via a
  * hand-written proposal row) is reported as malformed so the accept can fail
  * loudly instead of applying a literal sentinel string as file content.
@@ -54,7 +55,7 @@ export function collectGitContentRequests(
 
 /**
  * Swap fetched content into the sentinel patches. Returns the new patches
- * array plus every requested path that was NOT in `files` — the caller must
+ * array plus every requested path that was NOT in `files`, the caller must
  * treat a non-empty `missing` as fatal (a bindings-only artifact whose bytes
  * cannot be found must abort the accept, never land empty or as the sentinel).
  */

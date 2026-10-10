@@ -155,7 +155,7 @@ const VIEWPORT = '<meta name="viewport" content="width=device-width, initial-sca
  *  carried (the homepage's, or a post's from an older build) is removed first. */
 export function applyHead(shell: string, route: RouteMeta): string {
   if (!shell.includes(VIEWPORT)) throw new Error('the page shell has no viewport meta to anchor the head');
-  const html = shell
+  const html = withoutSnapshot(shell)
     .replace(/<title>[^<]*<\/title>/g, '')
     .replace(/<meta name="(description|keywords|robots)"[^>]*\/>/g, '')
     .replace(/<link rel="canonical"[^>]*\/>/g, '')
@@ -169,9 +169,28 @@ export function applyHead(shell: string, route: RouteMeta): string {
  *  a noindex robots line, so a self-hosted install never presents itself as
  *  nodespec.io or gets indexed. */
 export function noIndexShell(shell: string): string {
-  const stripped = shell
+  const stripped = withoutSnapshot(shell)
     .replace(/<link rel="canonical"[^>]*\/>\s*/g, '')
     .replace(/<meta property="og:url"[^>]*\/>\s*/g, '')
     .replace(/<meta name="robots"[^>]*\/>\s*/g, '');
   return stripped.replace(VIEWPORT, `${VIEWPORT}\n    <meta name="robots" content="noindex, nofollow" />`);
+}
+
+/* The homepage's words for a crawler that runs no script (src/seo/landing-snapshot.ts).
+   The homepage is also the shell every other address falls back to, so a head built
+   for any page takes the words out, and only the prerender puts them back, on "/". */
+const SNAPSHOT_OPEN = '<!--landing-snapshot-->';
+const SNAPSHOT_CLOSE = '<!--/landing-snapshot-->';
+const SNAPSHOT = /\s*<!--landing-snapshot-->[\s\S]*?<!--\/landing-snapshot-->/g;
+const ROOT = '<div id="root"></div>';
+
+export function withoutSnapshot(html: string): string {
+  return html.replace(SNAPSHOT, '');
+}
+
+/** The shell with the homepage's words after the app's (empty) root, inside
+ *  <noscript>: a browser that runs the app never shows them. */
+export function withSnapshot(shell: string, snapshotHtml: string): string {
+  if (!shell.includes(ROOT)) throw new Error('the page shell has no app root to put the words after');
+  return withoutSnapshot(shell).replace(ROOT, `${ROOT}\n    ${SNAPSHOT_OPEN}<noscript>\n${snapshotHtml}\n</noscript>${SNAPSHOT_CLOSE}`);
 }

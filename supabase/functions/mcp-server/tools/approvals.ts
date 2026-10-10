@@ -23,6 +23,7 @@ import { checkScope, resolveProjectByName, canApprove, approvalRefusal } from ".
 import { patchKindOf, NEVER_AUTO_APPLY, SpecPatchOperationSchema, type SpecPatchOperation } from "../../_shared/spec-patch-schema.ts";
 import { applySpecPatch, preflightSpecBatch, type DerivationOrigin } from "./spec-patch-apply.ts";
 import { releaseHoldsForProposal } from "./checkouts.ts";
+import { sweepAuto } from "./auto-apply.ts";
 
 export type ProposalRow = {
   id: string;
@@ -40,13 +41,13 @@ function resolvedBy(auth: AuthResult): "app" | "mcp" {
 export async function handleResolveProposal(
   supabase: SupabaseClient,
   auth: AuthResult,
-  args: { project_id: string; proposal_id: string; action: string; note?: string }
+  args: { project_id: string; proposal_id?: string; action: string; note?: string }
 ): Promise<MCPResponse> {
   if (!checkScope(auth, "write")) {
     return { success: false, error: "Insufficient permissions: write scope required" };
   }
-  if (args.action !== "accept" && args.action !== "reject") {
-    return { success: false, error: `Unknown action "${args.action}". Valid: accept, reject.` };
+  if (args.action !== "accept" && args.action !== "reject" && args.action !== "auto") {
+    return { success: false, error: `Unknown action "${args.action}". Valid: accept, reject, auto.` };
   }
 
   const resolved = await resolveProjectByName(supabase, auth.userId, args.project_id);
@@ -57,6 +58,22 @@ export async function handleResolveProposal(
   if (!canApprove(resolved.project.role, auth.authMethod)) {
     return { success: false, error: approvalRefusal("Resolving a proposal", resolved.project.name, resolved.project.role, auth.authMethod) };
   }
+  // AL.24: the sweep. Each proposal applies as the agent that filed it, by
+  // the rule it met at filing, so the caller's own rights add nothing.
+  if (args.action === "auto") {
+    const swept = await sweepAuto(supabase, projectId);
+    const n = swept.applied.length + swept.plans.filter((p) => p.status === "accepted").length;
+    return {
+      success: true,
+      data: {
+        ...swept,
+        message: n === 0 && swept.waiting.length === 0
+          ? "Nothing was waiting for an Auto lane."
+          : `Applied ${n} waiting proposal${n === 1 ? "" : "s"} the Auto lanes cover.${swept.waiting.length > 0 ? ` ${swept.waiting.length} still wait for the user, each with its reason.` : ""}`,
+      },
+    };
+  }
+  if (!args.proposal_id) return { success: false, error: "proposal_id is required to accept or reject a proposal." };
 
   const { data: proposal, error: readErr } = await supabase
     .from("ai_proposals")
@@ -168,13 +185,13 @@ export async function handleResolveProposal(
 }
 
 /** A claim older than this is a decider that died mid-accept: it lapses. */
-const CLAIM_LAPSES_MS = 5 * 60_000;
-const BEING_DECIDED = "This proposal is being decided right now (another accept or reject is in progress). Read it again with get_proposal_status.";
+export const CLAIM_LAPSES_MS = 5 * 60_000;
+export const BEING_DECIDED = "This proposal is being decided right now (another accept or reject is in progress). Read it again with get_proposal_status.";
 
 /** AL.8: take a pending proposal to decide it, as a compare-and-set on its
  *  reviewed_at (set only while it is unclaimed, or its claim has lapsed).
  *  A database answers the rows it changed: none means another decider holds it. */
-async function claimProposal(supabase: SupabaseClient, id: string, at: string): Promise<"claimed" | "busy" | "failed"> {
+export async function claimProposal(supabase: SupabaseClient, id: string, at: string): Promise<"claimed" | "busy" | "failed"> {
   const take = (current: string | null) => {
     const q = supabase.from("ai_proposals").update({ reviewed_at: at }).eq("id", id).eq("status", "pending");
     return (current === null ? q.is("reviewed_at", null) : q.eq("reviewed_at", current)).select("id");

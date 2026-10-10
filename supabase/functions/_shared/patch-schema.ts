@@ -403,7 +403,7 @@ export const SetEdgeCriticalityPatchSchema = z.object({
 });
 
 // Dogfood find 2026-09-02 (#1): Zod's default OBJECT MODE STRIPS unknown keys
-// silently — an update_node with `changes.configuration` validated clean,
+// silently, an update_node with `changes.configuration` validated clean,
 // merged "successfully", and the key evaporated (node config actually lives
 // at metadata.config). The MCP lane rejects unknown change keys loudly using
 // these key sets, DERIVED from the schemas above so they can never drift.
@@ -424,8 +424,8 @@ export const UPDATE_CHANGE_KEYS: Readonly<Record<string, ReadonlySet<string>>> =
 /** Field-specific guidance for the traps we have seen agents hit. */
 const NO_PORTS_HINT = 'ports are not part of the model: an edge joins two nodes and its contract says what the connection is';
 export const UNKNOWN_CHANGE_KEY_HINTS: Readonly<Record<string, string>> = {
-  configuration: 'node configuration lives at metadata.config (metadata is replaced wholesale on update — send the complete metadata object)',
-  config: 'node configuration lives at metadata.config (metadata is replaced wholesale on update — send the complete metadata object)',
+  configuration: 'node configuration lives at metadata.config (metadata is replaced wholesale on update: send the complete metadata object)',
+  config: 'node configuration lives at metadata.config (metadata is replaced wholesale on update: send the complete metadata object)',
   ports: NO_PORTS_HINT,
   sourcePortId: NO_PORTS_HINT,
   targetPortId: NO_PORTS_HINT,

@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  BASE_URL, LOGO, SITE_NAME, BLOG_POST_SELECT, applyHead, blogPostRoute, noIndexShell, type BlogPostRow, type RouteMeta,
+  BASE_URL, LOGO, SITE_NAME, BLOG_POST_SELECT, applyHead, blogPostRoute, noIndexShell, withSnapshot, type BlogPostRow, type RouteMeta,
 } from '../src/seo/page-head.ts';
 import { HOME_SEO, homeJsonLd } from '../src/seo/site-meta.ts';
+import { landingSnapshotHtml } from '../src/seo/landing-snapshot.ts';
 
 const DIST_DIR = path.resolve(import.meta.dirname, '..', 'dist');
 
@@ -268,7 +269,8 @@ async function main() {
 
   let count = 0;
   for (const route of allRoutes) {
-    const html = applyHead(template, route);
+    // The homepage carries its words for crawlers that run no script; no other page does.
+    const html = route.path === '/' ? withSnapshot(applyHead(template, route), landingSnapshotHtml()) : applyHead(template, route);
     const routePath = route.path === '/' ? '/index.html' : `${route.path}/index.html`;
     const filePath = path.join(DIST_DIR, routePath);
     const dir = path.dirname(filePath);

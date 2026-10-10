@@ -17,7 +17,7 @@ import { PatchOperationSchema } from "../../_shared/patch-schema.ts";
 // rename-proof lookup is the only piece of the test-doc module it needs. WS3:
 // get_test_plan additionally reports contractSchemaGaps (the shared readiness
 // predicate over the mapped nodes' contracts) as schemaBlockedContracts.
-import { findExistingTestArtifact, contractSchemaGaps } from "../../_shared/test-document-generator.ts";
+import { findExistingTestArtifact, contractSchemaGaps, planCases, statementGaps, STATEMENT_FORMAT } from "../../_shared/test-document-generator.ts";
 // P0-7: mcp-server-exclusive return path — allowed to wrap (see untrusted-data.ts).
 import { UNTRUSTED_ADVISORY, wrapField, wrapFieldNullable } from "../../_shared/untrusted-data.ts";
 import { phaseAtLeast } from "../../_shared/project-phase.ts";
@@ -26,6 +26,7 @@ import { liveStagedExplodes, readStagedExplodes } from "../../_shared/staged-exp
 import { explodesIntoTableGroups } from "./explode-context.ts";
 import type { AuthResult, MCPResponse } from "../shared.ts";
 import { checkScope, resolveProjectByName, resolveBranchId, holderIdentity, UUID_RE, credentialOf } from "../shared.ts";
+import { resolveSpecForProject } from "./requirements.ts";
 import { getProjectTier } from "../../_shared/deployment.ts";
 import { featureAllowed } from "../../_shared/feature-rules.ts";
 
@@ -58,9 +59,14 @@ interface AssembledTestPlan {
   proposalId?: string;
   persistNote?: string;
   /** Dogfood #3: true when the stored plan's fingerprint no longer matched the
-   *  live graph and this response is a read-time regeneration (Test Strategy
-   *  edits preserved; nothing persisted — the push gate owns the artifact). */
+   *  live graph and this response is a read-time regeneration (Test Strategy and
+   *  test-case statements kept). AL.29: the regeneration is filed as a proposal,
+   *  so the stored copy and git catch up. */
   refreshed: boolean;
+  /** AL.29: the plan as served, unwrapped, and the artifact an agent writes its
+   *  statements into (a new plan's once its proposal is accepted). */
+  rawContent: string;
+  artifactId?: string;
 }
 
 // C4 step 1: the ONE requirement-scoped test-plan assembly — get_test_plan's lane
@@ -81,7 +87,7 @@ async function assembleTestPlanForRequirement(
 ): Promise<AssembledTestPlan> {
   const { data: snapshot } = await supabase
     .from('graph_snapshots')
-    .select('graph_data')
+    .select('graph_data, patch_sequence')
     .eq('branch_id', branchId)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -93,7 +99,10 @@ async function assembleTestPlanForRequirement(
     .from('specification_mappings')
     .select('node_id')
     .eq('requirement_id', requirement.id)
-    .eq('specification_id', requirement.specification_id);
+    .eq('specification_id', requirement.specification_id)
+    // AL.28: the first mapped node, every time; two agents filing the same plan
+    // put it on the same node, where the second replaces the first.
+    .order('created_at', { ascending: true });
 
   const mappedNodeIds = (mappings || []).map((m: { node_id: string }) => m.node_id);
 
@@ -124,9 +133,9 @@ async function assembleTestPlanForRequirement(
       category: requirement.category,
       status: requirement.status,
       acceptanceCriteria: requirement.acceptance_criteria || [],
+      rowId: requirement.id,
     },
     mappedNodeIds,
-    undefined,
   );
   const content = result.content;
   const fingerprint = result.fingerprint;
@@ -136,17 +145,32 @@ async function assembleTestPlanForRequirement(
   const stale = false;
   let proposalId: string | undefined;
   let persistNote: string | undefined;
-  if (result.refreshed) {
-    persistNote = 'The stored plan was stale (its inputs changed — e.g. a schema landed); this response is a fresh regeneration with your Test Strategy edits preserved. The stored artifact updates on the next git push via the freshness gate.';
+  let artifactId = result.storedArtifactId;
+  if (result.refreshed && result.rawContent && result.storedArtifactId) {
+    // AL.29: a changed plan is saved the way a new one is, so NodeSpec's copy, this
+    // response and the file git gets all agree. One refresh per plan is open at a
+    // time; it carries the sequence this read was built on, so an edit that lands
+    // first sets it aside instead of being overwritten.
+    const stored = ((graphData.artifacts ?? {}) as Record<string, AnyRecord>)[result.storedArtifactId];
+    const baseSequence = typeof snapshot?.patch_sequence === 'number' ? snapshot.patch_sequence : null;
+    const filed = stored
+      ? await persistRefreshedTestPlan(supabase, auth, projectId, branchId, requirement, stored, result.rawContent, result.fingerprint, baseSequence)
+      : null;
+    if (filed) proposalId = filed;
+    persistNote = filed
+      ? 'The stored plan was out of date (its inputs changed). This is the regenerated plan, with your Test Strategy and test-case statements kept; it is filed as a proposal so the stored copy and git match it.'
+      : 'The stored plan was out of date (its inputs changed). This is the regenerated plan, with your Test Strategy and test-case statements kept; it could not be filed, so ask again to save it.';
   }
 
   if (result.isNew && result.rawContent && result.path) {
+    const newId = crypto.randomUUID();
     const persisted = await persistGeneratedTestPlan(
       supabase, auth, projectId, branchId, requirement, graphData as AnyRecord,
-      mappedNodeIds, result.rawContent, result.path, result.fingerprint,
+      mappedNodeIds, result.rawContent, result.path, result.fingerprint, newId,
     );
     if (persisted) {
       proposalId = persisted;
+      artifactId = newId;
       persistNote = 'This plan was generated fresh and parked as a pending proposal — it persists (and ships on push) once the proposal is accepted in NodeSpec.';
     }
   }
@@ -177,15 +201,23 @@ async function assembleTestPlanForRequirement(
     proposalId,
     persistNote,
     refreshed: result.refreshed === true,
+    rawContent: result.rawContent ?? '',
+    ...(artifactId ? { artifactId } : {}),
   };
 }
 
 // The persistence half, mirroring handleGenerateTaskDocs: one add_artifact patch
 // carrying the deterministic content + fingerprint (+ requirementId, the rename-proof
-// lookup key), a companion update_node appending the artifact to the primary mapped
-// node's artifact list when that node exists, schema-validated, recorded as an
-// ai_runs/ai_proposals pair under the 'test-plan-generator' actor. Returns the
-// proposalId, or null when persistence was not possible (best-effort).
+// lookup key) on the first mapped node the graph still holds, schema-validated,
+// recorded as an ai_runs/ai_proposals pair under the 'test-plan-generator' actor.
+// Returns the proposalId, or null when persistence was not possible (best-effort).
+//
+// AL.28: the add_artifact links the node itself. The companion update_node it used
+// to carry set the node's whole list from this read: the engine's sort ran it
+// before the file existed (MISSING_ARTIFACT, every one set aside under Auto), and
+// applied after another agent's plan for the same node it would have unlinked that
+// one. A mapping to a node the graph no longer holds is skipped, so the plan never
+// names a node it cannot attach to.
 async function persistGeneratedTestPlan(
   supabase: SupabaseClient,
   auth: AuthResult,
@@ -197,24 +229,14 @@ async function persistGeneratedTestPlan(
   rawContent: string,
   path: string,
   fingerprint: unknown,
+  artifactId: string,
 ): Promise<string | null> {
   try {
     const now = new Date().toISOString();
-    const artifactId = crypto.randomUUID();
-    const primaryNodeId = mappedNodeIds[0];
-    const primaryNode = primaryNodeId ? (graphData.nodes ?? {})[primaryNodeId] : undefined;
-
-    const meta = (summary: string) => ({
-      id: crypto.randomUUID(),
-      timestamp: now,
-      actorType: 'system',
-      actorId: 'test-plan-generator',
-      summary,
-    });
-
+    const primaryNodeId = mappedNodeIds.find((id) => (graphData.nodes ?? {})[id]);
     const patches: AnyRecord[] = [{
       type: 'add_artifact',
-      metadata: meta(`Generate test plan for ${requirement.name}`),
+      metadata: testPlanPatchMeta(`Generate test plan for ${requirement.name}`, now),
       payload: {
         id: artifactId,
         nodeId: primaryNodeId ?? '',
@@ -229,51 +251,106 @@ async function persistGeneratedTestPlan(
         metadata: { testContextFingerprint: fingerprint, requirementId: requirement.requirement_id },
       },
     }];
-    const explanations: string[] = [
+    return await fileTestPlanProposal(supabase, auth, projectId, branchId, requirement, patches, [
       `Generated test plan for ${requirement.requirement_id} (${requirement.name}): acceptance-criteria scenarios, contract validation tests, and framework guidance`,
-    ];
-
-    if (primaryNode) {
-      const currentLinks = Array.isArray(primaryNode.artifacts) ? primaryNode.artifacts : [];
-      patches.push({
-        type: 'update_node',
-        metadata: meta(`Link test plan to ${primaryNode.label}`),
-        payload: { id: primaryNodeId, changes: { artifacts: [...currentLinks, artifactId] } },
-      });
-      explanations.push(`Link the test plan artifact to ${primaryNode.label}`);
-    }
-
-    // Defensive, same as the task-doc lane: the generator's output must satisfy the
-    // schema the apply pipeline enforces — refuse to park an unappliable proposal.
-    for (const p of patches) {
-      if (!PatchOperationSchema.safeParse(p).success) return null;
-    }
-
-    const aiRunId = crypto.randomUUID();
-    const { error: runError } = await supabase.from('ai_runs').insert({
-      id: aiRunId, project_id: projectId, branch_id: branchId,
-      model: 'test-plan-generator', prompt_hash: 'mcp-test-plan', status: 'completed',
-      completed_at: now,
-      metadata: { source: 'mcp-test-plan', requirementId: requirement.requirement_id, patchCount: patches.length, authMethod: auth.authMethod, apiKeyId: auth.keyId || null, credential: credentialOf(auth).delegate, credentialLabel: credentialOf(auth).label },
-    });
-    if (runError) return null;
-
-    const proposalId = crypto.randomUUID();
-    const { error: proposalError } = await supabase.from('ai_proposals').insert({
-      id: proposalId, ai_run_id: aiRunId,
-      source_branch_id: branchId, proposal_branch_id: branchId,
-      status: 'pending',
-      patches: patches.map((patch, i) => ({ patch, status: 'pending', explanation: explanations[i] ?? patch.metadata.summary })),
-      validation_expectations: [],
-      // AL.2: the proven credential, so the card names who asked for the plan.
-      metadata: { source: 'mcp-test-plan', requirementId: requirement.requirement_id, authMethod: auth.authMethod, apiKeyId: auth.keyId || null, credential: credentialOf(auth).delegate, credentialLabel: credentialOf(auth).label },
-    });
-    if (proposalError) return null;
-
-    return proposalId;
+    ], {});
   } catch (_err) {
     return null;
   }
+}
+
+// AL.29: the stored plan, regenerated because its inputs changed, filed as one
+// update_artifact. The Test Strategy body and the test-case statements are already
+// in `rawContent` (carryAgentPlanContent). While a refresh for this plan is open, a
+// second read files nothing and names that one.
+async function persistRefreshedTestPlan(
+  supabase: SupabaseClient,
+  auth: AuthResult,
+  projectId: string,
+  branchId: string,
+  requirement: RequirementRow,
+  stored: AnyRecord,
+  rawContent: string,
+  fingerprint: unknown,
+  baseSequence: number | null,
+): Promise<string | null> {
+  try {
+    const artifactId = String(stored.id);
+    const { data: open } = await supabase
+      .from('ai_proposals')
+      .select('id')
+      .eq('source_branch_id', branchId)
+      .eq('status', 'pending')
+      .eq('metadata->>source', 'mcp-test-plan')
+      .eq('metadata->>artifactId', artifactId)
+      .limit(1)
+      .maybeSingle();
+    if (open && typeof (open as { id?: unknown }).id === 'string') return (open as { id: string }).id;
+    const now = new Date().toISOString();
+    const patches: AnyRecord[] = [{
+      type: 'update_artifact',
+      metadata: testPlanPatchMeta(`Refresh test plan for ${requirement.name}`, now),
+      payload: {
+        id: artifactId,
+        changes: {
+          content: rawContent, status: 'draft', updatedAt: now,
+          metadata: { ...((stored.metadata ?? {}) as AnyRecord), testContextFingerprint: fingerprint, requirementId: requirement.requirement_id, stale: false },
+        },
+      },
+    }];
+    return await fileTestPlanProposal(supabase, auth, projectId, branchId, requirement, patches, [
+      `Regenerated test plan for ${requirement.requirement_id} (${requirement.name}): its inputs changed; Test Strategy and test-case statements kept`,
+    ], { artifactId, ...(baseSequence !== null ? { baseSequence } : {}) });
+  } catch (_err) {
+    return null;
+  }
+}
+
+function testPlanPatchMeta(summary: string, now: string): AnyRecord {
+  return { id: crypto.randomUUID(), timestamp: now, actorType: 'system', actorId: 'test-plan-generator', summary };
+}
+
+// The filing half both lanes share: schema-validated patches, recorded as an
+// ai_runs/ai_proposals pair under the 'test-plan-generator' actor. Returns the
+// proposalId, or null when it could not be filed (a read never fails on it).
+async function fileTestPlanProposal(
+  supabase: SupabaseClient,
+  auth: AuthResult,
+  projectId: string,
+  branchId: string,
+  requirement: RequirementRow,
+  patches: AnyRecord[],
+  explanations: string[],
+  extraMeta: AnyRecord,
+): Promise<string | null> {
+  // Defensive, same as the task-doc lane: the generator's output must satisfy the
+  // schema the apply pipeline enforces; refuse to park an unappliable proposal.
+  for (const p of patches) {
+    if (!PatchOperationSchema.safeParse(p).success) return null;
+  }
+  const now = new Date().toISOString();
+  const aiRunId = crypto.randomUUID();
+  const { error: runError } = await supabase.from('ai_runs').insert({
+    id: aiRunId, project_id: projectId, branch_id: branchId,
+    model: 'test-plan-generator', prompt_hash: 'mcp-test-plan', status: 'completed',
+    completed_at: now,
+    metadata: { source: 'mcp-test-plan', requirementId: requirement.requirement_id, patchCount: patches.length, authMethod: auth.authMethod, apiKeyId: auth.keyId || null, credential: credentialOf(auth).delegate, credentialLabel: credentialOf(auth).label },
+  });
+  if (runError) return null;
+
+  const proposalId = crypto.randomUUID();
+  const { error: proposalError } = await supabase.from('ai_proposals').insert({
+    id: proposalId, ai_run_id: aiRunId,
+    source_branch_id: branchId, proposal_branch_id: branchId,
+    status: 'pending',
+    patches: patches.map((patch, i) => ({ patch, status: 'pending', explanation: explanations[i] ?? (patch.metadata as AnyRecord).summary })),
+    validation_expectations: [],
+    // AL.2: the proven credential, so the card names who asked for the plan.
+    metadata: { source: 'mcp-test-plan', requirementId: requirement.requirement_id, authMethod: auth.authMethod, apiKeyId: auth.keyId || null, credential: credentialOf(auth).delegate, credentialLabel: credentialOf(auth).label, ...extraMeta },
+  });
+  if (proposalError) return null;
+
+  return proposalId;
 }
 
 export async function handleGetProjectContext(
@@ -405,7 +482,7 @@ export async function handleGetProjectContext(
         string,
         { kind: string; path?: string; content?: string; metadata?: Record<string, unknown> | null }
       >;
-      const stored = findExistingTestArtifact(artifacts, String(requirement.requirement_id), String(requirement.name ?? ''));
+      const stored = findExistingTestArtifact(artifacts, String(requirement.requirement_id), String(requirement.name ?? ''), String(requirement.id));
 
       const { data: testCases } = await supabase
         .from('test_cases')
@@ -668,17 +745,27 @@ export async function handleGetTestPlan(
   const branchId = await resolveBranchId(supabase, projectId, args.branch_id);
   if (!branchId) return { success: false, error: 'No primary branch found for this project' };
 
-  const { data: requirement } = await supabase
-    .from('specification_requirements')
-    .select('id, requirement_id, name, description, category, status, acceptance_criteria, specification_id')
-    .eq('id', args.requirement_id)
-    .maybeSingle();
+  // AL.29: the requirement must be this project's (the service client bypasses
+  // RLS), named by its row UUID or its REQ-xxx id, the way report_test_results
+  // and the other requirement tools take it.
+  const spec = await resolveSpecForProject(supabase, projectId);
+  const { data: requirement } = spec
+    ? await supabase
+      .from('specification_requirements')
+      .select('id, requirement_id, name, description, category, status, acceptance_criteria, specification_id')
+      .eq('specification_id', spec.id)
+      .eq(UUID_RE.test(args.requirement_id) ? 'id' : 'requirement_id', args.requirement_id)
+      .maybeSingle()
+    : { data: null };
 
   if (!requirement) {
-    return { success: false, error: 'Requirement not found' };
+    return { success: false, error: `Requirement not found in this project: ${args.requirement_id}. Pass its REQ-xxx id or its row UUID (list_requirements).` };
   }
 
   const assembled = await assembleTestPlanForRequirement(supabase, auth, projectId, branchId, requirement as RequirementRow);
+  // AL.29: what the plan still asks of the agent, and the line format to write it in.
+  const gaps = statementGaps(assembled.rawContent);
+  const asks = gaps.withoutStatements.length > 0 || gaps.toReview > 0;
 
   return {
     success: true,
@@ -698,11 +785,22 @@ export async function handleGetTestPlan(
       // C4 step 1: a fresh generation no longer evaporates — it is parked as a pending
       // proposal; the plan persists into the graph when that proposal is accepted.
       ...(assembled.proposalId ? { proposalId: assembled.proposalId } : {}),
-      // Dogfood #3 follow-up: a read-time refresh must SAY so — persistNote was
-      // set on refresh but only shipped beside proposalId (which a refresh never
-      // has), so the caller got a silently different plan with no explanation.
+      // Dogfood #3 follow-up: a read-time refresh must SAY so, whether or not it
+      // could be filed (AL.29 files it, so it usually carries a proposalId too).
       ...(assembled.refreshed ? { testPlanRefreshed: true } : {}),
       ...(assembled.persistNote ? { note: assembled.persistNote } : {}),
+      ...(assembled.artifactId ? { testPlanArtifactId: assembled.artifactId } : {}),
+      // AL.29 (3.2): the plan's test cases as the shared reader reads them, the
+      // agent's text in the untrusted-content envelope.
+      testCases: planCases(assembled.rawContent).cases.map((c) => ({
+        id: c.id, lane: c.lane, criterion: wrapFieldNullable(c.criterion), testId: c.testId,
+        statements: c.statements.map(wrapField), ...(c.blocked ? { blocked: true } : {}),
+      })),
+      ...(gaps.withoutStatements.length > 0
+        ? { testCasesWithoutStatements: gaps.withoutStatements.map((c) => ({ id: c.id, lane: c.lane, criterion: wrapField(c.criterion) })) }
+        : {}),
+      ...(gaps.toReview > 0 ? { statementsToReview: gaps.toReview } : {}),
+      ...(asks ? { statementFormat: STATEMENT_FORMAT } : {}),
     },
   };
 }

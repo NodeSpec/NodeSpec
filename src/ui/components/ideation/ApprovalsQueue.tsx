@@ -143,6 +143,9 @@ function ApprovalCard({ q, ctx }: { q: QueueItem; ctx: CardCtx }) {
           )}
         </div>
         <div style={{ fontSize: '11.5px', lineHeight: 1.45, color: c.textSecondary, marginTop: '3px' }}>{line}</div>
+        {q.pending && q.autoWait && (
+          <div data-testid="approval-autowait" style={{ fontSize: '11.5px', lineHeight: 1.45, color: c.text, marginTop: '3px' }}>Waits for you under Auto: {q.autoWait}</div>
+        )}
         {!q.pending && q.note && (
           <div data-testid="approval-note" style={{ fontSize: '11.5px', lineHeight: 1.45, color: c.text, marginTop: '3px' }}>Note: {q.note}</div>
         )}

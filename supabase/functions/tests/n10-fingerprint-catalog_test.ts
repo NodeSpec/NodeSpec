@@ -106,7 +106,7 @@ Deno.test("N10(b): test plans re-stale ONLY on testingPatterns — broad enrichm
   const req = { requirementId: "REQ-001", name: "R", description: "", category: "functional", acceptanceCriteria: [{ text: "works" }] };
   const mapped = [{ nodeId: S, label: "Api", role: "backend-service", technology: "express" }];
   // deno-lint-ignore no-explicit-any
-  const tfp = (c: any) => computeTestContextFingerprint(req as any, mapped as any, [], graph(), "", c).fingerprint;
+  const tfp = (c: any) => computeTestContextFingerprint(req as any, mapped as any, [], graph(), c).fingerprint;
 
   const base = tfp(catalogs());
   const withPatterns = tfp(catalogs({ express: { ai_context: { testingPatterns: { framework: "vitest" } } } }));
@@ -114,6 +114,6 @@ Deno.test("N10(b): test plans re-stale ONLY on testingPatterns — broad enrichm
   const broadEnrichment = tfp(catalogs({ express: { ai_context: { bestPractices: ["a", "b", "c"], securityGuidance: ["s"] } } }));
   assertEquals(broadEnrichment, base, "bestPractices/security enrichment renders nowhere in the plan — no churn");
   // deno-lint-ignore no-explicit-any
-  const legacy = computeTestContextFingerprint(req as any, mapped as any, [], graph(), "");
+  const legacy = computeTestContextFingerprint(req as any, mapped as any, [], graph());
   assertEquals(legacy.fields.catalogSignature, "", "no catalogs → empty signature, legacy computable");
 });

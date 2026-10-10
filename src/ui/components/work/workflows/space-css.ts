@@ -97,8 +97,6 @@ export const SPACE_CSS = `
 .ns-ws .addbox.wide{width:156px;padding:8px 9px;display:flex;align-items:center;border-color:var(--ws-accent-line)}
 .ns-ws .addbox.wide input{width:100%;background:transparent;border:none;color:var(--ws-input-text);font-family:inherit;font-size:12.5px;font-weight:650}
 .ns-ws .addbox.wide input:focus{outline:none}
-.ns-ws-inboxbtn{position:absolute;right:14px;top:12px;z-index:9;display:flex;align-items:center;gap:7px;padding:6px 11px;border-radius:9px;font-size:11.5px;font-weight:600;color:var(--ws-text-2)}
-.ns-ws-inboxbtn .n{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--ws-warn-on);background:var(--ws-warn);border-radius:7px;padding:1px 6px}
 .ns-ws .dotlive{width:7px;height:7px;border-radius:50%;background:var(--ws-ok);flex-shrink:0}
 .ns-ws-insp{position:absolute;right:14px;top:200px;z-index:7;width:300px;border-radius:13px;overflow:hidden;max-height:calc(100% - 234px);display:flex;flex-direction:column}
 .ns-ws-insp .cap{height:3px;flex-shrink:0}

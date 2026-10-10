@@ -11,6 +11,13 @@ import { oauthClientId } from "../_shared/oauth-client.ts";
 
 const ALLOWED_SCOPES = new Set(['read', 'write', 'propose']);
 
+/** The managed app, where the first-visit page and the sign-up link send people
+ *  (AL.26). Hosted only: a self-hosted consent page never names nodespec.io. */
+const APP_URL = 'https://nodespec.io';
+/** The skill an agent attaches to work with NodeSpec, the one the app header's
+ *  Skills menu lists as NodeSpec Developer. */
+const SKILL_URL = 'https://github.com/NodeSpec/NodeSpec/blob/HEAD/skills/nodespec-developer/SKILL.md';
+
 /** JSON for an inline <script>: JSON.stringify leaves "</script>" and the line
  *  separators as they are, so a query value could close the script and open another
  *  (the RLS audit, 2026-09-30). Exported for tests. */
@@ -355,6 +362,10 @@ export async function handleAuthorizeGet(req: Request, supabase: SupabaseClient)
     googleEnabled: !isSelfHosted() || consentGoogleOptIn(),
   });
 
+  // AL.26 (owner 2026-10-07): on the managed site someone new is sent to make
+  // their account in the app first, in a new tab so this request survives.
+  const signupHtml = isSelfHosted() ? '' : `<div class="signup-note">New to NodeSpec? <a href="${APP_URL}/?signup=claude" target="_blank" rel="noopener noreferrer">Create your account first</a>, then come back to this tab to connect.</div>`;
+
   const consentHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -395,6 +406,8 @@ export async function handleAuthorizeGet(req: Request, supabase: SupabaseClient)
     .login-step.hidden { display: none; }
     .mfa-info { font-size: 13px; color: #c0c8d4; margin-bottom: 16px; }
     .totp-input { text-align: center; font-size: 24px; letter-spacing: 8px; font-family: monospace; }
+    .signup-note { font-size: 13px; color: #c0c8d4; margin-bottom: 16px; line-height: 1.5; }
+    .signup-note a { color: #60a5fa; font-weight: 500; }
   </style>
 </head>
 <body>
@@ -410,6 +423,7 @@ export async function handleAuthorizeGet(req: Request, supabase: SupabaseClient)
     <div class="info-box">
       Sign in with your NodeSpec account to authorize this connection. The agent will be able to access your projects according to the permissions above.
     </div>
+    ${signupHtml}
 
     <button type="button" class="btn btn-google" id="googleBtn">
       <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
@@ -732,6 +746,101 @@ export async function handleAuthorizeGet(req: Request, supabase: SupabaseClient)
   });
 }
 
+/** Whether the app has set this account up (AL.26). The app's first load hands
+ *  out the example project and records it in user_settings, and the record
+ *  outlives a deleted example; an owned project or a seat covers accounts from
+ *  before the example. null when the database cannot say. Exported for tests. */
+export async function hasUsedApp(supabase: SupabaseClient, userId: string): Promise<boolean | null> {
+  const settings = await supabase.from('user_settings').select('preferences').eq('user_id', userId).maybeSingle();
+  if (settings.error) return null;
+  const preferences = (settings.data as { preferences?: Record<string, unknown> | null } | null)?.preferences;
+  if (preferences && typeof preferences === 'object' && 'exampleProject' in preferences) return true;
+  const owned = await supabase.from('projects').select('id').eq('owner_id', userId).limit(1);
+  if (owned.error) return null;
+  if (((owned.data as unknown[] | null) ?? []).length > 0) return true;
+  const seat = await supabase.from('project_members').select('role').eq('user_id', userId).limit(1);
+  if (seat.error) return null;
+  return ((seat.data as unknown[] | null) ?? []).length > 0;
+}
+
+/** The page an account the app has never set up gets instead of a code (AL.26).
+ *  It sends the person to the app in a new tab, points at the NodeSpec skill
+ *  (the header's Skills menu, or GitHub), and finishes the same request when
+ *  they come back. The session token rides only in this tab's memory: it is
+ *  taken out of the address bar on load, and no link here carries it. */
+function firstVisitPage(signInUrl: string, oauthCors: Record<string, string>): Response {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="no-referrer">
+  <title>NodeSpec - Finish setting up</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1419; color: #e6e9ef; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+    .card { background: #1a1f2e; border: 1px solid #2a3040; border-radius: 12px; padding: 32px; max-width: 460px; width: 100%; }
+    .logo { font-size: 20px; font-weight: 600; color: #e6e9ef; margin-bottom: 16px; }
+    h1 { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+    .lead { font-size: 14px; color: #c0c8d4; line-height: 1.6; margin-bottom: 18px; }
+    ol { padding-left: 20px; margin-bottom: 22px; }
+    li { font-size: 13px; color: #c0c8d4; line-height: 1.6; margin-bottom: 10px; }
+    li strong { color: #e6e9ef; }
+    a { color: #60a5fa; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .btn { display: block; width: 100%; padding: 10px; font-size: 14px; font-weight: 500; border: none; border-radius: 6px; cursor: pointer; text-align: center; text-decoration: none; }
+    .btn-primary { background: #3b82f6; color: #ffffff; margin-bottom: 8px; }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-secondary { background: transparent; color: #c0c8d4; border: 1px solid #2a3040; }
+    .btn-secondary:hover { background: #1e2433; }
+    .again { display: none; font-size: 12px; color: #fbbf24; margin-top: 12px; line-height: 1.5; }
+    .notice { font-size: 12px; color: #6b7585; margin-top: 16px; line-height: 1.5; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">NodeSpec</div>
+    <h1>Your NodeSpec account is ready</h1>
+    <p class="lead">Before an agent connects, finish setting up in NodeSpec. It takes about a minute and gives you an example project to explore.</p>
+    <ol>
+      <li><strong>Open NodeSpec</strong> and sign in with the account you just used.</li>
+      <li><strong>Add the NodeSpec skill to your agent.</strong> It tells your agent how to work with NodeSpec. Copy it from <strong>Skills</strong> in the app's header, or get it on GitHub: <a href="${SKILL_URL}" target="_blank" rel="noopener noreferrer"><code>skills/nodespec-developer/SKILL.md</code></a>.</li>
+      <li><strong>Come back to this tab</strong> and choose Continue connecting.</li>
+    </ol>
+    <a class="btn btn-primary" href="${APP_URL}/?signin=claude" target="_blank" rel="noopener noreferrer">Open NodeSpec</a>
+    <button type="button" class="btn btn-secondary" id="continueBtn">Continue connecting</button>
+    <div class="again" id="again">NodeSpec has not seen this account in the app yet. Open NodeSpec, sign in, and wait for your projects to appear, then try again.</div>
+    <div class="notice">More than an hour since you signed in? <a href="${escapeHtml(signInUrl)}">Sign in again</a>.</div>
+  </div>
+  <script>
+    (function () {
+      var here = new URL(window.location.href);
+      var token = here.searchParams.get('session_token');
+      here.searchParams.delete('session_token');
+      history.replaceState(null, '', here.pathname + here.search);
+      // A retry of this same sign-in that comes back here says so. The mark is the
+      // token's last characters, which name the sign-in and cannot be used as it.
+      var mark = token ? token.slice(-12) : '';
+      var again = false;
+      try { again = !!mark && sessionStorage.getItem('nodespec_mcp_setup_retry') === mark; sessionStorage.removeItem('nodespec_mcp_setup_retry'); } catch (_e) { /* storage unavailable */ }
+      if (again) document.getElementById('again').style.display = 'block';
+      document.getElementById('continueBtn').addEventListener('click', function () {
+        if (!token) { window.location.href = here.toString(); return; }
+        try { sessionStorage.setItem('nodespec_mcp_setup_retry', mark); } catch (_e) { /* storage unavailable */ }
+        var next = new URL(here.toString());
+        next.searchParams.set('session_token', token);
+        window.location.href = next.toString();
+      });
+    })();
+  </script>
+</body>
+</html>`;
+  return new Response(html, {
+    status: 200,
+    headers: { ...oauthCors, 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+  });
+}
+
 async function completeAuthorization(
   supabase: SupabaseClient,
   sessionToken: string,
@@ -768,6 +877,28 @@ async function completeAuthorization(
       'Multi-factor authentication required. Enter the code from your authenticator app to finish signing in.',
       { status: 401, headers: { ...oauthCors, 'Content-Type': 'text/plain' } },
     );
+  }
+
+  // AL.26 (owner 2026-10-07): the Google button on this page creates an account
+  // for an email Supabase has not seen, and those accounts were connecting an
+  // agent without ever opening the app (no example project, no walkthrough, no
+  // plan step). On the managed site an account the app has never set up is
+  // stopped here and sent to the app first; nothing is minted until it has been.
+  if (!isSelfHosted()) {
+    const usedApp = await hasUsedApp(supabase, user.id);
+    if (usedApp === null) {
+      return new Response('Could not check your NodeSpec account. Try again.', {
+        status: 500,
+        headers: { ...oauthCors, 'Content-Type': 'text/plain' },
+      });
+    }
+    if (!usedApp) {
+      const signIn = `${getBaseUrl()}/authorize?${new URLSearchParams({
+        client_id: clientId, redirect_uri: redirectUri, code_challenge: codeChallenge,
+        code_challenge_method: codeChallengeMethod, state, scope,
+      }).toString()}`;
+      return firstVisitPage(signIn, oauthCors);
+    }
   }
 
   return await mintCodeAndRedirect(

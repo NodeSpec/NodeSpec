@@ -22,7 +22,7 @@ import { laterPatchFromRow, patchesTouchingNode, type PatchRowLike } from "../..
 import { getProjectTier } from "../../_shared/deployment.ts";
 import { featureAllowed } from "../../_shared/feature-rules.ts";
 import { leaseReach, normalizePath, criterionToken, taskToken, reachOf, outsideReach, reachOverlap, WHOLE_NODE } from "../../_shared/lease-reach.ts";
-import { parseTaskDocTasks } from "../../_shared/task-deltas.ts";
+import { parseTaskDocTasks, stepGaps, STEP_FORMAT } from "../../_shared/task-deltas.ts";
 import { loadGraphData } from "../../_shared/mcp-context-assembly.ts";
 import { explodeSignalLine, fileGroups } from "../../_shared/explode-signal.ts";
 
@@ -43,6 +43,63 @@ const STALE_AFTER_MS = 30 * 60 * 1000;
 export function isStale(heartbeatAt: string | null | undefined): boolean {
   if (!heartbeatAt) return false;
   return Date.now() - new Date(heartbeatAt).getTime() > STALE_AFTER_MS;
+}
+
+/** AL.29 (gap 3): a work order as the branch's task doc lists it. withoutSteps:
+ *  open with no step under it (3.3: the reader generate_task_docs answers with). */
+export interface DocWorkOrder { nodeId: string; key: string; displayId: string; title: string; checked: boolean; docIndex: number; withoutSteps: boolean }
+
+/** The work orders in the branch's task docs (one parser, the one the Plan
+ *  board reads with), optionally for one node, and the docs with steps waiting
+ *  under "Steps to review". A key two docs share counts once. */
+async function readDocWorkOrders(supabase: SupabaseClient, branchId: string, nodeId?: string): Promise<{
+  orders: DocWorkOrder[];
+  stepsToReview: Array<{ nodeId: string; artifactId: string; path: string | null; steps: number }>;
+}> {
+  const graph = (await loadGraphData(supabase, branchId)) as { artifacts?: Record<string, { id?: string; kind?: string; nodeId?: string; path?: string; content?: unknown }> } | null;
+  const orders: DocWorkOrder[] = [];
+  const stepsToReview: Array<{ nodeId: string; artifactId: string; path: string | null; steps: number }> = [];
+  const seen = new Set<string>();
+  for (const [id, a] of Object.entries(graph?.artifacts ?? {})) {
+    if (a.kind !== "task" || typeof a.content !== "string" || typeof a.nodeId !== "string") continue;
+    if (nodeId && a.nodeId !== nodeId) continue;
+    const gaps = stepGaps(a.content);
+    const empty = new Set(gaps.withoutSteps.map((w) => w.key));
+    if (gaps.toReview > 0) stepsToReview.push({ nodeId: a.nodeId, artifactId: a.id ?? id, path: a.path ?? null, steps: gaps.toReview });
+    parseTaskDocTasks(a.content).tasks.forEach((t, docIndex) => {
+      if (!t.key || seen.has(`${a.nodeId}::${t.key}`)) return;
+      seen.add(`${a.nodeId}::${t.key}`);
+      orders.push({ nodeId: a.nodeId!, key: t.key, displayId: t.displayId, title: t.title, checked: t.checked, docIndex, withoutSteps: empty.has(t.key) });
+    });
+  }
+  return { orders, stepsToReview };
+}
+
+export interface TaskStateRow { id: string; node_id: string; task_key: string; display_id: string | null; title: string | null; done?: boolean | null; orphaned?: boolean | null; mark?: string | null }
+export interface OpenWorkOrder { taskItemId: string | null; nodeId: string; taskKey: string; displayId: string | null; title: string | null; mark: string | null; docIndex: number; withoutSteps: boolean }
+
+/**
+ * AL.29 (gap 3): the open work. The docs say which work orders exist; a
+ * task_items row, when there is one, says whether it is done or orphaned and
+ * carries its mark. With no row, the doc's own box decides (the Plan board's
+ * rule). A row whose key no doc lists stays open work while it is neither.
+ * Pure.
+ */
+export function openWorkOrders(rows: TaskStateRow[], orders: DocWorkOrder[]): OpenWorkOrder[] {
+  const rowByKey = new Map(rows.map((r) => [`${r.node_id}::${r.task_key}`, r]));
+  const listed = new Set<string>();
+  const open: OpenWorkOrder[] = [];
+  for (const o of orders) {
+    listed.add(`${o.nodeId}::${o.key}`);
+    const row = rowByKey.get(`${o.nodeId}::${o.key}`);
+    if (row ? row.done === true || row.orphaned === true : o.checked) continue;
+    open.push({ taskItemId: row?.id ?? null, nodeId: o.nodeId, taskKey: o.key, displayId: o.displayId, title: o.title, mark: row?.mark ?? null, docIndex: o.docIndex, withoutSteps: o.withoutSteps });
+  }
+  for (const r of rows) {
+    if (listed.has(`${r.node_id}::${r.task_key}`) || r.done === true || r.orphaned === true) continue;
+    open.push({ taskItemId: r.id, nodeId: r.node_id, taskKey: r.task_key, displayId: r.display_id, title: r.title, mark: r.mark ?? null, docIndex: Number.MAX_SAFE_INTEGER, withoutSteps: false });
+  }
+  return open;
 }
 
 export async function handleCheckoutTask(
@@ -83,6 +140,7 @@ export async function handleCheckoutTask(
   let nodeId: string | null = null;
   let taskKey: string | null = null;
   let ownPath: string | null = null;
+  let docs: Awaited<ReturnType<typeof readDocWorkOrders>> | null = null;
   if (level === "node") {
     nodeId = args.node_id?.trim() || null;
     if (!nodeId || !UUID_RE.test(nodeId)) {
@@ -91,19 +149,40 @@ export async function handleCheckoutTask(
     refId = null;
   } else if (level === "task") {
     refId = args.task_item_id ?? null;
+    let state: { done?: boolean | null; orphaned?: boolean | null } | null = null;
     if (!refId && args.node_id && args.task_key) {
-      const { data: item, error } = await supabase
+      const lookup = () => supabase
         .from("task_items")
         .select("id, done, orphaned")
         .eq("project_id", projectId)
-        .eq("node_id", args.node_id)
-        .eq("task_key", args.task_key)
+        .eq("node_id", args.node_id!)
+        .eq("task_key", args.task_key!)
         .maybeSingle();
+      let { data: item, error } = await lookup();
       if (error) return { success: false, error: `Task lookup failed: ${error.message}` };
       if (!item) {
-        return { success: false, error: `No task item for node ${args.node_id} with key ${args.task_key}. get_work_queue lists claimable tasks with their taskItemId.` };
+        // AL.29 (gap 3): a work order nobody has ticked or claimed has no row
+        // yet. The node's task doc says it exists; the claim creates its row
+        // (a row written meanwhile, by a tick or another claim, is kept).
+        const branchId = args.branch_id ?? ((await getPrimaryBranch(supabase, projectId, "id")) as { id: string } | null)?.id ?? null;
+        docs = branchId ? await readDocWorkOrders(supabase, branchId, args.node_id) : null;
+        const order = docs?.orders.find((o) => o.key === args.task_key);
+        if (!order) {
+          return { success: false, error: `No work order with key ${args.task_key} in node ${args.node_id}'s task document. get_work_queue lists the open work orders with their node and key.` };
+        }
+        if (order.checked) {
+          return { success: false, error: `Work order ${order.displayId} (${order.title}) is ticked done in its task document, so there is nothing to claim. get_work_queue lists the open work orders.` };
+        }
+        const { error: rowError } = await supabase.from("task_items").upsert({
+          project_id: projectId, node_id: args.node_id, task_key: args.task_key,
+          display_id: order.displayId, title: order.title, done: false, orphaned: false, provenance: {},
+        }, { onConflict: "project_id,node_id,task_key", ignoreDuplicates: true });
+        if (rowError) return { success: false, error: `Could not record the work order: ${rowError.message}` };
+        ({ data: item, error } = await lookup());
+        if (error || !item) return { success: false, error: `Task lookup failed: ${error?.message ?? "the row was not recorded"}` };
       }
       refId = (item as { id: string }).id;
+      state = item as { done?: boolean | null; orphaned?: boolean | null };
       nodeId = args.node_id;
       taskKey = args.task_key;
     }
@@ -111,9 +190,17 @@ export async function handleCheckoutTask(
       return { success: false, error: "Task checkout needs task_item_id, or node_id + task_key (the <!-- t:key --> anchor)." };
     }
     if (!nodeId) {
-      const { data: row } = await supabase.from("task_items").select("node_id, task_key").eq("id", refId).maybeSingle();
+      const { data: row } = await supabase.from("task_items").select("node_id, task_key, done, orphaned").eq("id", refId).maybeSingle();
       nodeId = (row as { node_id?: string } | null)?.node_id ?? null;
       taskKey = (row as { task_key?: string } | null)?.task_key ?? null;
+      state = row as { done?: boolean | null; orphaned?: boolean | null } | null;
+    }
+    // AL.29: done work is not claimable, and neither is a work order its doc no longer lists.
+    if (state?.done === true) {
+      return { success: false, error: "This work order is done (ticked), so there is nothing to claim. get_work_queue lists the open work orders." };
+    }
+    if (state?.orphaned === true) {
+      return { success: false, error: "This work order is no longer in its node's task document (orphaned), so there is nothing to claim. get_work_queue lists the open work orders." };
     }
   } else if (level === "code" && refId) {
     const { data: row } = await supabase.from("artifacts").select("node_id, path").eq("id", refId).maybeSingle();
@@ -205,6 +292,19 @@ export async function handleCheckoutTask(
   }
   // AA.5: the last holder's hand-off note reaches the next claim on the same work.
   const handoff = await lastHandoff(supabase, projectId, level, refId, nodeId, criterionId);
+  // AL.29 (3.3): what the work order's doc still asks for, as get_work_queue says it.
+  let stepFields: Record<string, unknown> = {};
+  if (level === "task" && nodeId && taskKey) {
+    const branchId = args.branch_id ?? ((await getPrimaryBranch(supabase, projectId, "id")) as { id: string } | null)?.id ?? null;
+    docs ??= branchId ? await readDocWorkOrders(supabase, branchId, nodeId) : null;
+    const withoutSteps = docs?.orders.find((o) => o.key === taskKey)?.withoutSteps === true;
+    const review = docs?.stepsToReview ?? [];
+    stepFields = {
+      ...(withoutSteps ? { withoutSteps } : {}),
+      ...(review.length > 0 ? { stepsToReview: review } : {}),
+      ...(withoutSteps || review.length > 0 ? { stepFormat: STEP_FORMAT } : {}),
+    };
+  }
   return {
     success: true,
     data: {
@@ -215,6 +315,7 @@ export async function handleCheckoutTask(
       ...(reach ? { reach } : {}),
       ...(criterionId ? { criterionId } : {}),
       ...(handoff ? { handoff } : {}),
+      ...stepFields,
       message: level === "node"
         ? "Claimed: this node is locked for you. Its structure (role, technology, configuration, edges, contracts, parts, the files bound to it, its task document) changes only through you until you release it; work inside it by others waits. Heartbeat via checkout_heartbeat; release with a note for whoever comes next."
         : level === "criterion"
@@ -847,17 +948,25 @@ export async function handleGetWorkQueue(
   const projectId = resolved.project.id;
   const limit = Math.max(1, Math.min(args.limit ?? 20, 100));
 
-  // Open tasks: not done, not orphaned.
+  // AL.29 (gap 3): the work orders come from the branch's task docs; a
+  // task_items row (written by the first tick or claim) holds their state.
+  // Before this the queue read rows only, so a fresh work order was never offered.
   const { data: items, error: itemsError } = await supabase
     .from("task_items")
     .select("id, node_id, task_key, display_id, title, done, orphaned, mark")
-    .eq("project_id", projectId)
-    .eq("done", false)
-    .eq("orphaned", false);
+    .eq("project_id", projectId);
   if (itemsError) return { success: false, error: `Task read failed: ${itemsError.message}` };
-  const open = (items ?? []) as Array<{
-    id: string; node_id: string; task_key: string; display_id: string | null; title: string | null;
-  }>;
+  let branchId = args.branch_id ?? null;
+  if (!branchId) {
+    const { data: branches } = await supabase
+      .from("branches")
+      .select("id, is_primary")
+      .eq("project_id", projectId);
+    const rows = (Array.isArray(branches) ? branches : []) as Array<{ id: string; is_primary: boolean | null }>;
+    branchId = (rows.find((b) => b.is_primary) ?? rows[0])?.id ?? null;
+  }
+  const docs = branchId ? await readDocWorkOrders(supabase, branchId) : { orders: [], stepsToReview: [] };
+  const open = openWorkOrders((items ?? []) as TaskStateRow[], docs.orders);
   if (open.length === 0) {
     const activeHolds = await readActiveHolds(supabase, auth, projectId);
     return { success: true, data: { source: "none", queue: [], totalOpen: 0, activeHolds, message: "No open tasks. generate_task_docs creates task packets from the architecture. activeHolds still lists every active lease (outcome and requirement holds exist before any task does)." } };
@@ -903,15 +1012,6 @@ export async function handleGetWorkQueue(
   // display order rather than failing the queue.
   const nodePosition = new Map<string, number>();
   const nodeLabel = new Map<string, string>();
-  let branchId = args.branch_id ?? null;
-  if (!planOrder && !branchId) {
-    const { data: branches } = await supabase
-      .from("branches")
-      .select("id, is_primary")
-      .eq("project_id", projectId);
-    const rows = (branches ?? []) as Array<{ id: string; is_primary: boolean | null }>;
-    branchId = (rows.find((b) => b.is_primary) ?? rows[0])?.id ?? null;
-  }
   if (!planOrder && branchId) {
     const readiness = await handleGetBuildReadiness(supabase, auth, {
       project_id: projectId,
@@ -931,22 +1031,25 @@ export async function handleGetWorkQueue(
     }
   }
 
+  // Within a node, the doc's own order (T2 before T10).
   const ranked = open
     .map((t) => ({
       t,
       rank: planOrder
-        ? (planOrder.get(`${t.node_id}:${t.task_key}`) ?? Number.MAX_SAFE_INTEGER)
-        : (nodePosition.get(t.node_id) ?? Number.MAX_SAFE_INTEGER),
+        ? (planOrder.get(`${t.nodeId}:${t.taskKey}`) ?? Number.MAX_SAFE_INTEGER)
+        : (nodePosition.get(t.nodeId) ?? Number.MAX_SAFE_INTEGER),
     }))
     .sort((a, b) =>
       a.rank - b.rank
-      || String(a.t.display_id ?? "").localeCompare(String(b.t.display_id ?? ""))
-      || a.t.task_key.localeCompare(b.t.task_key));
+      || a.t.nodeId.localeCompare(b.t.nodeId)
+      || a.t.docIndex - b.t.docIndex
+      || String(a.t.displayId ?? "").localeCompare(String(b.t.displayId ?? ""))
+      || a.t.taskKey.localeCompare(b.t.taskKey));
 
   // Active leases attach as display state — held work stays IN the queue
   // (a checkout is advisory), it just says who has it and whether the hold
-  // has gone stale.
-  const ids = ranked.slice(0, limit).map((r) => r.t.id);
+  // has gone stale. A work order with no row yet has no lease.
+  const ids = ranked.slice(0, limit).map((r) => r.t.taskItemId).filter((id): id is string => !!id);
   const holds = new Map<string, { holder: string; since: string; heartbeatAt: string }>();
   if (ids.length > 0) {
     const { data: leases } = await supabase
@@ -962,7 +1065,8 @@ export async function handleGetWorkQueue(
   }
 
   const activeHolds = await readActiveHolds(supabase, auth, projectId);
-
+  // AL.29 (3.3): the empty and flagged blocks, as generate_task_docs names them.
+  const asks = ranked.slice(0, limit).some(({ t }) => t.withoutSteps) || docs.stepsToReview.length > 0;
 
   return {
     success: true,
@@ -970,23 +1074,26 @@ export async function handleGetWorkQueue(
       source: planOrder ? "accepted-plan" : "build-order",
       totalOpen: open.length,
       queue: ranked.slice(0, limit).map(({ t }) => {
-        const hold = holds.get(t.id);
+        const hold = t.taskItemId ? holds.get(t.taskItemId) : undefined;
         return {
-          taskItemId: t.id,
-          taskKey: t.task_key,
-          displayId: t.display_id,
+          taskItemId: t.taskItemId,
+          taskKey: t.taskKey,
+          displayId: t.displayId,
           title: t.title,
-          nodeId: t.node_id,
+          nodeId: t.nodeId,
           // 7.3: the mark travels with the item so the boundary can withhold it
-          mark: (t as { mark?: string | null }).mark ?? null,
-          ...(nodeLabel.has(t.node_id) ? { nodeLabel: nodeLabel.get(t.node_id) } : {}),
+          mark: t.mark,
+          ...(nodeLabel.has(t.nodeId) ? { nodeLabel: nodeLabel.get(t.nodeId) } : {}),
           ...(hold
             ? { heldBy: hold.holder, holderSince: hold.since, holdStale: isStale(hold.heartbeatAt) }
             : {}),
+          ...(t.withoutSteps ? { withoutSteps: true } : {}),
         };
       }),
+      ...(docs.stepsToReview.length > 0 ? { stepsToReview: docs.stepsToReview } : {}),
+      ...(asks ? { stepFormat: STEP_FORMAT } : {}),
       activeHolds,
-      message: "Claim with checkout_task (task_item_id). Held entries are advisory — a stale hold (30 silent minutes) is claimable. activeHolds is the whole lease board (every level, yours marked mine) — check it before touching held work.",
+      message: "Claim with checkout_task: task_item_id, or node_id + task_key when taskItemId is null (a work order no one has ticked or claimed yet; the claim records it). Held entries are advisory; a stale hold (30 silent minutes) is claimable. activeHolds is the whole lease board (every level, yours marked mine); check it before touching held work.",
     },
   };
 }

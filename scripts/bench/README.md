@@ -27,9 +27,10 @@ npm run bench:oss -- --dry-run
    up on the next run).
 3. **An MCP API key.** Mint one in the app (Agents → Connected → Connect an
    agent) for the same account — the MCP scenarios authenticate with it. The
-   account needs room for two more connections on top of it: `v3-connections`
-   and `checkout-loop` mint their own keys as the signed-in person (and revoke
-   them at the end), so a community account (one connection) cannot run them.
+   account needs room for two more connections on top of it: `v3-connections`,
+   `checkout-loop` and `chain-build-verify` mint their own keys as the
+   signed-in person (and revoke them at the end), so a community account (one
+   connection) cannot run them.
 4. **A dedicated throwaway GitHub repo** (e.g. `you/nodespec-bench-sandbox`)
    plus a token with contents + pull-request read/write on it. The sandbox
    is **FORCE-RESET before every scenario** — never point it at a repo you

@@ -82,6 +82,9 @@ export interface QueueItem {
   /** AL.2: on a decided proposal, the reviewer's own words (a reject's
    *  reason): the agent reads them back, and the history shows them. */
   note?: string | null;
+  /** AL.24: every lane it touches is at Auto, and it still waits for the
+   *  person: why, as the server recorded it (metadata.autoWait). */
+  autoWait?: string | null;
 }
 
 export type QueueSource = 'proposal' | 'candidate' | 'mapping' | 'question' | 'plan';
@@ -574,6 +577,7 @@ export function assembleQueueItems(rows: QueueRow[], labels: QueueLabels, laterB
       ...(promotion ? { landsOn: str(firstPayload.section), nodeId: labels.candidateNodes?.get(candidateId) ?? null } : {}),
       targetLocked: r.status === 'pending' && !reviewInCanvas ? lockedTargetOf(entries, labels) : null,
       note: noteRaw ? noteRaw.trim() : null,
+      autoWait: r.status === 'pending' ? str((r.metadata?.autoWait as AnyRec | undefined)?.reason) : null,
     };
   });
   return items.sort((a, b) => (a.pending === b.pending ? b.createdAt.localeCompare(a.createdAt) : a.pending ? -1 : 1));
@@ -776,7 +780,9 @@ async function loadQueue(projectId: string, planWorkflows: boolean, planPriority
   // Q: below the plan, the paid lanes are not read at all.
   const none = Promise.resolve({ data: null });
   const [candRes, specRes, planRes] = await Promise.all([
-    planImport ? supabase.from('requirement_candidates').select('id, name, description, kind, key, node_id, criteria, evidence, created_at').eq('project_id', projectId).eq('status', 'pending').neq('kind', 'outcome') : none,
+    // AL.24: an accepted candidate has derived its requirement (it stays
+    // pending until settled in Work): nothing is left to decide here.
+    planImport ? supabase.from('requirement_candidates').select('id, name, description, kind, key, node_id, criteria, evidence, created_at').eq('project_id', projectId).eq('status', 'pending').neq('kind', 'outcome').is('requirement_row_id', null) : none,
     supabase.from('project_specifications').select('id').eq('project_id', projectId).order('created_at', { ascending: false }).limit(1).maybeSingle(),
     planPriority ? supabase.from('work_plans').select('id, version, summary, proposed_by, created_at, source_hash, branch_id').in('branch_id', branchIds).eq('status', 'proposed').order('version', { ascending: false }) : none,
   ]);
@@ -885,11 +891,16 @@ export function useApprovalsQueue(projectId: string | null | undefined, plan: Qu
         const supabase = getSupabaseClient();
         const { data: { user } } = await supabase.auth.getUser();
         const provenance = { source: 'ui', actor: user?.email ?? user?.id ?? 'owner', at: new Date().toISOString(), note: action === 'move' ? 'moved under Proposals' : 'confirmed under Proposals' };
-        const { error: err } = await supabase
+        // AL.24: only while it still needs review: a second decision (another
+        // tab, a teammate) never moves a mapping someone just confirmed.
+        const { data: decided, error: err } = await supabase
           .from('specification_mappings')
           .update({ validation_status: 'valid', validation_provenance: provenance, ...(action === 'move' ? { node_id: payload.nodeId } : {}) })
-          .eq('id', itemId);
+          .eq('id', itemId)
+          .eq('validation_status', 'needs-review')
+          .select('id');
         if (err) return { ok: false, error: err.message };
+        if (!Array.isArray(decided) || decided.length === 0) return { ok: false, error: 'This mapping was already decided. Look again to see how.' };
       } else if (source === 'plan') {
         if (action === 'reject') {
           // 6.3: the one app-side write on a plan: proposed to rejected, under

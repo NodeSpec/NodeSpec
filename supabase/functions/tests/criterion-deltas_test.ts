@@ -176,9 +176,9 @@ Deno.test("applyCriterionDeltas writes only ticks, and only for known requiremen
   const fake = new FakeSupabase();
   fake.script("project_specifications", "select", { data: { id: "spec-1" } });
   fake.script("specification_requirements", "select", {
-    data: { id: "row-1", acceptance_criteria: [{ text: "a", met: false }] },
+    data: { id: "row-1", acceptance_criteria: [{ id: "c-a", text: "a", met: false }], updated_at: "t0" },
   });
-  fake.script("specification_requirements", "update", { data: null });
+  fake.script("rpc", "apply_criteria_ops", { data: { found: true, applied: 2, changed: true }, error: null });
   const result = await applyCriterionDeltas(fake, "p1", {
     deltas: {
       deltas: [
@@ -192,10 +192,14 @@ Deno.test("applyCriterionDeltas writes only ticks, and only for known requiremen
   });
   assertEquals(result.applied, 1);
   assertEquals(result.requirementsTouched, ["REQ-001"]);
-  const upd = fake.callsTo("specification_requirements", "update")[0].payload as Record<string, unknown>;
-  const criteria = upd.acceptance_criteria as Array<Record<string, unknown>>;
-  assertEquals(criteria[0].met, true);
-  assertEquals((criteria[0].provenance as Record<string, unknown>).commitSha, "deadbeef");
+  // AL.29: through the one locked writer, per criterion, with the read's row as the compare token.
+  assertEquals(fake.callsTo("specification_requirements", "update").length, 0, "never a whole-array write");
+  const call = fake.callsTo("rpc", "apply_criteria_ops")[0].payload as Record<string, unknown>;
+  assertEquals(call.p_requirement_id, "row-1");
+  assertEquals(call.p_expected_updated_at, "t0");
+  const ops = call.p_ops as Array<Record<string, unknown>>;
+  assertEquals(ops.map((o) => [o.op, o.criterion_id]), [["set_met", "c-a"], ["stamp", "c-a"]], "the untick writes nothing");
+  assertEquals((ops[1].value as Record<string, unknown>).commitSha, "deadbeef");
 });
 
 Deno.test("applyCriterionDeltas with nothing applicable touches NOTHING", async () => {
@@ -230,7 +234,9 @@ Deno.test("R5c: applying is an explicit card action, never part of the sweep", (
   assert(!/runDriftSweep[\s\S]{0,8000}applyCriterionDeltas\(/.test(drift),
     "the sweep must not apply deltas — one approval, never silent");
   assert(pull.includes("mode === 'apply-criteria'") || pull.includes("requestMode === 'apply-criteria'"));
-  assert(pull.includes("criteriaApplied"), "a card records that its criteria were applied (no double-apply)");
+  // AL.29: the stamp lives in applyCardTicks (driven in al29-criteria-lane_test.ts).
+  assert(pull.includes("applyCardTicks(serviceClient, integration.project_id, card, userId)"), "the card action applies through applyCardTicks");
+  assert(drift.includes("criteriaApplied: { at, count: result.applied }"), "a card records that its criteria were applied (no double-apply)");
 });
 
 // ── A2: the (manual) suffix round-trip (docs/WORK_LOOP_PLAN.md) ───────────────

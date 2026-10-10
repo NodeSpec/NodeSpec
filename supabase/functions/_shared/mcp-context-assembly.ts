@@ -8,7 +8,7 @@ import { resolveConfigChoice } from "./config-choice.ts";
 import { UNTRUSTED_ADVISORY, wrapField, wrapFieldNullable, wrapUntrusted } from "./untrusted-data.ts";
 import { generateTaskDocument, simpleHash } from "./task-document-generator.ts";
 import { collectInheritedScopes, type InheritedScope } from "./inherited-context.ts";
-import { generateTestDocument, getTestDocumentPath, findExistingTestArtifact, computeTestContextFingerprint, preserveTestStrategySection } from "./test-document-generator.ts";
+import { generateTestDocument, getTestDocumentPath, findExistingTestArtifact, computeTestContextFingerprint, carryAgentPlanContent } from "./test-document-generator.ts";
 import { liveNodeIdSet } from "./mapping-liveness.ts";
 import { loadNodeConstraints, loadConstraintsAndRules, constraintRef, type NodeConstraint } from "./node-constraints.ts";
 import { effectiveTreatment, treatmentForRole } from "./ontology.ts";
@@ -102,6 +102,8 @@ export interface RequirementContext {
   /** WS3: verification 'manual' = R5 tick+approval lane; absent = automated (D-2).
    *  Widened so ensureTestDocumentForRequirement forwards the lane to the generator. */
   acceptanceCriteria: Array<{ text: string; met?: boolean; verification?: string }>;
+  /** AL.28: the requirement's row id, so a plan that names it is found. */
+  rowId?: string;
 }
 
 export interface TargetContext {
@@ -1092,16 +1094,19 @@ export function findStoredTestDocument(
   graphData: GraphData,
   requirementId: string,
   requirementName: string,
-): { content: string; fingerprint?: unknown; stale?: boolean } | null {
+  requirementRowId?: string,
+): { content: string; raw: string; id?: string; fingerprint?: unknown; stale?: boolean } | null {
   // C4 step 5: lookup goes through findExistingTestArtifact (metadata.requirementId →
   // id-only path → legacy id+name path), never a recomputed path alone — renaming a
   // requirement must not orphan its stored plan.
-  const artifact = findExistingTestArtifact(graphData.artifacts, requirementId, requirementName);
+  const artifact = findExistingTestArtifact(graphData.artifacts, requirementId, requirementName, requirementRowId);
   if (artifact?.content) {
     return {
       // P0-7: this function is mcp-server-exclusive (verified); the stored artifact
       // itself is never mutated — only the returned copy is wrapped.
       content: wrapUntrusted(artifact.content),
+      raw: String(artifact.content),
+      ...(artifact.id ? { id: String(artifact.id) } : {}),
       fingerprint: artifact.metadata?.testContextFingerprint,
       stale: artifact.metadata?.stale === true,
     };
@@ -1109,20 +1114,8 @@ export function findStoredTestDocument(
   return null;
 }
 
-export function ensureTestDocumentForRequirement(
-  graphData: GraphData,
-  catalogs: CatalogData,
-  requirement: RequirementContext,
-  mappedNodeIds: string[],
-  projectVision?: string,
-): { content: string; fingerprint: unknown; isNew: boolean; refreshed?: boolean; rawContent?: string; path?: string } {
-  const existing = findStoredTestDocument(graphData, requirement.requirementId, requirement.name);
-  // Dogfood find 2026-09-02 (#3): a stored plan was served AS-IS on the word
-  // of its stored stale flag, so five plans kept reporting "noschema" after
-  // the schema landed — the read path never compared fingerprints, while the
-  // task-doc lane recomputes on every generate call. The freshness decision
-  // moves below, AFTER the current fingerprint exists to compare against.
-
+/** What a requirement's test plan is generated and fingerprinted from. */
+function testPlanInputs(graphData: GraphData, requirement: RequirementContext, mappedNodeIds: string[]) {
   const mappedNodes = mappedNodeIds
     .map((nid) => graphData.nodes[nid])
     .filter(Boolean)
@@ -1144,10 +1137,30 @@ export function ensureTestDocumentForRequirement(
     category: requirement.category,
     acceptanceCriteria: requirement.acceptanceCriteria || [],
   };
+  return { mappedNodes, sourceArtifacts, reqForGen };
+}
 
-  const fingerprint = computeTestContextFingerprint(
-    reqForGen, mappedNodes, sourceArtifacts, graphData, projectVision, catalogs,
-  );
+/** AL.29 (5.1): the fingerprint get_test_plan compares a stored plan's against;
+ *  readiness counts a plan out of date by the same rule. */
+export function testPlanFingerprint(graphData: GraphData, catalogs: CatalogData, requirement: RequirementContext, mappedNodeIds: string[]) {
+  const { mappedNodes, sourceArtifacts, reqForGen } = testPlanInputs(graphData, requirement, mappedNodeIds);
+  return computeTestContextFingerprint(reqForGen, mappedNodes, sourceArtifacts, graphData, catalogs);
+}
+
+export function ensureTestDocumentForRequirement(
+  graphData: GraphData,
+  catalogs: CatalogData,
+  requirement: RequirementContext,
+  mappedNodeIds: string[],
+): { content: string; fingerprint: unknown; isNew: boolean; refreshed?: boolean; rawContent?: string; path?: string; storedArtifactId?: string } {
+  const existing = findStoredTestDocument(graphData, requirement.requirementId, requirement.name, requirement.rowId);
+  // Dogfood find 2026-09-02 (#3): a stored plan was served AS-IS on the word
+  // of its stored stale flag, so five plans kept reporting "noschema" after
+  // the schema landed — the read path never compared fingerprints, while the
+  // task-doc lane recomputes on every generate call. The freshness decision
+  // moves below, AFTER the current fingerprint exists to compare against.
+  const { mappedNodes, sourceArtifacts, reqForGen } = testPlanInputs(graphData, requirement, mappedNodeIds);
+  const fingerprint = computeTestContextFingerprint(reqForGen, mappedNodes, sourceArtifacts, graphData, catalogs);
 
   if (existing) {
     const storedHash = (existing.fingerprint as { fingerprint?: string } | undefined)?.fingerprint;
@@ -1156,19 +1169,24 @@ export function ensureTestDocumentForRequirement(
       // (No comparable hash = legacy pre-fingerprint artifact: keep serving
       // it rather than churn every old plan; the push-time freshness gate
       // migrates those on the next push.)
-      return { content: existing.content, fingerprint: existing.fingerprint, isNew: false };
+      // AL.29: the stored document, unwrapped, so the caller can say what it still asks for.
+      return {
+        content: existing.content, fingerprint: existing.fingerprint, isNew: false, rawContent: existing.raw,
+        ...(existing.id ? { storedArtifactId: existing.id } : {}),
+      };
     }
     // Fingerprint moved (a schema landed, criteria changed, topology
     // shifted): regenerate NOW so a read never serves stale contract facts,
     // carrying the user-edited Test Strategy section forward verbatim --
-    // exactly what the push-time gate does. Persistence still belongs to
-    // that gate; this is a read.
-    const rawStored = findExistingTestArtifact(graphData.artifacts, requirement.requirementId, requirement.name);
+    // exactly what the push-time gate does. AL.29: get_test_plan files the
+    // result as a proposal, so the stored copy and git catch up.
+    const rawStored = findExistingTestArtifact(graphData.artifacts, requirement.requirementId, requirement.name, requirement.rowId);
     const regenerated = generateTestDocument({
-      requirement: reqForGen, graph: graphData, catalogs, mappedNodes, sourceArtifacts, projectVision,
+      requirement: reqForGen, graph: graphData, catalogs, mappedNodes, sourceArtifacts,
     });
+    // AL.29: the Test Strategy body and the test-case statements ride along.
     const merged = rawStored?.content
-      ? preserveTestStrategySection(regenerated, rawStored.content)
+      ? carryAgentPlanContent(regenerated, rawStored.content)
       : regenerated;
     return {
       content: wrapUntrusted(merged),
@@ -1177,11 +1195,12 @@ export function ensureTestDocumentForRequirement(
       refreshed: true,
       rawContent: merged,
       path: getTestDocumentPath(requirement.requirementId, requirement.name),
+      ...(rawStored?.id ? { storedArtifactId: String(rawStored.id) } : {}),
     };
   }
 
   const content = generateTestDocument({
-    requirement: reqForGen, graph: graphData, catalogs, mappedNodes, sourceArtifacts, projectVision,
+    requirement: reqForGen, graph: graphData, catalogs, mappedNodes, sourceArtifacts,
   });
 
   // P0-7: wrap the returned copy only (mcp-server-exclusive path; wrapUntrusted is

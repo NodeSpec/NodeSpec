@@ -14,14 +14,14 @@ import {
   getTaskDocumentPath,
   findExistingTaskArtifact,
   computeTaskContextFingerprint,
-  preserveImplementationContextSection,
+  carryAgentTaskContent,
   classifyNodeDeliverable,
   assessNodeReadiness,
   type ReadinessGap,
 } from "../../_shared/task-document-generator.ts";
 import { recordFingerprint } from "../../_shared/node-memory.ts";
 import { PatchOperationSchema } from "../../_shared/patch-schema.ts";
-import { loadTaskStateByNode, preserveAddedTasksSection, reconcileTaskItemOrphans } from "../../_shared/task-deltas.ts";
+import { loadTaskStateByNode, reconcileTaskItemOrphans, stepGaps, STEP_FORMAT } from "../../_shared/task-deltas.ts";
 import { loadNodeConstraints, loadConstraintsAndRules, constraintRef, countConstraintUse, asRuleGraph, workflowsServedByNodes, type NodeConstraint } from "../../_shared/node-constraints.ts";
 import { evaluateChecks, ruleSignals, repeatedLearnings, RECURRING_GAP_AT, SIGNAL_ASKS, type RuleView, type Violation } from "../../_shared/constraint-rules.ts";
 import { learningOf } from "../../_shared/node-memory.ts";
@@ -32,6 +32,8 @@ import { getEffectiveTier, getProjectTier } from "../../_shared/deployment.ts";
 import { workflowsAllowed } from "../../_shared/workflow-gate.ts";
 import { UNTRUSTED_ADVISORY, wrapField } from "../../_shared/untrusted-data.ts";
 import { liveNodeIdSet, filterMappingsToLiveNodes } from "../../_shared/mapping-liveness.ts";
+import { findExistingTestArtifact, statementGaps } from "../../_shared/plan-cases.ts";
+import { testPlanFingerprint, type RequirementContext } from "../../_shared/mcp-context-assembly.ts";
 import type { AuthResult, MCPResponse } from "../shared.ts";
 import { checkScope, resolveProjectByName, resolveBranchId, UUID_RE, actorLabel, credentialOf } from "../shared.ts";
 import { nodeLeasesOfOthers } from "./checkouts.ts";
@@ -241,6 +243,23 @@ export async function handleGenerateTaskDocs(
   const waitingOn = new Map<string, { id: string; by: string }>();
   for (const w of waiting) for (const k of w.keys) if (!waitingOn.has(k)) waitingOn.set(k, { id: w.id, by: w.by });
   const held: AnyRecord[] = [];
+  // AL.29: what each doc still asks of the agent, as it stands after this call:
+  // the open work orders with no step under them and the steps kept for review.
+  const workOrdersWithoutSteps: AnyRecord[] = [];
+  const stepsToReview: AnyRecord[] = [];
+  const noteSteps = (node: AnyRecord, artifactId: string, path: string, doc: string) => {
+    const gaps = stepGaps(doc);
+    const at = { nodeId: String(node.id), label: node.label, artifactId, path };
+    if (gaps.withoutSteps.length > 0) {
+      workOrdersWithoutSteps.push({ ...at, workOrders: gaps.withoutSteps.map((w) => ({ id: w.id, key: w.key, title: wrapField(w.title) })) });
+    }
+    if (gaps.toReview > 0) stepsToReview.push({ ...at, steps: gaps.toReview });
+  };
+  const stepFields = (): AnyRecord => ({
+    ...(workOrdersWithoutSteps.length > 0 ? { workOrdersWithoutSteps } : {}),
+    ...(stepsToReview.length > 0 ? { stepsToReview } : {}),
+    ...(workOrdersWithoutSteps.length > 0 || stepsToReview.length > 0 ? { stepFormat: STEP_FORMAT } : {}),
+  });
 
   const meta = (summary: string) => ({
     id: crypto.randomUUID(),
@@ -312,14 +331,11 @@ export async function handleGenerateTaskDocs(
     // N5.17: authored Implementation Context survives regeneration; REVIEW-NEEDED
     // is flagged only when the derived context actually changed (fingerprint flip),
     // not on a generator-version content diff. Y: so does the person's Added Tasks.
+    // AL.29: and so do the steps the agent wrote under each work order.
     const preserved = existing
-      ? preserveAddedTasksSection(
-        preserveImplementationContextSection(
-          content, String(existing.content ?? ''),
-          { flagReview: fp.fingerprint !== existing.metadata?.taskContextFingerprint?.fingerprint },
-        ),
-        String(existing.content ?? ''),
-      )
+      ? carryAgentTaskContent(content, String(existing.content ?? ''), {
+        flagReview: fp.fingerprint !== existing.metadata?.taskContextFingerprint?.fingerprint,
+      })
       : content;
     // A4: reconcile state rows against the keys this regeneration actually
     // emits — vanished keys are ORPHANED (never deleted), reappearing keys
@@ -331,6 +347,7 @@ export async function handleGenerateTaskDocs(
     } catch { /* non-fatal */ }
 
     if (existing) {
+      noteSteps(node, String(existing.id), String(existing.path ?? ''), preserved);
       if (existing.content === preserved) { alreadyFresh++; continue; }
       patches.push({
         type: 'update_artifact',
@@ -349,12 +366,14 @@ export async function handleGenerateTaskDocs(
       packetNodes.push(String(node.id));
     } else {
       const artifactId = crypto.randomUUID();
+      const path = getTaskDocumentPath(String(node.label ?? 'node'), String(node.id));
+      noteSteps(node, artifactId, path, content);
       patches.push({
         type: 'add_artifact',
         metadata: meta(`Generate task document for ${node.label}`),
         payload: {
           id: artifactId, nodeId: node.id, kind: 'task',
-          path: getTaskDocumentPath(String(node.label ?? 'node'), String(node.id)),
+          path,
           content, language: 'markdown', status: 'draft',
           description: `Implementation task document for ${node.label}`,
           createdAt: now, updatedAt: now,
@@ -364,13 +383,9 @@ export async function handleGenerateTaskDocs(
       explanations.push(`Generated task packet for ${node.label}: mapped requirements, contracts, neighbors, and technology context`);
       created++;
       packetNodes.push(String(node.id));
-      const currentLinks = Array.isArray(node.artifacts) ? node.artifacts : [];
-      patches.push({
-        type: 'update_node',
-        metadata: meta(`Link task document to ${node.label}`),
-        payload: { id: node.id, changes: { artifacts: [...currentLinks, artifactId] } },
-      });
-      explanations.push(`Link the task document artifact to ${node.label}`);
+      // AL.28: the add_artifact links the node itself; no update_node setting the
+      // node's whole list from this read (it failed under Auto, and could unlink
+      // a file another agent added to the node meanwhile).
     }
   }
 
@@ -391,6 +406,7 @@ export async function handleGenerateTaskDocs(
       success: true,
       data: {
         generated: 0, refreshed: 0, alreadyFresh, skipped,
+        ...stepFields(),
         message: 'All matching nodes already have up-to-date task documents.',
         nextAction: 'Nothing to accept. Push to ship the current packets; C1 keeps them fresh automatically.',
       },
@@ -435,6 +451,7 @@ export async function handleGenerateTaskDocs(
       proposalId, aiRunId,
       generated: created, refreshed, alreadyFresh, skipped,
       ...(held.length > 0 ? { held } : {}),
+      ...stepFields(),
       baseSequence,
       patchCount: patches.length,
       status: 'pending',
@@ -469,6 +486,11 @@ const GAP_REMEDIATIONS: Record<string, string> = {
   mapping: "Map existing requirements with map_requirement, or add missing ones upstream with create_requirement, then regenerate the task doc.",
   tests: "Call get_test_plan for each named requirement, re-run the failing/stale tests, and report outcomes via report_test_results — a fresh passing result flips the criterion met and clears staleness.",
   "container-edge": "An edge ends on a container (a host, a place or a group) instead of a node. Ask the user which node inside is meant, then propose update_edge moving that end to it (relatedNodeIds are the nodes inside). Stored edges are never rewritten for you.",
+  // AL.29 (5.1): the project rows for the bullets an agent writes.
+  steps: "Write each work order's steps under its task line in the node's task document, in the stepFormat generate_task_docs returns, and send them with propose_patches update_artifact passing base_sequence.",
+  statements: "Call get_test_plan for each named requirement and write a statement under each case in its testCasesWithoutStatements, in its statementFormat; send them with propose_patches update_artifact passing base_sequence.",
+  review: "Move each line under \"Steps to review\" or \"Statements to review\" to the work order or test case it now belongs to, or delete it, in the same update_artifact as other edits to that document.",
+  "test-plans": "Call get_test_plan for each named requirement: it serves the plan regenerated, with the statements and Test Strategy kept, and files the refresh for the user to accept.",
   constraint: "Each names a check this project holds to that the architecture breaks now. Change the architecture so it holds (propose_patches), or, when the break is intended, ask the user and file update_constraint { constraintId, addWaiver: { target, reason } } for them to accept. A refusing check stops only a proposal that adds a break; one already standing is reported here.",
 };
 
@@ -615,6 +637,16 @@ export async function handleGetBuildReadiness(
 
   const results: AnyRecord[] = [];
   const upstreamByNode = new Map<string, string[]>();
+  // AL.29 (5.1): what the task docs and test plans of the nodes read here still
+  // ask of an agent, counted with the readers generate_task_docs and
+  // get_test_plan answer with; a plan is out of date by get_test_plan's rule.
+  const asks = {
+    withoutSteps: 0, stepDocs: [] as string[],
+    withoutStatements: 0, statementPlans: [] as string[],
+    toReview: 0, reviewIn: [] as string[],
+    stalePlans: [] as string[],
+  };
+  const plansRead = new Set<string>();
   for (const node of leafNodes) {
     const reqs = requirementsByNode[node.id] ?? [];
     // deno-lint-ignore no-explicit-any
@@ -643,6 +675,27 @@ export async function handleGetBuildReadiness(
           detail: 'The task document is STALE — requirements or architecture changed since it was generated',
           resolveWith: 'Regenerate with generate_task_docs and ask the user to accept the refresh before building.',
         });
+      }
+    }
+
+    if (typeof existing?.content === 'string') {
+      const gaps = stepGaps(existing.content);
+      if (gaps.withoutSteps.length > 0) { asks.withoutSteps += gaps.withoutSteps.length; asks.stepDocs.push(String(node.label)); }
+      if (gaps.toReview > 0) { asks.toReview += gaps.toReview; asks.reviewIn.push(String(node.label)); }
+    }
+    for (const r of reqs) {
+      const reqId = String(r.requirementId);
+      if (plansRead.has(reqId)) continue;
+      plansRead.add(reqId);
+      const plan = findExistingTestArtifact((graph.artifacts ?? {}) as Record<string, AnyRecord>, reqId, String(r.name), requirementRowIdMap[reqId]);
+      if (typeof plan?.content !== 'string') continue;
+      const gaps = statementGaps(plan.content);
+      if (gaps.withoutStatements.length > 0) { asks.withoutStatements += gaps.withoutStatements.length; asks.statementPlans.push(reqId); }
+      if (gaps.toReview > 0) { asks.toReview += gaps.toReview; asks.reviewIn.push(reqId); }
+      const storedHash = (plan.metadata?.testContextFingerprint as AnyRecord | undefined)?.fingerprint;
+      // deno-lint-ignore no-explicit-any
+      if (storedHash && storedHash !== testPlanFingerprint(graph as any, catalogs, { ...(r as RequirementContext), rowId: requirementRowIdMap[reqId] }, requirementNodeMap[reqId] ?? []).fingerprint) {
+        asks.stalePlans.push(reqId);
       }
     }
 
@@ -736,6 +789,12 @@ export async function handleGetBuildReadiness(
   const projectAdvisories: Array<{ kind: string; count: number; detail: string }> = openCandidates > 0
     ? [{ kind: 'candidates', count: openCandidates, detail: `${openCandidates} outcome${openCandidates === 1 ? '' : 's'} under Work ${openCandidates === 1 ? 'has' : 'have'} never been made a requirement` }]
     : [];
+  // AL.29 (5.1): the bullets still to write, and the plans to refresh.
+  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  if (asks.withoutSteps > 0) projectAdvisories.push({ kind: 'steps', count: asks.withoutSteps, detail: `${plural(asks.withoutSteps, 'work order has', 'work orders have')} no step under ${asks.withoutSteps === 1 ? 'it' : 'them'} (task documents of ${asks.stepDocs.join(', ')})` });
+  if (asks.withoutStatements > 0) projectAdvisories.push({ kind: 'statements', count: asks.withoutStatements, detail: `${plural(asks.withoutStatements, 'test case has', 'test cases have')} no statement under ${asks.withoutStatements === 1 ? 'it' : 'them'} (test plans of ${asks.statementPlans.join(', ')})` });
+  if (asks.toReview > 0) projectAdvisories.push({ kind: 'review', count: asks.toReview, detail: `${plural(asks.toReview, 'step or statement waits', 'steps or statements wait')} for review, kept from a work order or criterion that was reworded or removed (${asks.reviewIn.join(', ')})` });
+  if (asks.stalePlans.length > 0) projectAdvisories.push({ kind: 'test-plans', count: asks.stalePlans.length, detail: `${plural(asks.stalePlans.length, 'stored test plan is', 'stored test plans are')} out of date (${asks.stalePlans.join(', ')})` });
 
   // AA.1: the chain, by plan. Project-wide on every call (a node filter
   // narrows the node rows, never the chain). Reported, never enforced: no
@@ -767,6 +826,7 @@ export async function handleGetBuildReadiness(
   if (chain) {
     for (const g of [...chain.blockers, ...chain.advisories]) remediations[g.kind] = CHAIN_REMEDIATIONS[g.kind];
   }
+  for (const a of projectAdvisories) if (GAP_REMEDIATIONS[a.kind]) remediations[a.kind] = GAP_REMEDIATIONS[a.kind];
   if (openCandidates > 0) {
     remediations.candidates = 'Read get_outcome_board: each pending candidate is an outcome the user has not decided on. Propose a promotion (checkout_task at level outcome, then propose_patches with promote_candidate) or ask the user to settle or dismiss it in the Work view of the app; nothing here blocks the build.';
   }
